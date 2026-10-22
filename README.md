@@ -16,7 +16,7 @@ user, disk layout, replacement shell, and registry values per hive.
 - [x] Generated autounattend.xml: local account, no OOBE, no Microsoft account, optional disk wipe + autologon
 - [x] QEMU test VM with Secure Boot and TPM 2.0
 - [x] Verified install end to end in the VM: unattended setup, specialize registry import, OOBE, first-logon shell switch, our shell running with no explorer.exe
-  - The verified run had internet, and OOBE's zero-day-patch check failed and needed one "Skip" click. The VM now runs offline (`restrict=on`), which should skip that step but hasn't had a full run yet. On real hardware: install offline, or hit "Try again".
+  - Fully hands-off offline (`restrict=on`): a headless run went from the ISO to our shell in ~47 minutes with no input. Online, OOBE's zero-day-patch check fails in the VM and waits for a "Skip" click. On real hardware: install offline, or hit "Try again".
 - [x] Rust shell v0, cross-compiled in the flake (`nix build .#shell`): top bar with a clock and reserved work area, Win+Enter opens a terminal (via a low-level keyboard hook; `RegisterHotKey` can't get Win+Enter even without explorer)
 - [x] libcosmic builds for Windows from Linux (`nix build .#cosmic-bar-prototype`); not run on Windows yet
 - [ ] Shell: system tray, window list, launcher, notifications
