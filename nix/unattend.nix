@@ -117,6 +117,20 @@ in
             <LogonCount>9999999</LogonCount>
           </AutoLogon>
         ''}
+        <!-- Runs elevated in the first real user session, after OOBE is done.
+             That session still gets explorer; the reboot makes the next one ours. -->
+        <FirstLogonCommands>
+          <SynchronousCommand wcm:action="add">
+            <Order>1</Order>
+            <CommandLine>${x ''cmd.exe /c "reg import ${setupDir}\shell.reg > ${setupDir}\firstlogon.log 2>&1"''}</CommandLine>
+            <Description>Replace explorer.exe as the shell</Description>
+          </SynchronousCommand>
+          <SynchronousCommand wcm:action="add">
+            <Order>2</Order>
+            <CommandLine>shutdown.exe /r /t 0</CommandLine>
+            <Description>Log in again under the new shell</Description>
+          </SynchronousCommand>
+        </FirstLogonCommands>
         <OOBE>
           <HideEULAPage>true</HideEULAPage>
           <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>

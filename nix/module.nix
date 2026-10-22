@@ -110,8 +110,20 @@ in
     };
 
     shell = mkOption {
-      type = types.str;
-      description = "Command line Winlogon starts as the user's shell instead of explorer.exe.";
+      type = types.attrTag {
+        command = mkOption {
+          type = types.str;
+          description = "Command line of something already on the system, e.g. cmd.exe.";
+        };
+        package = mkOption {
+          type = types.package;
+          description = ''
+            Its bin/ is installed to C:\Program Files\defenestrate, and its
+            meta.mainProgram becomes the shell.
+          '';
+        };
+      };
+      description = "What Winlogon starts as the user's shell instead of explorer.exe.";
     };
 
     registry = {
@@ -131,7 +143,6 @@ in
   };
 
   config = {
-    registry.software."Microsoft\\Windows NT\\CurrentVersion\\Winlogon".Shell.sz = config.shell;
     # 22H2+ OOBE stops at "connect to a network" without this. The interactive
     # escapes (bypassnro.cmd, ms-cxh:localonly) are gone since 24H2; the
     # registry value still works. Lesson from nixconf's saturn-windows-image.sh.
@@ -139,7 +150,27 @@ in
 
     build =
       let
-        regFiles = pkgs.callPackage ./regfiles.nix { inherit (config) registry; };
+        # Shell is a plain REG_SZ, so no %ProgramFiles%; setup always installs to C:.
+        shellCommand =
+          if config.shell ? package
+          then ''"C:\Program Files\defenestrate\${config.shell.package.meta.mainProgram}"''
+          else config.shell.command;
+
+        regFiles = pkgs.callPackage ./regfiles.nix {
+          files = {
+            software = { hive = "software"; keys = config.registry.software; };
+            system = { hive = "system"; keys = config.registry.system; };
+            defaultUser = { hive = "defaultUser"; keys = config.registry.defaultUser; };
+            # Applied by FirstLogonCommands instead of specialize: OOBE runs
+            # its own session as defaultuser0, and that session needs
+            # explorer. With the shell switched at specialize, OOBE died with
+            # "Why did my PC restart?".
+            shell = {
+              hive = "software";
+              keys."Microsoft\\Windows NT\\CurrentVersion\\Winlogon".Shell.sz = shellCommand;
+            };
+          };
+        };
         unattend = pkgs.writeText "autounattend.xml" (import ./unattend.nix {
           inherit lib config;
           productKey = genericKeys.${config.edition};
@@ -147,6 +178,7 @@ in
         iso = pkgs.callPackage ./iso.nix {
           inherit (config) source edition bootPrompt;
           inherit regFiles unattend;
+          shellPackage = config.shell.package or null;
         };
       in
       {

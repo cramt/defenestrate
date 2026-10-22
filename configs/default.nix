@@ -1,11 +1,11 @@
 # The distro itself: everything here is something stock Windows does that we
 # don't. Machine-specific settings (user, disk) belong in a per-machine config.
-{ ... }:
+{ packages, ... }:
 
 {
-  # Placeholder until the Rust shell exists. Explorer is still around as a
-  # program (`explorer .` opens a file window); it's just not the shell.
-  shell = "cmd.exe";
+  # Explorer is still around as a program (`explorer .` opens a file
+  # window); it's just not the shell anymore.
+  shell.package = packages.shell;
 
   registry.system = {
     # 24H2+ silently BitLockers the system drive on first sign-in and escrows

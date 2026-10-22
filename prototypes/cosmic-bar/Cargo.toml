@@ -1,0 +1,15 @@
+[package]
+name = "cosmic-bar"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[dependencies.libcosmic]
+git = "https://github.com/pop-os/libcosmic"
+rev = "430f3d48a97d8779f9c1985473912e594ccca1ae"
+# No wayland/x11/dbus: none of that exists on Windows. Without wgpu, iced
+# renders with tiny-skia on the CPU, which is plenty for a bar.
+default-features = false
+features = ["winit", "tokio", "multi-window"]

@@ -10,7 +10,9 @@ requireFile rec {
 
       1. Download it from https://www.microsoft.com/software-download/windows11
          ("Download Windows 11 Disk Image (ISO) for x64 devices", English)
-      2. nix-store --add-fixed sha256 ${name}
+      2. nix-store --add-root ./windows-iso.gcroot -r \
+           "$(nix-store --add-fixed sha256 ${name})"
+         (The root keeps garbage collection from deleting it again.)
 
     If Microsoft has moved on to a newer build, the hash won't match: update
     name and hash in nix/source.nix.

@@ -1,4 +1,4 @@
-{ lib, runCommand, _7zz, wimlib, hivex, cdrtools, source, edition, bootPrompt, regFiles, unattend }:
+{ lib, runCommand, _7zz, wimlib, hivex, xorriso, source, edition, bootPrompt, regFiles, unattend, shellPackage }:
 
 let
   efiBoot = if bootPrompt then "efisys.bin" else "efisys_noprompt.bin";
@@ -12,14 +12,14 @@ let
   # Merge each .reg into a scratch copy of the hive it targets. The copies are
   # thrown away (specialize.cmd applies the real thing on Windows), this just
   # makes a malformed .reg fail the build instead of a VM install 20 minutes in.
-  checkRegistry = lib.concatStrings (lib.mapAttrsToList (hive: path: ''
+  checkRegistry = lib.concatStrings (lib.mapAttrsToList (name: hive: ''
     hivexregedit --merge --prefix ${lib.escapeShellArg regFiles.roots.${hive}} \
-      hives/${baseNameOf path} ${regFiles}/ascii/${hive}.reg
-  '') hivePaths);
+      hives/${baseNameOf hivePaths.${hive}} ${regFiles}/ascii/${name}.reg
+  '') regFiles.hives);
 in
 runCommand "defenestrate.iso"
   {
-    nativeBuildInputs = [ _7zz wimlib hivex cdrtools ];
+    nativeBuildInputs = [ _7zz wimlib hivex xorriso ];
     # ~25 GB of scratch space and nothing a substituter would have.
     preferLocalBuild = true;
     allowSubstitutes = false;
@@ -46,8 +46,18 @@ runCommand "defenestrate.iso"
     sed 's/$/\r/' ${./specialize.cmd} > payload/specialize.cmd
     # Only adds new files. Replacing an existing file this way drops its
     # security descriptor, which is why the registry isn't edited offline.
-    wimlib-imagex update install.wim 1 --command="add payload /Windows/Setup/defenestrate" > /dev/null
-    mv install.wim iso/sources/install.wim
+    wimlib-imagex update install.wim 1 > /dev/null <<EOF
+    add payload /Windows/Setup/defenestrate
+    ${lib.optionalString (shellPackage != null) "add ${shellPackage}/bin '/Program Files/defenestrate'"}
+    EOF
+
+    # A single-edition install.wim is still ~7.5 GB, over ISO9660's 4 GiB
+    # file limit. Setup takes split images natively, which keeps the ISO
+    # plain ISO9660 and lets it be copied straight onto a FAT32 stick. (A
+    # mkisofs UDF image held the whole file, and Windows setup stalled at 0%
+    # without ever reading past its start.)
+    wimlib-imagex split install.wim iso/sources/install.swm 3800 > /dev/null
+    rm install.wim
 
     cp ${unattend} iso/autounattend.xml
 
@@ -62,15 +72,11 @@ runCommand "defenestrate.iso"
     add winpeshl.ini /Windows/System32/winpeshl.ini
     EOF
 
-    # A single-edition install.wim is still ~7.5 GB. ISO9660 can't hold a
-    # file over 4 GiB, so the image needs UDF, which xorriso can't write and
-    # cdrtools' mkisofs can.
     mkdir $out
-    mkisofs -quiet -iso-level 3 -UDF -J -joliet-long \
+    xorriso -as mkisofs -quiet -iso-level 3 -J -joliet-long \
       -V DEFENESTRATE_X64 \
-      -c boot.catalog -hide boot.catalog -hide-joliet boot.catalog -hide-udf boot.catalog \
+      -c boot.catalog -hide boot.catalog -hide-joliet boot.catalog \
       -b boot/etfsboot.com -no-emul-boot -boot-load-size 8 \
-      -eltorito-alt-boot -eltorito-platform efi -no-emul-boot \
-      -b efi/microsoft/boot/${efiBoot} \
+      -eltorito-alt-boot -e efi/microsoft/boot/${efiBoot} -no-emul-boot \
       -o $out/defenestrate.iso iso
   ''
