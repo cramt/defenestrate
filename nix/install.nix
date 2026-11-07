@@ -69,11 +69,19 @@ writeShellApplication {
     # real end, then grow Windows, the last partition, into the rest. sfdisk
     # resizes in place, keeping the partition GUID the BCD boots by.
     sfdisk --relocate gpt-bak-std "$dev"
-    echo ', +' | sfdisk --no-reread --wipe-partitions never -N 3 "$dev"
-    blockdev --rereadpt "$dev"
+    echo ', +' | sfdisk --wipe-partitions never -N 3 "$dev"
+    # sfdisk re-reads the table itself; a second BLKRRPART races udev's probe
+    # of the new partitions and fails with EBUSY. partx updates the kernel's
+    # view partition by partition, which works on a busy disk.
+    udevadm settle
+    partx -u "$dev"
     udevadm settle
     windows="$target-part3"
     [ -b "$windows" ] || die "$windows didn't show up after the resize"
+    # ntfsresize grows to whatever size the kernel reports, so a stale view
+    # would quietly leave Windows at the image's size.
+    [ "$(blockdev --getsize64 "$windows")" -gt "$image_size" ] \
+      || die "the kernel still sees $windows at its old size; rerun to finish"
     # Leaves the volume marked for a check, so Windows runs chkdsk once on
     # first boot. That's ntfsresize being careful, not a problem.
     echo y | ntfsresize --force --no-progress-bar "$windows" > /dev/null
