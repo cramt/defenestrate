@@ -1,12 +1,12 @@
-{ lib, writeShellApplication, qemu_kvm, swtpm, OVMFFull, util-linux, efibootmgr, gnugrep, coreutils, systemd, socat, iso, installTarget }:
+{ lib, writeShellApplication, util-linux, efibootmgr, gnugrep, coreutils, systemd, zstd, ntfs3g, image, installTarget }:
 
-# Installs onto a real disk with no boot media: setup runs in a VM that sees
-# that one disk and nothing else, and the VM stops at setup's first reboot.
-# Specialize and OOBE then run on the real machine, so Windows meets its own
-# hardware the normal way.
+# Flashes image.nix's whole-disk image onto a real disk, then grows Windows
+# to fill it. Like flashing an SD card: no VM touches the real disk. The
+# image stops before specialize, so Windows meets its real hardware on the
+# first boot the normal way.
 writeShellApplication {
   name = "defenestrate-install";
-  runtimeInputs = [ qemu_kvm swtpm util-linux efibootmgr gnugrep coreutils systemd socat ];
+  runtimeInputs = [ util-linux efibootmgr gnugrep coreutils systemd zstd ntfs3g ];
   text = ''
     die() { echo "defenestrate-install: $*" >&2; exit 1; }
 
@@ -40,6 +40,10 @@ writeShellApplication {
       [ -z "$(ls -A "$holders")" ] || die "$dev is in use by $(ls "$holders")"
     done
 
+    image_size=$(cat ${image}/size)
+    disk_size=$(( $(cat /sys/block/"$name"/size) * 512 ))
+    [ "$disk_size" -ge "$image_size" ] || die "$dev is $((disk_size >> 30)) GiB, the image needs $((image_size >> 30)) GiB"
+
     [ -d /sys/firmware/efi/efivars ] || die "not booted in UEFI mode, so there's no firmware boot entry to add"
     # Checked as the caller, then again as root: nix evaluates and builds
     # as you, and only writing the disk escalates.
@@ -53,108 +57,30 @@ writeShellApplication {
     read -rp "Type ERASE to install Windows onto it: " answer
     [ "$answer" = ERASE ] || die "not confirmed, nothing touched"
 
-    state=$(mktemp -d)
-    swtpm_pid=
-    qemu_pid=
-    cleanup() {
-      [ -z "$qemu_pid" ] || kill "$qemu_pid" 2>/dev/null || true
-      [ -z "$swtpm_pid" ] || kill "$swtpm_pid" 2>/dev/null || true
-      umount "$state/esp" 2>/dev/null || true
-      rm -rf "$state"
-    }
-    trap cleanup EXIT
+    # Discarding first means nothing of the old contents survives past the
+    # image, and the SSD knows the rest is free.
+    blkdiscard -f "$dev" || echo "discard unsupported, writing over the old contents"
+    echo "writing $((image_size >> 30)) GiB"
+    zstd -dc ${image}/windows.img.zst \
+      | dd of="$dev" bs=16M iflag=fullblock oflag=direct status=progress
+    sync
 
-    mkdir "$state/tpm" "$state/esp"
-    # The .ms variant ships Microsoft's Secure Boot keys pre-enrolled, which
-    # Windows 11 setup insists on alongside the TPM. Both are throwaway: the
-    # real machine's firmware and TPM take over at first boot.
-    install -m 644 ${OVMFFull.fd}/FV/OVMF_VARS.ms.fd "$state/OVMF_VARS.fd"
-    swtpm socket --tpm2 \
-      --tpmstate dir="$state/tpm" \
-      --ctrl type=unixio,path="$state/swtpm.sock" \
-      --terminate &
-    swtpm_pid=$!
-    while [ ! -S "$state/swtpm.sock" ]; do sleep 0.1; done
-
-    # NVMe, not vm.nix's SATA: the install has to boot on the real NVMe
-    # controller through the same inbox stornvme driver it was set up with.
-    # CD first, because the disk may still hold something bootable;
-    # -no-reboot means it only ever boots once, so setup can't loop.
-    # -no-reboot is also the whole trick: qemu exits at setup's first reboot,
-    # with the image applied and the disk's own ESP and BCD written.
-    # No network: the windowsPE pass needs none.
-    # cache=none: the disk is the real one, so writes must land.
-    # Headless, so it runs as root with no session to borrow, and you can walk
-    # away. The monitor socket is how the screen gets seen anyway.
-    qemu-system-x86_64 \
-      -name defenestrate-install \
-      -machine q35,smm=on,accel=kvm \
-      -global driver=cfi.pflash01,property=secure,value=on \
-      -global ICH9-LPC.disable_s3=1 \
-      -cpu host,hv-passthrough -smp 4 -m 8G \
-      -drive if=pflash,format=raw,unit=0,readonly=on,file=${OVMFFull.fd}/FV/OVMF_CODE.ms.fd \
-      -drive if=pflash,format=raw,unit=1,file="$state/OVMF_VARS.fd" \
-      -chardev socket,id=chrtpm,path="$state/swtpm.sock" \
-      -tpmdev emulator,id=tpm0,chardev=chrtpm \
-      -device tpm-crb,tpmdev=tpm0 \
-      -drive id=disk,file="$dev",if=none,format=raw,cache=none,aio=native \
-      -device nvme,drive=disk,serial=defenestrate,bootindex=1 \
-      -device ahci,id=ahci \
-      -drive id=cd,file=${iso}/defenestrate.iso,if=none,media=cdrom,readonly=on \
-      -device ide-cd,drive=cd,bus=ahci.0,bootindex=0 \
-      -nic none \
-      -device qemu-xhci -device usb-tablet \
-      -display none \
-      -monitor unix:"$state/monitor.sock",server=on,wait=off \
-      -no-reboot &
-    qemu_pid=$!
-
-    # Setup is unattended, so the only questions are "is it moving" and, if
-    # not, "what's on screen". Bytes written to the disk answer the first; a
-    # screenshot every 5 minutes, and on a 10 minute stall, the second.
-    shot=/tmp/defenestrate-install.png
-    rm -f "$shot"
-    screendump() {
-      echo "screendump $shot -f png" | socat - UNIX-CONNECT:"$state/monitor.sock" > /dev/null 2>&1 || true
-    }
-    written() {
-      local w
-      read -r _ _ _ _ _ _ w _ < "/sys/block/$name/stat"
-      echo "$w"
-    }
-    echo "setup is running headless; it stops by itself at its first reboot. Screen: $shot"
-    start=$(written)
-    last=$start
-    idle=0
-    ticks=0
-    while kill -0 "$qemu_pid" 2>/dev/null; do
-      sleep 30
-      now=$(written)
-      ticks=$((ticks + 1))
-      if [ "$now" = "$last" ]; then idle=$((idle + 30)); else idle=0; fi
-      last=$now
-      echo "$(date +%T)  $(( (now - start) * 512 / 1073741824 )) GiB written"
-      if [ $((ticks % 10)) = 0 ] || [ "$idle" = 600 ]; then screendump; fi
-      if [ "$idle" = 600 ]; then
-        echo "nothing written for 10 minutes; setup may be stuck on a dialog, see $shot"
-      fi
-    done
-    wait "$qemu_pid" || die "qemu exited with an error"
-    qemu_pid=
-
-    # Setup failing doesn't always end qemu with an error, so check the
-    # result rather than trusting the exit.
-    blockdev --rereadpt "$dev" 2>/dev/null || true
+    # The image is smaller than the disk: put the backup GPT at the disk's
+    # real end, then grow Windows, the last partition, into the rest. sfdisk
+    # resizes in place, keeping the partition GUID the BCD boots by.
+    sfdisk --relocate gpt-bak-std "$dev"
+    echo ', +' | sfdisk --no-reread --wipe-partitions never -N 3 "$dev"
+    blockdev --rereadpt "$dev"
     udevadm settle
-    esp="$target-part1"
-    [ -b "$esp" ] || die "setup didn't finish: $dev has no partition 1"
-    mount -o ro "$esp" "$state/esp" || die "setup didn't finish: $esp doesn't mount"
-    [ -f "$state/esp/EFI/Microsoft/Boot/bootmgfw.efi" ] || die "setup didn't finish: no Windows Boot Manager on $esp"
-    umount "$state/esp"
+    windows="$target-part3"
+    [ -b "$windows" ] || die "$windows didn't show up after the resize"
+    # Leaves the volume marked for a check, so Windows runs chkdsk once on
+    # first boot. That's ntfsresize being careful, not a problem.
+    echo y | ntfsresize --force --no-progress-bar "$windows" > /dev/null
 
-    # The VM's boot entry went away with its OVMF vars. Add one to the real
-    # firmware, unless it already has one for this ESP. --create-only leaves
+    # The image has no firmware entry of its own. --create-only leaves
     # BootOrder alone, so the existing OS still boots by default.
+    esp="$target-part1"
     partuuid=$(lsblk -no PARTUUID "$esp")
     [ -n "$partuuid" ] || die "$esp has no partition UUID, so there's nothing to point a boot entry at"
     if efibootmgr -v | grep -qi "$partuuid"; then
@@ -166,6 +92,6 @@ writeShellApplication {
       echo "added a \"Windows Boot Manager\" firmware entry for $esp"
     fi
 
-    echo "Setup's first stage is done. Boot the machine into Windows to finish it on the real hardware."
+    echo "Done. Boot it, offline, and Windows finishes setting itself up on this hardware."
   '';
 }

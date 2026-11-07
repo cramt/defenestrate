@@ -196,20 +196,25 @@ in
 
         unattend = mkUnattend config.disk;
         iso = mkIso { inherit unattend; inherit (config) bootPrompt; };
+
+        # For image.nix, whose VM sees one disk and nothing
+        # else: it's always DiskID 0, so wiping it unasked is safe whatever
+        # config.disk says (that one's for the ISO on a stick, next to the
+        # machine's other disks). The prompt goes because the VM never boots
+        # the CD twice.
+        soleDiskIso = mkIso {
+          unattend = mkUnattend { wipe.diskId = 0; };
+          bootPrompt = false;
+        };
+        image = pkgs.callPackage ./image.nix { iso = soleDiskIso; };
       in
       {
         inherit regFiles unattend iso;
         vm = pkgs.callPackage ./vm.nix { inherit iso; };
-        # install.nix hands the VM the target disk and nothing else, so it is
-        # always DiskID 0 and wiping it unasked is safe whatever config.disk
-        # says (that one's for the ISO on a stick, next to the machine's other
-        # disks). The prompt goes because the VM never boots the CD twice.
+        inherit image;
         install = pkgs.callPackage ./install.nix {
           inherit (config) installTarget;
-          iso = mkIso {
-            unattend = mkUnattend { wipe.diskId = 0; };
-            bootPrompt = false;
-          };
+          inherit image;
         };
       };
   };
