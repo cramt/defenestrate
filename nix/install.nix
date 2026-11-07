@@ -1,9 +1,9 @@
 { lib, writeShellApplication, util-linux, efibootmgr, gnugrep, coreutils, systemd, zstd, ntfs3g, image, installTarget }:
 
 # Flashes image.nix's whole-disk image onto a real disk, then grows Windows
-# to fill it. Like flashing an SD card: no VM touches the real disk. The
-# image stops before specialize, so Windows meets its real hardware on the
-# first boot the normal way.
+# to fill it. Like flashing an SD card: no VM touches the real disk, and
+# the image is a finished install, so the first boot only has to find the
+# real hardware, like after a motherboard swap.
 writeShellApplication {
   name = "defenestrate-install";
   runtimeInputs = [ util-linux efibootmgr gnugrep coreutils systemd zstd ntfs3g ];
@@ -100,6 +100,6 @@ writeShellApplication {
       echo "added a \"Windows Boot Manager\" firmware entry for $esp"
     fi
 
-    echo "Done. Boot it, offline, and Windows finishes setting itself up on this hardware."
+    echo "Done. Windows is fully set up on it; boot it and it comes up at the shell."
   '';
 }

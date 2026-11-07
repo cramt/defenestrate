@@ -1,4 +1,11 @@
-{ lib, config, productKey }:
+{ lib, config, productKey
+  # How first logon ends once the shell is switched. image.nix powers off
+  # instead, which is how its VM knows setup is done.
+, firstLogonEnd ? "reboot"
+}:
+
+assert lib.elem firstLogonEnd [ "reboot" "poweroff" ];
+
 
 let
   x = lib.escapeXML;
@@ -127,8 +134,8 @@ in
           </SynchronousCommand>
           <SynchronousCommand wcm:action="add">
             <Order>2</Order>
-            <CommandLine>shutdown.exe /r /t 0</CommandLine>
-            <Description>Log in again under the new shell</Description>
+            <CommandLine>shutdown.exe ${if firstLogonEnd == "reboot" then "/r" else "/s"} /t 0</CommandLine>
+            <Description>${if firstLogonEnd == "reboot" then "Log in again under the new shell" else "Done; the next logon gets the new shell"}</Description>
           </SynchronousCommand>
         </FirstLogonCommands>
         <OOBE>

@@ -183,9 +183,9 @@ in
             };
           };
         };
-        mkUnattend = disk: pkgs.writeText "autounattend.xml" (import ./unattend.nix {
+        mkUnattend = { disk, firstLogonEnd ? "reboot" }: pkgs.writeText "autounattend.xml" (import ./unattend.nix {
           config = config // { inherit disk; };
-          inherit lib;
+          inherit lib firstLogonEnd;
           productKey = genericKeys.${config.edition};
         });
         mkIso = { unattend, bootPrompt }: pkgs.callPackage ./iso.nix {
@@ -194,16 +194,20 @@ in
           shellPackage = config.shell.package or null;
         };
 
-        unattend = mkUnattend config.disk;
+        unattend = mkUnattend { inherit (config) disk; };
         iso = mkIso { inherit unattend; inherit (config) bootPrompt; };
 
         # For image.nix, whose VM sees one disk and nothing
         # else: it's always DiskID 0, so wiping it unasked is safe whatever
         # config.disk says (that one's for the ISO on a stick, next to the
-        # machine's other disks). The prompt goes because the VM never boots
-        # the CD twice.
+        # machine's other disks). The prompt goes because the disk is first in
+        # the VM's boot order, so the CD only boots while the disk is blank.
+        # First logon powers off, which is how image.nix knows setup is done.
         soleDiskIso = mkIso {
-          unattend = mkUnattend { wipe.diskId = 0; };
+          unattend = mkUnattend {
+            disk.wipe.diskId = 0;
+            firstLogonEnd = "poweroff";
+          };
           bootPrompt = false;
         };
         image = pkgs.callPackage ./image.nix { iso = soleDiskIso; };

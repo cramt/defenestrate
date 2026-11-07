@@ -56,14 +56,17 @@ It must set `user.name` and should leave `disk` at the default `interactive`.
 
 ### Installing onto a disk without a USB stick
 
-`build.image` is a whole-disk image built in the nix sandbox: setup runs in
-the VM above (KVM, `requiredSystemFeatures = [ "kvm" ]`) against a 64 GiB
-scratch disk and stops at its first reboot, so the image holds an applied
-Windows that hasn't met any hardware yet. The build log shows GiB written
-every 30 seconds; it fails on a 20 minute stall or after 2 hours and leaves
-screenshots in the build dir for `--keep-failed`. The disk is NVMe, so the
-image boots on a real NVMe controller through the inbox driver it was
-installed with.
+`build.image` is a whole-disk image built in the nix sandbox: the whole
+unattended install (setup, specialize, OOBE, first logon's shell switch)
+runs in the VM above (KVM, `requiredSystemFeatures = [ "kvm" ]`) against a
+64 GiB scratch disk, offline, and first logon powers the VM off instead of
+rebooting. The build then checks Windows Boot Manager is on the image's ESP
+and reads first logon's log straight off NTFS with sleuthkit, which also
+proves BitLocker didn't touch C:. Progress goes to the build log; a 20
+minute stall or 3 hours fails the build and leaves screenshots in the build
+dir for `--keep-failed`. ~10 minutes on a desktop. The disk is NVMe, so the
+image boots on a real NVMe controller through the same inbox driver, no
+sysprep.
 
 `build.install` flashes it, like an SD card image:
 
@@ -81,10 +84,12 @@ partition, resized in place so the partition GUID the BCD boots by stays)
 with `ntfsresize`. Last it adds a "Windows Boot Manager" firmware entry
 without touching the boot order.
 
-Windows takes the whole disk, its own ESP included. Boot it offline, for the
-same OOBE reason as the VM: specialize, OOBE and the shell switch run on the
-real hardware with no input. Verified on a file the size of a 1 TB disk put
-through exactly these steps: from first boot to the shell in ~6 minutes.
+Windows takes the whole disk, its own ESP included. The first boot finds the
+real hardware the way Windows does after a motherboard swap and comes up at
+the shell: on a file the size of a 1 TB disk put through exactly these
+steps, booted with fresh firmware variables and a fresh TPM, that took ~2
+minutes with no setup screens. Network or not doesn't matter, OOBE already
+ran offline in the sandbox.
 
 ## How it works
 
