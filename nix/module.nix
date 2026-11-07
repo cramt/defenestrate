@@ -138,6 +138,17 @@ in
       description = "What Winlogon starts as the user's shell instead of explorer.exe.";
     };
 
+    fonts = mkOption {
+      type = types.listOf types.path;
+      default = [ ];
+      example = lib.literalExpression ''[ "''${pkgs.nerd-fonts.iosevka}/share/fonts/truetype/NerdFonts/Iosevka/IosevkaNerdFontMono-Regular.ttf" ]'';
+      description = ''
+        TrueType/OpenType files installed for everyone into C:\Windows\Fonts.
+        File names must be unique there: an existing file can't be replaced
+        safely (see the README on ACLs).
+      '';
+    };
+
     registry = {
       software = regHive "HKLM\\SOFTWARE.";
       system = regHive ''
@@ -159,6 +170,14 @@ in
     # escapes (bypassnro.cmd, ms-cxh:localonly) are gone since 24H2; the
     # registry value still works. Lesson from nixconf's saturn-windows-image.sh.
     registry.software."Microsoft\\Windows\\CurrentVersion\\OOBE".BypassNRO.dword = 1;
+
+    # A file in C:\Windows\Fonts only exists to GDI once it's listed here.
+    # The value name is just a label; the data is the file name.
+    registry.software."Microsoft\\Windows NT\\CurrentVersion\\Fonts" = lib.listToAttrs (map
+      (file:
+        let name = builtins.unsafeDiscardStringContext (baseNameOf file);
+        in lib.nameValuePair "${lib.removeSuffix ".ttf" (lib.removeSuffix ".otf" name)} (TrueType)" { sz = name; })
+      config.fonts);
 
     build =
       let
@@ -190,6 +209,7 @@ in
         });
         mkIso = { unattend, bootPrompt }: pkgs.callPackage ./iso.nix {
           inherit (config) source edition;
+          inherit (config) fonts;
           inherit regFiles unattend bootPrompt;
           shellPackage = config.shell.package or null;
         };

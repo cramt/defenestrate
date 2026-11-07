@@ -1,4 +1,4 @@
-{ lib, runCommand, _7zz, wimlib, hivex, xorriso, source, edition, bootPrompt, regFiles, unattend, shellPackage }:
+{ lib, runCommand, _7zz, wimlib, hivex, xorriso, source, edition, bootPrompt, regFiles, unattend, shellPackage, fonts }:
 
 let
   efiBoot = if bootPrompt then "efisys.bin" else "efisys_noprompt.bin";
@@ -49,6 +49,7 @@ runCommand "defenestrate.iso"
     wimlib-imagex update install.wim 1 > /dev/null <<EOF
     add payload /Windows/Setup/defenestrate
     ${lib.optionalString (shellPackage != null) "add ${shellPackage}/bin '/Program Files/defenestrate'"}
+    ${lib.concatMapStrings (f: "add ${f} '/Windows/Fonts/${baseNameOf f}'\n") fonts}
     EOF
 
     # A single-edition install.wim is still ~7.5 GB, over ISO9660's 4 GiB

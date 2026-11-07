@@ -4,16 +4,22 @@
 
 #![windows_subsystem = "windows"]
 
+use std::cell::Cell;
 use std::os::windows::process::CommandExt;
 use std::process::Command;
 
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, DT_LEFT, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DrawTextW,
-    EndPaint, InvalidateRect, PAINTSTRUCT, SetBkMode, SetTextColor, TRANSPARENT,
+    BeginPaint, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, CreateSolidBrush,
+    DEFAULT_CHARSET, DT_LEFT, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DrawTextW, EndPaint, FF_MODERN,
+    FIXED_PITCH, FW_SEMIBOLD, HFONT, InvalidateRect, OUT_TT_PRECIS, PAINTSTRUCT, SelectObject,
+    SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::SystemInformation::GetLocalTime;
+use windows::Win32::UI::HiDpi::{
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem, SetProcessDpiAwarenessContext,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LWIN, VK_RETURN, VK_RWIN};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetMessageW,
@@ -25,13 +31,29 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{Result, w};
 
+// In 96 DPI pixels; scaled to the real DPI at startup.
 const BAR_HEIGHT: i32 = 28;
+const FONT_HEIGHT: i32 = 16;
+const PADDING: i32 = 10;
+// Installed by configs/default.nix (`fonts`). GDI quietly substitutes
+// something else if it's missing.
+const FONT_FACE: windows::core::PCWSTR = w!("Iosevka NFM");
 const CLOCK_TIMER: usize = 1;
 const CREATE_NEW_CONSOLE: u32 = 0x10;
 
 // COLORREF is 0x00BBGGRR.
 const BACKGROUND: COLORREF = COLORREF(0x0020_1818);
 const FOREGROUND: COLORREF = COLORREF(0x00E0_E0E0);
+
+thread_local! {
+    // Only the GUI thread paints, and the font lives as long as the shell.
+    static FONT: Cell<HFONT> = const { Cell::new(HFONT(std::ptr::null_mut())) };
+    static DPI: Cell<i32> = const { Cell::new(96) };
+}
+
+fn scaled(px: i32) -> i32 {
+    px * DPI.get() / 96
+}
 
 fn main() {
     if let Err(e) = run() {
@@ -42,6 +64,29 @@ fn main() {
 
 fn run() -> Result<()> {
     unsafe {
+        // Without this Windows bitmap-stretches the bar on any scaled
+        // display, which is blurry whatever the font. Before any window.
+        if let Err(e) = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) {
+            log(&format!("becoming DPI aware failed: {e}"));
+        }
+        DPI.set(GetDpiForSystem() as i32);
+        FONT.set(CreateFontW(
+            -scaled(FONT_HEIGHT),
+            0,
+            0,
+            0,
+            FW_SEMIBOLD.0 as i32,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET,
+            OUT_TT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY,
+            (FIXED_PITCH.0 | FF_MODERN.0) as u32,
+            FONT_FACE,
+        ));
+
         let instance = GetModuleHandleW(None)?;
         let class = w!("DefenestrateBar");
         RegisterClassW(&WNDCLASSW {
@@ -62,7 +107,7 @@ fn run() -> Result<()> {
             0,
             0,
             width,
-            BAR_HEIGHT,
+            scaled(BAR_HEIGHT),
             None,
             None,
             Some(instance.into()),
@@ -98,7 +143,7 @@ fn run() -> Result<()> {
 unsafe fn reserve_bar_space(width: i32) -> Result<()> {
     let mut work_area = RECT {
         left: 0,
-        top: BAR_HEIGHT,
+        top: scaled(BAR_HEIGHT),
         right: width,
         bottom: unsafe { GetSystemMetrics(SM_CYSCREEN) },
     };
@@ -162,8 +207,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let hdc = BeginPaint(hwnd, &mut ps);
             let mut rect = RECT::default();
             let _ = GetClientRect(hwnd, &mut rect);
-            rect.left += 10;
-            rect.right -= 10;
+            rect.left += scaled(PADDING);
+            rect.right -= scaled(PADDING);
+            SelectObject(hdc, FONT.get().into());
             SetBkMode(hdc, TRANSPARENT);
             SetTextColor(hdc, FOREGROUND);
             let mut title: Vec<u16> = "defenestrate".encode_utf16().collect();

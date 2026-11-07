@@ -1,11 +1,17 @@
 # The distro itself: everything here is something stock Windows does that we
 # don't. Machine-specific settings (user, disk) belong in a per-machine config.
-{ packages, ... }:
+{ packages, pkgs, ... }:
 
 {
   # Explorer is still around as a program (`explorer .` opens a file
   # window); it's just not the shell anymore.
   shell.package = packages.shell;
+
+  # The Mono variant: conhost only offers fixed-pitch fonts, and the plain
+  # Nerd Font has double-width icons that aren't. The shell's bar draws with
+  # this family too (FONT_FACE in shell/src/main.rs).
+  fonts = map (style: "${pkgs.nerd-fonts.iosevka}/share/fonts/truetype/NerdFonts/Iosevka/IosevkaNerdFontMono-${style}.ttf")
+    [ "Regular" "Bold" "Italic" "BoldItalic" ];
 
   registry.system = {
     # 24H2+ silently BitLockers the system drive on first sign-in and escrows
@@ -22,6 +28,9 @@
   };
 
   registry.software = {
+    # Conhost's font picker only lists TrueType faces named here.
+    "Microsoft\\Windows NT\\CurrentVersion\\Console\\TrueTypeFont"."000".sz = "Iosevka NFM";
+
     # Pro clamps 0 ("Security") up to 1 ("Required"); only Enterprise/Education
     # honour 0. Still the lowest this edition goes.
     "Policies\\Microsoft\\Windows\\DataCollection".AllowTelemetry.dword = 0;
@@ -53,5 +62,17 @@
     "Software\\Policies\\Microsoft\\Windows\\Explorer".DisableSearchBoxSuggestions.dword = 1;
 
     "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced".HideFileExt.dword = 0;
+
+    # Every console window's defaults. FontFamily 0x36 is TMPF_TRUETYPE |
+    # FF_MODERN; FontSize is the cell height in the high word.
+    "Console" = {
+      FaceName.sz = "Iosevka NFM";
+      FontFamily.dword = 54;
+      FontWeight.dword = 400;
+      FontSize.dword = 18 * 65536;
+    };
+    # powershell.exe's own subkeys pin Lucida Console over the defaults above.
+    "Console\\%SystemRoot%_System32_WindowsPowerShell_v1.0_powershell.exe".FaceName = null;
+    "Console\\%SystemRoot%_SysWOW64_WindowsPowerShell_v1.0_powershell.exe".FaceName = null;
   };
 }
