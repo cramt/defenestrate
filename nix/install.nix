@@ -1,4 +1,4 @@
-{ lib, writeShellApplication, qemu_kvm, swtpm, OVMFFull, util-linux, efibootmgr, gnugrep, coreutils, systemd, iso, installTarget }:
+{ lib, writeShellApplication, qemu_kvm, swtpm, OVMFFull, util-linux, efibootmgr, gnugrep, coreutils, systemd, socat, iso, installTarget }:
 
 # Installs onto a real disk with no boot media: setup runs in a VM that sees
 # that one disk and nothing else, and the VM stops at setup's first reboot.
@@ -6,7 +6,7 @@
 # hardware the normal way.
 writeShellApplication {
   name = "defenestrate-install";
-  runtimeInputs = [ qemu_kvm swtpm util-linux efibootmgr gnugrep coreutils systemd ];
+  runtimeInputs = [ qemu_kvm swtpm util-linux efibootmgr gnugrep coreutils systemd socat ];
   text = ''
     die() { echo "defenestrate-install: $*" >&2; exit 1; }
 
@@ -55,7 +55,9 @@ writeShellApplication {
 
     state=$(mktemp -d)
     swtpm_pid=
+    qemu_pid=
     cleanup() {
+      [ -z "$qemu_pid" ] || kill "$qemu_pid" 2>/dev/null || true
       [ -z "$swtpm_pid" ] || kill "$swtpm_pid" 2>/dev/null || true
       umount "$state/esp" 2>/dev/null || true
       rm -rf "$state"
@@ -82,6 +84,8 @@ writeShellApplication {
     # with the image applied and the disk's own ESP and BCD written.
     # No network: the windowsPE pass needs none.
     # cache=none: the disk is the real one, so writes must land.
+    # Headless, so it runs as root with no session to borrow, and you can walk
+    # away. The monitor socket is how the screen gets seen anyway.
     qemu-system-x86_64 \
       -name defenestrate-install \
       -machine q35,smm=on,accel=kvm \
@@ -100,9 +104,45 @@ writeShellApplication {
       -device ide-cd,drive=cd,bus=ahci.0,bootindex=0 \
       -nic none \
       -device qemu-xhci -device usb-tablet \
-      -no-reboot
+      -display none \
+      -monitor unix:"$state/monitor.sock",server=on,wait=off \
+      -no-reboot &
+    qemu_pid=$!
 
-    # Closing the window mid-setup also ends qemu cleanly, so check the
+    # Setup is unattended, so the only questions are "is it moving" and, if
+    # not, "what's on screen". Bytes written to the disk answer the first; a
+    # screenshot every 5 minutes, and on a 10 minute stall, the second.
+    shot=/tmp/defenestrate-install.png
+    rm -f "$shot"
+    screendump() {
+      echo "screendump $shot -f png" | socat - UNIX-CONNECT:"$state/monitor.sock" > /dev/null 2>&1 || true
+    }
+    written() {
+      local w
+      read -r _ _ _ _ _ _ w _ < "/sys/block/$name/stat"
+      echo "$w"
+    }
+    echo "setup is running headless; it stops by itself at its first reboot. Screen: $shot"
+    start=$(written)
+    last=$start
+    idle=0
+    ticks=0
+    while kill -0 "$qemu_pid" 2>/dev/null; do
+      sleep 30
+      now=$(written)
+      ticks=$((ticks + 1))
+      if [ "$now" = "$last" ]; then idle=$((idle + 30)); else idle=0; fi
+      last=$now
+      echo "$(date +%T)  $(( (now - start) * 512 / 1073741824 )) GiB written"
+      if [ $((ticks % 10)) = 0 ] || [ "$idle" = 600 ]; then screendump; fi
+      if [ "$idle" = 600 ]; then
+        echo "nothing written for 10 minutes; setup may be stuck on a dialog, see $shot"
+      fi
+    done
+    wait "$qemu_pid" || die "qemu exited with an error"
+    qemu_pid=
+
+    # Setup failing doesn't always end qemu with an error, so check the
     # result rather than trusting the exit.
     blockdev --rereadpt "$dev" 2>/dev/null || true
     udevadm settle

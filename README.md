@@ -68,6 +68,9 @@ nix run .#…build.install -- /dev/disk/by-id/nvme-…   # or any whole disk, by
 ```
 
 It checks the disk as you and re-runs itself under sudo only to write it.
+QEMU runs headless: the terminal shows GiB written every 30 seconds, and
+the VM's screen is saved to `/tmp/defenestrate-install.png` every 5 minutes
+and on a 10 minute stall.
 
 Windows takes the whole disk, its own ESP included, because the VM can't see
 the machine's other disks. That's also why it can wipe disk 0 without asking,
