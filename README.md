@@ -22,7 +22,7 @@ user, disk layout, replacement shell, and registry values per hive.
 - [ ] Shell: system tray, window list, launcher, notifications
 - [ ] Provisioned AppX removal (Outlook, Teams, Copilot, …)
 - [ ] WSL2 with a nix-built kernel and NixOS-WSL, mounting the Linux drives
-- [ ] Output an installed partition image instead of an ISO (replaces nixconf's `saturn-windows-image.sh`)
+- [ ] Install straight onto a real disk from Linux, no boot media (`build.install`, replaces nixconf's `saturn-windows-image.sh`). Written and guardrails tested; not yet run on hardware
 
 ## Usage
 
@@ -53,6 +53,31 @@ spent exporting the edition out of the 8 GB `install.wim`.
 
 For real hardware, build a config with `lib.x86_64-linux.mkDistro [ ./configs/default.nix ./my-machine.nix ]`.
 It must set `user.name` and should leave `disk` at the default `interactive`.
+
+### Installing onto a disk without a USB stick
+
+`build.install` runs setup in the VM above against a real disk and nothing
+else, then stops at setup's first reboot. Specialize and OOBE run when the
+machine itself boots the disk, so Windows meets its real hardware the normal
+way. The VM presents the disk as NVMe, so this is for NVMe targets: Windows
+boots on the controller it was installed through.
+
+```sh
+nix run .#…build.install                         # erases installTarget
+nix run .#…build.install -- /dev/disk/by-id/nvme-…   # or any whole disk, by-id
+```
+
+It checks the disk as you and re-runs itself under sudo only to write it.
+
+Windows takes the whole disk, its own ESP included, because the VM can't see
+the machine's other disks. That's also why it can wipe disk 0 without asking,
+whatever `disk` is set to. The runner refuses a disk that isn't addressed
+by-id, a partition, and anything with a mounted filesystem, a member of a
+mounted multi-device filesystem, or an md/LVM/dm holder. It asks you to type
+`ERASE`, then adds a "Windows Boot Manager" firmware entry without touching
+the boot order. Leave the machine offline for the first boot, for the same
+OOBE reason as the VM.
+
 
 ## How it works
 

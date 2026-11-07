@@ -99,6 +99,18 @@ in
       default.interactive = { };
     };
 
+    installTarget = mkOption {
+      # by-id only: kernel names (nvme0n1, sda) reorder between boots, and
+      # this is the disk build.install erases.
+      type = types.nullOr (types.strMatching "/dev/disk/by-id/[^/]+");
+      default = null;
+      example = "/dev/disk/by-id/nvme-Samsung_SSD_970_EVO_1TB_S5H9NS1NB05355E";
+      description = ''
+        Whole disk `nix run .#…build.install` erases and installs onto when
+        given no argument. Ignored by the ISO, which goes by `disk`.
+      '';
+    };
+
     bootPrompt = mkOption {
       type = types.bool;
       default = true;
@@ -171,19 +183,34 @@ in
             };
           };
         };
-        unattend = pkgs.writeText "autounattend.xml" (import ./unattend.nix {
-          inherit lib config;
+        mkUnattend = disk: pkgs.writeText "autounattend.xml" (import ./unattend.nix {
+          config = config // { inherit disk; };
+          inherit lib;
           productKey = genericKeys.${config.edition};
         });
-        iso = pkgs.callPackage ./iso.nix {
-          inherit (config) source edition bootPrompt;
-          inherit regFiles unattend;
+        mkIso = { unattend, bootPrompt }: pkgs.callPackage ./iso.nix {
+          inherit (config) source edition;
+          inherit regFiles unattend bootPrompt;
           shellPackage = config.shell.package or null;
         };
+
+        unattend = mkUnattend config.disk;
+        iso = mkIso { inherit unattend; inherit (config) bootPrompt; };
       in
       {
         inherit regFiles unattend iso;
         vm = pkgs.callPackage ./vm.nix { inherit iso; };
+        # install.nix hands the VM the target disk and nothing else, so it is
+        # always DiskID 0 and wiping it unasked is safe whatever config.disk
+        # says (that one's for the ISO on a stick, next to the machine's other
+        # disks). The prompt goes because the VM never boots the CD twice.
+        install = pkgs.callPackage ./install.nix {
+          inherit (config) installTarget;
+          iso = mkIso {
+            unattend = mkUnattend { wipe.diskId = 0; };
+            bootPrompt = false;
+          };
+        };
       };
   };
 }
