@@ -1,4 +1,4 @@
-{ lib, writeShellApplication, util-linux, efibootmgr, gnugrep, coreutils, systemd, zstd, ntfs3g, image, installTarget }:
+{ lib, writeShellApplication, util-linux, efibootmgr, gnugrep, gnused, coreutils, systemd, zstd, ntfs3g, image, installTarget }:
 
 # Flashes image.nix's whole-disk image onto a real disk, then grows Windows
 # to fill it. Like flashing an SD card: no VM touches the real disk, and
@@ -6,7 +6,7 @@
 # real hardware, like after a motherboard swap.
 writeShellApplication {
   name = "defenestrate-install";
-  runtimeInputs = [ util-linux efibootmgr gnugrep coreutils systemd zstd ntfs3g ];
+  runtimeInputs = [ util-linux efibootmgr gnugrep gnused coreutils systemd zstd ntfs3g ];
   text = ''
     die() { echo "defenestrate-install: $*" >&2; exit 1; }
 
@@ -85,6 +85,20 @@ writeShellApplication {
     # Leaves the volume marked for a check, so Windows runs chkdsk once on
     # first boot. That's ntfsresize being careful, not a problem.
     echo y | ntfsresize --force --no-progress-bar "$windows" > /dev/null
+
+    # Each flash gives the ESP a new partition UUID, which leaves the
+    # previous flash's entry pointing at nothing. Drop every Windows Boot
+    # Manager entry whose ESP isn't on any disk here; ones for a Windows that
+    # still exists, on this disk or another, stay.
+    udevadm settle
+    efibootmgr -v \
+      | sed -nE 's/^Boot([0-9A-Fa-f]{4})\*? Windows Boot Manager.*HD\([0-9]+,GPT,([0-9a-fA-F-]+),.*/\1 \2/p' \
+      | while read -r num uuid; do
+          if [ ! -e "/dev/disk/by-partuuid/$uuid" ]; then
+            efibootmgr --bootnum "$num" --delete-bootnum > /dev/null
+            echo "removed stale firmware entry Boot$num (its ESP $uuid is gone)"
+          fi
+        done
 
     # The image has no firmware entry of its own. --create-only leaves
     # BootOrder alone, so the existing OS still boots by default.
