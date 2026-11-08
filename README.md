@@ -7,7 +7,7 @@ the rest of Microsoft's opinions configured away.
 Everything is declared in `configs/` as typed Nix options: edition, locale,
 user, disk layout, replacement shell, and registry values per hive.
 
-![First boot of a flashed image: no explorer, our bar, Win+Enter opened conhost, all in Iosevka](docs/first-boot.png)
+![Tiled terminals and Firefox, the Super-tap launcher open, all in Iosevka](docs/first-boot.png)
 
 ## Status
 
@@ -17,12 +17,13 @@ user, disk layout, replacement shell, and registry values per hive.
 - [x] QEMU test VM with Secure Boot and TPM 2.0
 - [x] Verified install end to end in the VM: unattended setup, specialize registry import, OOBE, first-logon shell switch, our shell running with no explorer.exe
   - Fully hands-off offline (`restrict=on`): a headless run went from the ISO to our shell in ~47 minutes with no input. Online, OOBE's zero-day-patch check fails in the VM and waits for a "Skip" click. On real hardware: install offline, or hit "Try again".
-- [x] Rust shell v0, cross-compiled in the flake (`nix build .#shell`): top bar with a clock and reserved work area, per-monitor DPI aware, Win+Enter opens a terminal (via a low-level keyboard hook; `RegisterHotKey` can't get Win+Enter even without explorer)
-- [x] Iosevka Nerd Font Mono installed system-wide (`fonts`) and used by the bar and every console. Windows 11 hands consoles to Windows Terminal once it's registered, which ignores console fonts, so the default terminal is pinned to conhost
+- [x] Rust shell, cross-compiled in the flake (`nix build .#shell`): a tiling window manager with COSMIC's tiling and keybindings, and a Super-tap launcher over the Start Menu's shortcuts. Seen tiling, focusing, moving and launching in the VM; resize mode, workspaces, float and maximize are unit-tested only so far
+  - Primary monitor only. Minimized windows drop out of the tiling and, with no taskbar, can't be brought back. Elevated windows and dialogs float. A crashing shell leaves windows on other workspaces hidden
+- [x] Iosevka Nerd Font Mono installed system-wide (`fonts`) and used by the shell and every console. Windows 11 hands consoles to Windows Terminal once it's registered, which ignores console fonts, so the default terminal is pinned to conhost
 - [x] libcosmic builds for Windows from Linux (`nix build .#cosmic-bar-prototype`); not run on Windows yet
 - [x] Declarative apps (`apps`, `wingetApps`, `storeApps`) pinned in `apps.lock.json` by `nix run .#lock-apps`; baked installers go into the image and install on the first real boot. Verified with Firefox on a flashed-image boot with no network: installed ~3 minutes after logon, task gone afterwards
-  - Not yet observed: the online `wingetApps`/`storeApps` path (the test VMs are offline). `wingetApps` installs a pinned version, which fails once winget-pkgs drops it; store apps get whatever is current. Baked apps that are bootstrappers (Steam, League's Riot Client) still download the real thing at runtime. No launcher in the shell yet, so installed apps start from cmd
-- [ ] Shell: system tray, window list, launcher, notifications
+  - Not yet observed: the online `wingetApps`/`storeApps` path (the test VMs are offline). `wingetApps` installs a pinned version, which fails once winget-pkgs drops it; store apps get whatever is current. Baked apps that are bootstrappers (Steam, League's Riot Client) still download the real thing at runtime.
+- [ ] Shell: system tray, notifications, multiple monitors, COSMIC's stacking and swap mode
 - [ ] Provisioned AppX removal (Outlook, Teams, Copilot, …)
 - [ ] WSL2 with a nix-built kernel and NixOS-WSL, mounting the Linux drives
 - [x] Whole-disk image built in the nix sandbox (`build.image`) and flashed from Linux with no boot media (`build.install`), replacing nixconf's `saturn-windows-image.sh`. Flash-and-boot verified on a disk-sized file, and booted to the shell on real hardware
@@ -133,6 +134,29 @@ while winget registers and the network comes up), next to the shell rather
 than in front of it. It logs to `C:\Windows\Setup\defenestrate\apps.log`,
 reruns at the next logon if anything failed, and deletes itself once
 everything is in.
+
+### Keys
+
+COSMIC's defaults (`cosmic-comp`'s `data/keybindings.ron`), where the shell
+has the feature:
+
+| Keys | Does |
+| --- | --- |
+| Super (tap), Super+/, Super+A | Launcher: type to filter, Enter starts it, or runs the text as a command if nothing matches |
+| Super+H/J/K/L or arrows | Focus left/down/up/right |
+| Super+Shift+direction | Move the window |
+| Super+Ctrl+direction | Previous/next workspace (with Shift: take the window along) |
+| Super+1–9, Super+Shift+1–9 | Switch to / send the window to a workspace |
+| Super+O | Flip the split the window is in |
+| Super+M, Super+G, Super+Y | Maximize, float the window, tiling off for the workspace |
+| Super+R (Super+Shift+R) | Resize mode: directions grow (shrink) that edge, Enter/Escape leave |
+| Super+Q | Close |
+| Super+T, Super+Enter | Terminal |
+| Super+F | Home folder |
+| Super+Escape, Super+Shift+Escape | Lock, log out |
+
+Win+L would lock the session before the shell could see it, so the
+default config sets `DisableLockWorkstation`; Super+Escape locks instead.
 
 ## How it works
 

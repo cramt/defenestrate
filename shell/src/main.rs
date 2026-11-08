@@ -1,231 +1,192 @@
-//! v0 of the shell Winlogon starts instead of explorer.exe: a top bar with a
-//! clock, and Win+Enter for a terminal. Mostly here to prove the
-//! cross-compile → image → Winlogon path end to end.
+//! The shell Winlogon starts instead of explorer.exe: a tiling window
+//! manager (wm.rs, desktop.rs), a Super-tap launcher (launcher.rs), and
+//! Super+Enter for a terminal. Keys are in keys.rs.
 
-#![windows_subsystem = "windows"]
+#![cfg_attr(windows, windows_subsystem = "windows")]
+#![cfg_attr(not(windows), allow(dead_code))]
 
-use std::cell::Cell;
-use std::os::windows::process::CommandExt;
-use std::process::Command;
+mod fuzzy;
+mod tree;
+mod wm;
 
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, CreateSolidBrush,
-    DEFAULT_CHARSET, DT_LEFT, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DrawTextW, EndPaint, FF_MODERN,
-    FIXED_PITCH, FW_SEMIBOLD, HFONT, InvalidateRect, OUT_TT_PRECIS, PAINTSTRUCT, SelectObject,
-    SetBkMode, SetTextColor, TRANSPARENT,
-};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::SystemInformation::GetLocalTime;
-use windows::Win32::UI::HiDpi::{
-    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem, SetProcessDpiAwarenessContext,
-};
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LWIN, VK_RETURN, VK_RWIN};
-use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetMessageW,
-    GetSystemMetrics, HC_ACTION, IDC_ARROW, KBDLLHOOKSTRUCT, LoadCursorW, MSG, PostQuitMessage,
-    RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SPI_SETWORKAREA, SPIF_SENDCHANGE, SetTimer,
-    SetWindowsHookExW, SystemParametersInfoW, TranslateMessage, WH_KEYBOARD_LL, WM_DESTROY,
-    WM_KEYDOWN, WM_PAINT, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_POPUP, WS_VISIBLE,
-};
-use windows::core::{Result, w};
+#[cfg(windows)]
+mod desktop;
+#[cfg(windows)]
+mod keys;
+#[cfg(windows)]
+mod launcher;
 
-// In 96 DPI pixels; scaled to the real DPI at startup.
-const BAR_HEIGHT: i32 = 28;
-const FONT_HEIGHT: i32 = 16;
-const PADDING: i32 = 10;
-// Installed by configs/default.nix (`fonts`). GDI quietly substitutes
-// something else if it's missing.
-const FONT_FACE: windows::core::PCWSTR = w!("Iosevka NFM");
-const CLOCK_TIMER: usize = 1;
-const CREATE_NEW_CONSOLE: u32 = 0x10;
-
-// COLORREF is 0x00BBGGRR.
-const BACKGROUND: COLORREF = COLORREF(0x0020_1818);
-const FOREGROUND: COLORREF = COLORREF(0x00E0_E0E0);
-
-thread_local! {
-    // Only the GUI thread paints, and the font lives as long as the shell.
-    static FONT: Cell<HFONT> = const { Cell::new(HFONT(std::ptr::null_mut())) };
-    static DPI: Cell<i32> = const { Cell::new(96) };
-}
-
-fn scaled(px: i32) -> i32 {
-    px * DPI.get() / 96
-}
-
+#[cfg(not(windows))]
 fn main() {
-    if let Err(e) = run() {
+    eprintln!("defenestrate-shell only runs on Windows; this build is for the tests");
+}
+
+#[cfg(windows)]
+use windows_main::{log, scaled};
+
+#[cfg(windows)]
+fn main() {
+    if let Err(e) = windows_main::run() {
         log(&format!("fatal: {e}"));
         std::process::exit(1);
     }
 }
 
-fn run() -> Result<()> {
-    unsafe {
-        // Without this Windows bitmap-stretches the bar on any scaled
-        // display, which is blurry whatever the font. Before any window.
-        if let Err(e) = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) {
-            log(&format!("becoming DPI aware failed: {e}"));
-        }
-        DPI.set(GetDpiForSystem() as i32);
-        FONT.set(CreateFontW(
-            -scaled(FONT_HEIGHT),
-            0,
-            0,
-            0,
-            FW_SEMIBOLD.0 as i32,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET,
-            OUT_TT_PRECIS,
-            CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY,
-            (FIXED_PITCH.0 | FF_MODERN.0) as u32,
-            FONT_FACE,
-        ));
+#[cfg(windows)]
+mod windows_main {
+    use std::cell::Cell;
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
 
-        let instance = GetModuleHandleW(None)?;
-        let class = w!("DefenestrateBar");
-        RegisterClassW(&WNDCLASSW {
-            lpfnWndProc: Some(wndproc),
-            hInstance: instance.into(),
-            lpszClassName: class,
-            hCursor: LoadCursorW(None, IDC_ARROW)?,
-            hbrBackground: CreateSolidBrush(BACKGROUND),
-            ..Default::default()
-        });
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::Graphics::Gdi::{
+        CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, DEFAULT_CHARSET, FF_MODERN, FIXED_PITCH, FW_NORMAL, OUT_TT_PRECIS,
+    };
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::System::Shutdown::{EWX_LOGOFF, ExitWindowsEx, LockWorkStation, SHUTDOWN_REASON};
+    use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem, SetProcessDpiAwarenessContext};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, MSG, PostQuitMessage, RegisterClassW, TranslateMessage,
+        WM_DESTROY, WM_DISPLAYCHANGE, WM_ENDSESSION, WNDCLASSW, WS_EX_TOOLWINDOW, WS_POPUP,
+    };
+    use windows::core::{Result, w};
 
-        let width = GetSystemMetrics(SM_CXSCREEN);
-        let bar = CreateWindowExW(
-            WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-            class,
-            w!("defenestrate"),
-            WS_POPUP | WS_VISIBLE,
-            0,
-            0,
-            width,
-            scaled(BAR_HEIGHT),
-            None,
-            None,
-            Some(instance.into()),
-            None,
-        )?;
+    use crate::keys::{self, Action, WM_ACTION};
+    use crate::{desktop, launcher};
 
-        // Everything past the window is optional. A shell that exits leaves
-        // the user staring at an empty desktop, so these only get logged.
-        if let Err(e) = reserve_bar_space(width) {
-            log(&format!("reserving the work area failed: {e}"));
-        }
-        // RegisterHotKey can't have Win+Enter even with explorer gone
-        // ("Hot key is already registered"), so keys are taken from a
-        // low-level hook, which sees them before any registered hotkey.
-        // The hook lives as long as this thread's message loop runs.
-        if let Err(e) = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), Some(instance.into()), 0) {
-            log(&format!("installing the keyboard hook failed: {e}"));
-        }
-        SetTimer(Some(bar), CLOCK_TIMER, 1000, None);
+    // In 96 DPI pixels; scaled to the real DPI at startup.
+    const GAP: i32 = 8;
+    const FONT_HEIGHT: i32 = 18;
+    // Installed by configs/default.nix (`fonts`). GDI quietly substitutes
+    // something else if it's missing.
+    const FONT_FACE: windows::core::PCWSTR = w!("Iosevka NFM");
+    const CREATE_NEW_CONSOLE: u32 = 0x10;
 
-        let mut msg = MSG::default();
-        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+    thread_local! {
+        static DPI: Cell<i32> = const { Cell::new(96) };
+    }
+
+    pub fn scaled(px: i32) -> i32 {
+        px * DPI.get() / 96
+    }
+
+    /// Appends to %LOCALAPPDATA%\defenestrate\shell.log. There is no
+    /// console and no explorer to show a dialog, so a file is the only
+    /// place to look.
+    pub fn log(line: &str) {
+        use std::io::Write;
+        let Some(dir) = std::env::var_os("LOCALAPPDATA").map(|d| std::path::PathBuf::from(d).join("defenestrate")) else {
+            return;
+        };
+        let _ = std::fs::create_dir_all(&dir);
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("shell.log")) {
+            let _ = writeln!(f, "{line}");
         }
     }
-    Ok(())
-}
 
-/// Shrinks the work area so maximized windows stop at the bar. The AppBar
-/// API would be the polite way, but explorer is what implements it, so a
-/// replacement shell has to set the work area itself.
-unsafe fn reserve_bar_space(width: i32) -> Result<()> {
-    let mut work_area = RECT {
-        left: 0,
-        top: scaled(BAR_HEIGHT),
-        right: width,
-        bottom: unsafe { GetSystemMetrics(SM_CYSCREEN) },
-    };
-    unsafe {
-        SystemParametersInfoW(
-            SPI_SETWORKAREA,
-            0,
-            Some((&raw mut work_area).cast()),
-            SPIF_SENDCHANGE,
-        )
-    }
-}
-
-/// Appends to %LOCALAPPDATA%\\defenestrate\\shell.log. There is no console
-/// and no explorer to show a dialog, so a file is the only place to look.
-fn log(line: &str) {
-    use std::io::Write;
-    let Some(dir) = std::env::var_os("LOCALAPPDATA").map(|d| std::path::PathBuf::from(d).join("defenestrate")) else {
-        return;
-    };
-    let _ = std::fs::create_dir_all(&dir);
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("shell.log")) {
-        let _ = writeln!(f, "{line}");
-    }
-}
-
-fn clock_text() -> Vec<u16> {
-    let now = unsafe { GetLocalTime() };
-    format!("{:02}:{:02}", now.wHour, now.wMinute)
-        .encode_utf16()
-        .collect()
-}
-
-fn win_held() -> bool {
-    // The high bit of GetAsyncKeyState is "down right now".
-    let down = |vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY| unsafe {
-        GetAsyncKeyState(vk.0.into()) < 0
-    };
-    down(VK_LWIN) || down(VK_RWIN)
-}
-
-unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    let key_down = matches!(wparam.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
-    if code == HC_ACTION as i32 && key_down {
-        let key = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
-        if key.vkCode == u32::from(VK_RETURN.0) && win_held() {
-            if let Err(e) = Command::new("cmd.exe").creation_flags(CREATE_NEW_CONSOLE).spawn() {
-                log(&format!("starting a terminal failed: {e}"));
+    pub fn run() -> Result<()> {
+        unsafe {
+            // Without this Windows bitmap-stretches our windows on any scaled
+            // display, and hands us scaled coordinates for everyone else's.
+            if let Err(e) = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) {
+                log(&format!("becoming DPI aware failed: {e}"));
             }
-            // Swallowed, so whatever else owns Win+Enter never sees it.
-            return LRESULT(1);
+            DPI.set(GetDpiForSystem() as i32);
+            let font = CreateFontW(
+                -scaled(FONT_HEIGHT),
+                0,
+                0,
+                0,
+                FW_NORMAL.0 as i32,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET,
+                OUT_TT_PRECIS,
+                CLIP_DEFAULT_PRECIS,
+                CLEARTYPE_QUALITY,
+                (FIXED_PITCH.0 | FF_MODERN.0) as u32,
+                FONT_FACE,
+            );
+
+            let instance = GetModuleHandleW(None)?.into();
+            let class = w!("DefenestrateShell");
+            RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(wndproc), hInstance: instance, lpszClassName: class, ..Default::default() });
+            // Never shown. A real top-level window rather than a message-only
+            // one, because only those get broadcasts like WM_DISPLAYCHANGE.
+            let main = CreateWindowExW(WS_EX_TOOLWINDOW, class, w!("defenestrate"), WS_POPUP, 0, 0, 0, 0, None, None, Some(instance), None)?;
+
+            // Past the main window everything is optional: a shell that exits
+            // leaves the user with nothing, so failures only get logged.
+            if let Err(e) = launcher::create(instance, font) {
+                log(&format!("creating the launcher failed: {e}"));
+            }
+            desktop::start(main, scaled(GAP));
+            if let Err(e) = keys::install(instance, main) {
+                log(&format!("installing the keyboard hook failed: {e}"));
+            }
+
+            let mut msg = MSG::default();
+            while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+        Ok(())
+    }
+
+    /// Starts `program` in the user's home, as COSMIC's shortcuts do.
+    fn spawn(program: &str, args: &[&str], flags: u32) {
+        let mut cmd = Command::new(program);
+        cmd.args(args).creation_flags(flags);
+        if let Some(home) = std::env::var_os("USERPROFILE") {
+            cmd.current_dir(home);
+        }
+        if let Err(e) = cmd.spawn() {
+            log(&format!("starting {program} failed: {e}"));
         }
     }
-    unsafe { CallNextHookEx(None, code, wparam, lparam) }
-}
 
-unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    match msg {
-        WM_PAINT => unsafe {
-            let mut ps = PAINTSTRUCT::default();
-            let hdc = BeginPaint(hwnd, &mut ps);
-            let mut rect = RECT::default();
-            let _ = GetClientRect(hwnd, &mut rect);
-            rect.left += scaled(PADDING);
-            rect.right -= scaled(PADDING);
-            SelectObject(hdc, FONT.get().into());
-            SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, FOREGROUND);
-            let mut title: Vec<u16> = "defenestrate".encode_utf16().collect();
-            DrawTextW(hdc, &mut title, &mut rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-            DrawTextW(hdc, &mut clock_text(), &mut rect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-            let _ = EndPaint(hwnd, &ps);
-            LRESULT(0)
-        },
-        WM_TIMER => unsafe {
-            let _ = InvalidateRect(Some(hwnd), None, true);
-            LRESULT(0)
-        },
-        WM_DESTROY => unsafe {
-            PostQuitMessage(0);
-            LRESULT(0)
-        },
-        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    unsafe extern "system" fn wndproc(window: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        match msg {
+            desktop::WM_WINEVENT => {
+                desktop::on_event(wparam.0 as u32, HWND(lparam.0 as *mut _));
+                LRESULT(0)
+            }
+            WM_ACTION => {
+                for action in keys::take() {
+                    match action {
+                        Action::Launcher => launcher::toggle(),
+                        Action::Terminal => spawn("cmd.exe", &[], CREATE_NEW_CONSOLE),
+                        // Explorer isn't the shell, but it still opens folder windows.
+                        Action::HomeFolder => spawn("explorer.exe", &["."], 0),
+                        Action::Lock => {
+                            if let Err(e) = unsafe { LockWorkStation() } {
+                                log(&format!("locking failed: {e}"));
+                            }
+                        }
+                        Action::LogOut => {
+                            if let Err(e) = unsafe { ExitWindowsEx(EWX_LOGOFF, SHUTDOWN_REASON(0)) } {
+                                log(&format!("logging out failed: {e}"));
+                            }
+                        }
+                        Action::Wm(c) => desktop::command(c),
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_DISPLAYCHANGE => {
+                desktop::screen_changed();
+                LRESULT(0)
+            }
+            WM_ENDSESSION | WM_DESTROY => {
+                desktop::release();
+                if msg == WM_DESTROY {
+                    unsafe { PostQuitMessage(0) };
+                }
+                LRESULT(0)
+            }
+            _ => unsafe { DefWindowProcW(window, msg, wparam, lparam) },
+        }
     }
 }

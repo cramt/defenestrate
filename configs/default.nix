@@ -58,6 +58,11 @@
       RotatingLockScreenOverlayEnabled.dword = 0;
     };
 
+    # Win+L locks the session before the shell's keyboard hook can swallow
+    # it, and the shell uses Super+L for COSMIC's "focus right". Super+Escape
+    # locks instead (shell/src/keys.rs).
+    "Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System".DisableLockWorkstation.dword = 1;
+
     # Bing results in local search.
     "Software\\Policies\\Microsoft\\Windows\\Explorer".DisableSearchBoxSuggestions.dword = 1;
 
