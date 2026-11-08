@@ -49,6 +49,7 @@ let
           hash = mkOption { type = types.strMatching "sha256-[A-Za-z0-9+/]{43}="; };
           file = mkOption { type = types.strMatching "[A-Za-z0-9+._?=-]+"; };
           installerType = mkOption { type = types.enum [ "msi" "wix" "nullsoft" "inno" "burn" "exe" ]; };
+          scope = mkOption { type = types.enum [ "machine" "user" "unspecified" ]; };
           args = mkOption { type = types.str; };
           successCodes = mkOption { type = types.nonEmptyListOf types.int; };
         };

@@ -1,5 +1,5 @@
 {
-  "wingetPkgsRev": "397720dad6a8f44078ad4cc3c7e65f6ac7e9749b",
+  "wingetPkgsRev": "81526bc309bb44ad86cdda6f846be833873c84e6",
   "apps": {
     "Mozilla.Firefox": {
       "baked": {
@@ -8,6 +8,7 @@
         "hash": "sha256-h3aIe3mSWrvdQH/N/iV9g4K1TiS+UqZGZCa5WoBNZ5A=",
         "file": "Mozilla.Firefox-159.0.exe",
         "installerType": "nullsoft",
+        "scope": "machine",
         "args": "/S /PreventRebootRequired=true",
         "successCodes": [
           0

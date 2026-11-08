@@ -16,7 +16,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, EnumWindows, GA_ROOT, GW_OWNER,
     GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetSystemMetrics, GetWindow, GetWindowLongPtrW, GetWindowRect,
     GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed, PostMessageW, SM_CXSCREEN, SM_CYSCREEN, SPI_SETWORKAREA,
-    SPIF_SENDCHANGE, SW_HIDE, SW_RESTORE, SW_SHOWNA, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOZORDER,
+    SW_HIDE, SW_RESTORE, SW_SHOWNA, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOZORDER,
     SetForegroundWindow, SetWindowPos, ShowWindowAsync, SystemParametersInfoW, WINEVENT_OUTOFCONTEXT,
     WINEVENT_SKIPOWNPROCESS, WM_APP, WM_CLOSE, WS_CHILD, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_THICKFRAME,
 };
@@ -52,10 +52,13 @@ pub fn start(events_to: HWND, gap: i32) {
     ELEVATED.set(is_elevated(unsafe { GetCurrentProcess() }));
     let area = screen();
     // A shell that sets the work area owns it; the previous shell (or the
-    // bar this one used to have) may have left part of it reserved.
+    // bar this one used to have) may have left part of it reserved. No
+    // SPIF_SENDCHANGE: that broadcasts WM_SETTINGCHANGE and waits on every
+    // window, and on a first boot a busy installer stalled it long enough
+    // that the shell never got as far as its keyboard hook.
     unsafe {
         let mut full = RECT { left: area.left, top: area.top, right: area.right, bottom: area.bottom };
-        if let Err(e) = SystemParametersInfoW(SPI_SETWORKAREA, 0, Some((&raw mut full).cast()), SPIF_SENDCHANGE) {
+        if let Err(e) = SystemParametersInfoW(SPI_SETWORKAREA, 0, Some((&raw mut full).cast()), Default::default()) {
             log(&format!("resetting the work area failed: {e}"));
         }
     }

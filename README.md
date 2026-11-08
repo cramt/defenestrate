@@ -18,7 +18,7 @@ user, disk layout, replacement shell, and registry values per hive.
 - [x] Verified install end to end in the VM: unattended setup, specialize registry import, OOBE, first-logon shell switch, our shell running with no explorer.exe
   - Fully hands-off offline (`restrict=on`): a headless run went from the ISO to our shell in ~47 minutes with no input. Online, OOBE's zero-day-patch check fails in the VM and waits for a "Skip" click. On real hardware: install offline, or hit "Try again".
 - [x] Rust shell, cross-compiled in the flake (`nix build .#shell`): a tiling window manager with COSMIC's tiling and keybindings, and a Super-tap launcher over the Start Menu's shortcuts. Seen tiling, focusing, moving and launching in the VM; resize mode, workspaces, float and maximize are unit-tested only so far
-  - Primary monitor only. Minimized windows drop out of the tiling and, with no taskbar, can't be brought back. Elevated windows and dialogs float. A crashing shell leaves windows on other workspaces hidden
+  - Primary monitor only. Minimized windows drop out of the tiling and, with no taskbar, can't be brought back. Elevated windows and dialogs float, and while an elevated window has focus the shell's keys don't work (Windows doesn't give a non-elevated keyboard hook their input). A crashing shell leaves windows on other workspaces hidden
 - [x] Iosevka Nerd Font Mono installed system-wide (`fonts`) and used by the shell and every console. Windows 11 hands consoles to Windows Terminal once it's registered, which ignores console fonts, so the default terminal is pinned to conhost
 - [x] libcosmic builds for Windows from Linux (`nix build .#cosmic-bar-prototype`); not run on Windows yet
 - [x] Declarative apps (`apps`, `wingetApps`, `storeApps`) pinned in `apps.lock.json` by `nix run .#lock-apps`; baked installers go into the image and install on the first real boot. Verified with Firefox on a flashed-image boot with no network: installed ~3 minutes after logon, task gone afterwards
@@ -127,13 +127,20 @@ fixes it.
 
 The build `fetchurl`s every baked installer into the image under
 `C:\Windows\Setup\defenestrate\apps`. The image's first logon (in the
-sandbox) registers a scheduled task that runs at the user's next logon,
-elevated, as the user: the machine's first real boot. It installs the baked
-apps from disk, then the winget/store ones (retrying for up to an hour
-while winget registers and the network comes up), next to the shell rather
-than in front of it. It logs to `C:\Windows\Setup\defenestrate\apps.log`,
-reruns at the next logon if anything failed, and deletes itself once
-everything is in.
+sandbox) registers two scheduled tasks that run at the user's next logon,
+the machine's first real boot, next to the shell rather than in front of it:
+
+- As SYSTEM, in session 0: machine-wide installers. Logs to
+  `C:\Windows\Setup\defenestrate\apps.log`. Not elevated in the user's
+  session, because the shell's keyboard hook gets no keys while an elevated
+  window has focus, and the installers held it.
+- As the plain user: per-user installers (the lock records each installer's
+  scope), which break when elevated, then winget/store apps, retrying for up
+  to an hour while winget registers and the network comes up. Logs to
+  `%LOCALAPPDATA%\defenestrate\apps.log`.
+
+Each reruns at the next logon if anything failed and deletes itself once its
+apps are in.
 
 ### Keys
 
@@ -156,7 +163,9 @@ has the feature:
 | Super+Escape, Super+Shift+Escape | Lock, log out |
 
 Win+L would lock the session before the shell could see it, so the
-default config sets `DisableLockWorkstation`; Super+Escape locks instead.
+default config sets `DisableLockWorkstation`. That blocks `LockWorkStation()`
+too, so Super+Escape locks by disconnecting the session (`tsdiscon`), which
+shows the same lock screen and reconnects to the same session on sign-in.
 
 ## How it works
 

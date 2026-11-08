@@ -63,10 +63,23 @@ struct Baked {
     /// Store name, and the file name on the machine.
     file: String,
     installer_type: InstallerType,
+    /// Decides how it's run: per-user installers break when elevated
+    /// (Discord's Squirrel Update.exe crashes with 0xC0000005), so those
+    /// run as the plain user, everything else elevated.
+    scope: Scope,
     /// Appended verbatim to the command line: Windows hands programs one
     /// string, not argv, and manifests write switches that way.
     args: String,
     success_codes: Vec<i64>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+#[serde(rename_all = "lowercase")]
+enum Scope {
+    Machine,
+    User,
+    /// The manifest doesn't say.
+    Unspecified,
 }
 
 /// The installer types that can run unattended from a local file. msix,
@@ -286,15 +299,15 @@ fn bake(id: &str, version: &str, manifest: &Manifest) -> Result<Baked> {
             Some(l) if l.eq_ignore_ascii_case("en-US") => 0,
             Some(_) => 1,
         };
-        let scope = match f.scope.as_ref().or(d.scope.as_ref()).map(String::as_str) {
-            Some("machine") => 0,
-            None => 1,
-            Some(_) => 2,
+        let (rank, scope) = match f.scope.as_ref().or(d.scope.as_ref()).map(String::as_str) {
+            Some("machine") => (0, Scope::Machine),
+            None => (1, Scope::Unspecified),
+            Some(_) => (2, Scope::User),
         };
-        candidates.push(((arch, locale, scope), i, ty));
+        candidates.push(((arch, locale, rank), i, ty, scope));
     }
     candidates.sort_by_key(|c| c.0);
-    let Some(&(_, installer, ty)) = candidates.first() else {
+    let Some(&(_, installer, ty, scope)) = candidates.first() else {
         return Err(format!(
             "{id} {version}: no x64/neutral/x86 installer of a type that installs offline (has: {}). Lock it with --winget instead.",
             if seen_types.is_empty() { "none for this architecture".to_owned() } else { seen_types.join(", ") }
@@ -352,7 +365,7 @@ fn bake(id: &str, version: &str, manifest: &Manifest) -> Result<Baked> {
         .into());
     }
 
-    Ok(Baked { version: version.to_owned(), url, hash, file, installer_type: ty, args, success_codes })
+    Ok(Baked { version: version.to_owned(), url, hash, file, installer_type: ty, scope, args, success_codes })
 }
 
 fn sri_from_hex(hex: &str) -> Option<String> {
@@ -410,7 +423,7 @@ fn resolve(gh: &GitHub, rev: &str, id: &str, kind: Kind) -> Result<LockedApp> {
         }
     };
     eprintln!("{id}: {}", match &app {
-        LockedApp::Baked(b) => format!("{}, baked {:?} installer, args {}", b.version, b.installer_type, b.args),
+        LockedApp::Baked(b) => format!("{}, baked {:?} installer ({:?} scope), args {}", b.version, b.installer_type, b.scope, b.args),
         LockedApp::Winget { version } => format!("{version}, winget at first boot"),
         LockedApp::Msstore {} => "Microsoft Store, at first boot".to_owned(),
     });

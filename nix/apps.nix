@@ -1,6 +1,6 @@
 # Everything the first real boot needs to install config's apps: the
 # installers from the lock, the plan, install-apps.ps1, and the scheduled
-# task that runs it. Copied into the image under
+# tasks that run it. Copied into the image under
 # C:\Windows\Setup\defenestrate\apps.
 { lib, runCommand, fetchurl, writeText, python3, libxml2, locked, wanted, userName }:
 
@@ -31,16 +31,24 @@ let
     (app: fetchurl { inherit (app.baked) url hash; name = app.baked.file; })
     (lib.filter (app: app ? baked) plan);
 
-  # A logon task rather than a RunOnce entry: explorer is what runs those,
-  # and explorer isn't the shell. The task runs elevated without a prompt,
-  # alongside the shell, as the user (so winget works and per-user
-  # installers land in their profile). schtasks' defaults would skip it on
-  # battery and stop it after 72 hours.
-  task = writeText "task.xml" ''
+  # Logon tasks rather than RunOnce entries: explorer is what runs those,
+  # and explorer isn't the shell. Both run alongside the shell, without a
+  # UAC prompt:
+  # - SYSTEM, in session 0, for machine-wide installers. Not elevated in
+  #   the user's session: a non-elevated keyboard hook gets no keys while
+  #   an elevated window has focus, and the task's hidden console and
+  #   installers held it, so the shell's keys were dead until they finished.
+  # - The plain user (install-apps.ps1 -User) for per-user installers, which
+  #   break when elevated (Discord's Squirrel Update.exe crashes with
+  #   0xC0000005) and belong in the user's profile, and for winget, which
+  #   doesn't run as SYSTEM.
+  # schtasks' defaults would skip a task on battery and stop it after 72
+  # hours.
+  mkTask = { principal, args, log }: writeText "task.xml" ''
     <?xml version="1.0" encoding="UTF-16"?>
     <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
       <RegistrationInfo>
-        <Description>Installs defenestrate's apps, then deletes itself. Log: C:\Windows\Setup\defenestrate\apps.log</Description>
+        <Description>Installs defenestrate's apps, then deletes itself. Log: ${log}</Description>
       </RegistrationInfo>
       <Triggers>
         <LogonTrigger>
@@ -50,9 +58,7 @@ let
       </Triggers>
       <Principals>
         <Principal id="Author">
-          <UserId>${userName}</UserId>
-          <LogonType>InteractiveToken</LogonType>
-          <RunLevel>HighestAvailable</RunLevel>
+          ${principal}
         </Principal>
       </Principals>
       <Settings>
@@ -65,11 +71,24 @@ let
       <Actions Context="Author">
         <Exec>
           <Command>powershell.exe</Command>
-          <Arguments>-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\Windows\Setup\defenestrate\apps\install-apps.ps1</Arguments>
+          <Arguments>-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\Windows\Setup\defenestrate\apps\install-apps.ps1${args}</Arguments>
         </Exec>
       </Actions>
     </Task>
   '';
+  tasks = {
+    "task.xml" = mkTask {
+      # S-1-5-18 is LocalSystem.
+      principal = "<UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel>";
+      args = "";
+      log = "C:\\Windows\\Setup\\defenestrate\\apps.log";
+    };
+    "task-user.xml" = mkTask {
+      principal = "<UserId>${userName}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel>";
+      args = " -User";
+      log = "%LOCALAPPDATA%\\defenestrate\\apps.log";
+    };
+  };
 in
 if plan == [ ] then null else
 runCommand "defenestrate-apps" { nativeBuildInputs = [ python3 libxml2 ]; } ''
@@ -78,7 +97,9 @@ runCommand "defenestrate-apps" { nativeBuildInputs = [ python3 libxml2 ]; } ''
   cp ${writeText "apps.json" (builtins.toJSON plan)} $out/apps.json
   cp ${./install-apps.ps1} $out/install-apps.ps1
   # schtasks only takes task XML as UTF-16.
-  python3 -I -c 'import sys; open(sys.argv[2], "wb").write(b"\xff\xfe" + open(sys.argv[1], "rb").read().decode("ascii").replace("\n", "\r\n").encode("utf-16-le"))' \
-    ${task} $out/task.xml
-  xmllint --noout $out/task.xml
+  ${lib.concatStrings (lib.mapAttrsToList (name: xml: ''
+    python3 -I -c 'import sys; open(sys.argv[2], "wb").write(b"\xff\xfe" + open(sys.argv[1], "rb").read().decode("ascii").replace("\n", "\r\n").encode("utf-16-le"))' \
+      ${xml} $out/${name}
+    xmllint --noout $out/${name}
+  '') tasks)}
 ''

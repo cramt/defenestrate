@@ -1,15 +1,30 @@
-# Installs apps.json's apps, elevated, at each logon of the configured user
-# until all of them are in, then deletes its own scheduled task. The image's
-# first logon registers the task (nix/unattend.nix) and powers off, so the
-# first time this runs is the machine's first real boot. It runs next to the
+# Installs apps.json's apps at each logon of the configured user until all
+# of them are in, then deletes its own scheduled task. The image's first
+# logon registers the tasks (nix/unattend.nix) and powers off, so the first
+# time this runs is the machine's first real boot. It runs next to the
 # shell, never in front of it.
+#
+# Two tasks run it (nix/apps.nix says why). As SYSTEM: machine-wide
+# installers. With -User, as the plain user: per-user installers and
+# winget. The plain user can't write under C:\Windows\Setup, so that half
+# keeps its state in %LOCALAPPDATA%\defenestrate, next to shell.log.
+param([switch]$User)
 
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
-$log = Join-Path (Split-Path $here) 'apps.log'
-# One ID per line, so a rerun after a failure skips what already worked.
-$doneFile = Join-Path $here 'done.txt'
-$taskName = 'defenestrate-apps'
+if ($User) {
+    $state = Join-Path $env:LOCALAPPDATA 'defenestrate'
+    New-Item -ItemType Directory -Force -Path $state | Out-Null
+    $log = Join-Path $state 'apps.log'
+    $doneFile = Join-Path $state 'apps-done.txt'
+    $taskName = 'defenestrate-apps-user'
+} else {
+    $log = Join-Path (Split-Path $here) 'apps.log'
+    $doneFile = Join-Path $here 'done.txt'
+    $taskName = 'defenestrate-apps'
+}
+# done files hold one ID per line, so a rerun after a failure skips what
+# already worked.
 
 function Log([string]$msg) {
     Add-Content -LiteralPath $log -Value ('{0:yyyy-MM-dd HH:mm:ss} {1}' -f (Get-Date), $msg)
@@ -42,12 +57,17 @@ function Find-Winget {
     return $null
 }
 
+function Test-AsUser($app) {
+    return [bool](-not $app.baked -or $app.baked.scope -eq 'user')
+}
+
 # winget's "already installed": a rerun after the install worked but the
 # done file didn't get written.
 $wingetOk = @(0, -1978335189)
 
 try {
-    $plan = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $here 'apps.json') | ConvertFrom-Json
+    $all = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $here 'apps.json') | ConvertFrom-Json
+    $plan = @($all | Where-Object { [bool]$User -eq (Test-AsUser $_) })
     $done = @()
     if (Test-Path -LiteralPath $doneFile) { $done = @(Get-Content -LiteralPath $doneFile) }
     $pending = @($plan | Where-Object { $done -notcontains $_.id })

@@ -110,8 +110,10 @@ runCommand "defenestrate-image"
     ${lib.optionalString armsApps ''
       # Without the task, the apps in the image would never get installed.
       icat -o "$windows_start" disk.raw "$firstlogon" | tee firstlogon.log
-      grep -q '"defenestrate-apps" has successfully been created' firstlogon.log \
-        || { echo "first logon didn't register the app install task" >&2; exit 1; }
+      for task in defenestrate-apps defenestrate-apps-user; do
+        grep -q "\"$task\" has successfully been created" firstlogon.log \
+          || { echo "first logon didn't register the $task task" >&2; exit 1; }
+      done
     ''}
 
     mkdir $out

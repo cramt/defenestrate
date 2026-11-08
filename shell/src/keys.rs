@@ -6,23 +6,33 @@
 //!
 //! Super+L is "focus right" here, but Windows locks the session on Win+L
 //! before any hook can swallow it, so configs/default.nix turns that off
-//! (DisableLockWorkstation); Super+Escape locks instead, as in COSMIC.
+//! (DisableLockWorkstation); Super+Escape locks instead, as in COSMIC,
+//! by disconnecting the session (main.rs), since the policy blocks
+//! LockWorkStation as well.
 //!
-//! The hook only decides which binding a key is and queues it. Windows
-//! silently drops low-level hooks that take too long, so the work happens
-//! in the message loop when WM_ACTION arrives.
+//! Windows silently and permanently drops a low-level hook whose thread
+//! doesn't answer within LowLevelHooksTimeout. On a flashed machine's first
+//! boot (drivers settling, apps installing) the shell's GUI thread stalls
+//! long enough for that, and the keys were gone for the session. So the
+//! hook gets a thread of its own, at high priority, that only decides
+//! which binding a key is and queues it; the GUI thread does the work when
+//! WM_ACTION arrives.
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::collections::VecDeque;
+use std::sync::Mutex;
+use std::sync::mpsc;
 
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_LWIN, VK_MENU, VK_OEM_2, VK_RETURN, VK_RIGHT,
     VK_RWIN, VK_SHIFT, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, HC_ACTION, KBDLLHOOKSTRUCT, PostMessageW, SetWindowsHookExW, WH_KEYBOARD_LL, WM_APP, WM_KEYDOWN,
-    WM_SYSKEYDOWN,
+    CallNextHookEx, DispatchMessageW, GetMessageW, HC_ACTION, KBDLLHOOKSTRUCT, MSG, PostMessageW, SetWindowsHookExW,
+    WH_KEYBOARD_LL, WM_APP, WM_KEYDOWN, WM_SYSKEYDOWN,
 };
 
 use crate::tree::Direction;
@@ -56,22 +66,41 @@ enum Mode {
     Resize { outwards: bool },
 }
 
+// Hook thread only.
 thread_local! {
     static SUPER: Cell<Super> = const { Cell::new(Super::Up) };
     static MODE: Cell<Mode> = const { Cell::new(Mode::Normal) };
-    static QUEUE: RefCell<VecDeque<Action>> = const { RefCell::new(VecDeque::new()) };
     static NOTIFY: Cell<HWND> = const { Cell::new(HWND(std::ptr::null_mut())) };
 }
 
-pub fn install(instance: HINSTANCE, notify: HWND) -> windows::core::Result<()> {
-    NOTIFY.set(notify);
-    // The hook lives as long as this thread's message loop runs.
-    unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), Some(instance), 0) }.map(|_| ())
+// Filled by the hook thread, drained by the GUI thread.
+static QUEUE: Mutex<VecDeque<Action>> = Mutex::new(VecDeque::new());
+
+/// Starts the hook thread; returns once its hook is in (or failed).
+pub fn install(notify: HWND) -> windows::core::Result<()> {
+    // HWNDs aren't Send; the address is all the thread needs.
+    let notify = notify.0 as isize;
+    let (done, installed) = mpsc::channel();
+    std::thread::spawn(move || unsafe {
+        NOTIFY.set(HWND(notify as *mut _));
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+        let hook = GetModuleHandleW(None).and_then(|m| SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), Some(m.into()), 0));
+        let ok = hook.is_ok();
+        let _ = done.send(hook.map(|_| ()));
+        if ok {
+            // The hook is called from this loop, so it lives as long as it runs.
+            let mut msg = MSG::default();
+            while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                DispatchMessageW(&msg);
+            }
+        }
+    });
+    installed.recv().unwrap_or_else(|_| Err(windows::core::Error::from_thread()))
 }
 
 /// The queued actions, oldest first.
 pub fn take() -> Vec<Action> {
-    QUEUE.with_borrow_mut(|q| q.drain(..).collect())
+    QUEUE.lock().map(|mut q| q.drain(..).collect()).unwrap_or_default()
 }
 
 fn letter(key: VIRTUAL_KEY) -> Option<char> {
@@ -154,7 +183,9 @@ fn held(key: VIRTUAL_KEY) -> bool {
 }
 
 fn queue(action: Action) {
-    QUEUE.with_borrow_mut(|q| q.push_back(action));
+    if let Ok(mut q) = QUEUE.lock() {
+        q.push_back(action);
+    }
     unsafe {
         let _ = PostMessageW(Some(NOTIFY.get()), WM_ACTION, WPARAM(0), LPARAM(0));
     }

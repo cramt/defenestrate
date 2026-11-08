@@ -26,9 +26,16 @@ use windows_main::{log, scaled};
 
 #[cfg(windows)]
 fn main() {
-    if let Err(e) = windows_main::run() {
-        log(&format!("fatal: {e}"));
-        std::process::exit(1);
+    // panic = "abort" skips unwinding, but the hook still runs first, so
+    // a panic leaves a line in the log instead of a silently missing shell.
+    std::panic::set_hook(Box::new(|info| log(&format!("panic: {info}"))));
+    log(&format!("started, pid {}", std::process::id()));
+    match windows_main::run() {
+        Ok(()) => log("message loop ended"),
+        Err(e) => {
+            log(&format!("fatal: {e}"));
+            std::process::exit(1);
+        }
     }
 }
 
@@ -61,6 +68,7 @@ mod windows_main {
     // something else if it's missing.
     const FONT_FACE: windows::core::PCWSTR = w!("Iosevka NFM");
     const CREATE_NEW_CONSOLE: u32 = 0x10;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     thread_local! {
         static DPI: Cell<i32> = const { Cell::new(96) };
@@ -118,13 +126,17 @@ mod windows_main {
 
             // Past the main window everything is optional: a shell that exits
             // leaves the user with nothing, so failures only get logged.
+            // Keys first: they're how the user gets anything done, so nothing
+            // that might stall on another app's windows goes before them.
+            match keys::install(main) {
+                Ok(()) => log("keyboard hook installed"),
+                Err(e) => log(&format!("installing the keyboard hook failed: {e}")),
+            }
             if let Err(e) = launcher::create(instance, font) {
                 log(&format!("creating the launcher failed: {e}"));
             }
             desktop::start(main, scaled(GAP));
-            if let Err(e) = keys::install(instance, main) {
-                log(&format!("installing the keyboard hook failed: {e}"));
-            }
+            log("managing windows");
 
             let mut msg = MSG::default();
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -160,9 +172,16 @@ mod windows_main {
                         Action::Terminal => spawn("cmd.exe", &[], CREATE_NEW_CONSOLE),
                         // Explorer isn't the shell, but it still opens folder windows.
                         Action::HomeFolder => spawn("explorer.exe", &["."], 0),
+                        // DisableLockWorkstation (configs/default.nix, for Super+L)
+                        // blocks LockWorkStation too. Disconnecting the console
+                        // session lands on the same lock screen, and signing in
+                        // reconnects to it with every window as it was.
                         Action::Lock => {
-                            if let Err(e) = unsafe { LockWorkStation() } {
-                                log(&format!("locking failed: {e}"));
+                            let disconnected = Command::new("tsdiscon.exe").creation_flags(CREATE_NO_WINDOW).status();
+                            if !disconnected.is_ok_and(|s| s.success()) {
+                                if let Err(e) = unsafe { LockWorkStation() } {
+                                    log(&format!("locking failed: {e}"));
+                                }
                             }
                         }
                         Action::LogOut => {
