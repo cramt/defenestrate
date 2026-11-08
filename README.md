@@ -20,6 +20,8 @@ user, disk layout, replacement shell, and registry values per hive.
 - [x] Rust shell v0, cross-compiled in the flake (`nix build .#shell`): top bar with a clock and reserved work area, per-monitor DPI aware, Win+Enter opens a terminal (via a low-level keyboard hook; `RegisterHotKey` can't get Win+Enter even without explorer)
 - [x] Iosevka Nerd Font Mono installed system-wide (`fonts`) and used by the bar and every console. Windows 11 hands consoles to Windows Terminal once it's registered, which ignores console fonts, so the default terminal is pinned to conhost
 - [x] libcosmic builds for Windows from Linux (`nix build .#cosmic-bar-prototype`); not run on Windows yet
+- [x] Declarative apps (`apps`, `wingetApps`, `storeApps`) pinned in `apps.lock.json` by `nix run .#lock-apps`; baked installers go into the image and install on the first real boot. Verified with Firefox on a flashed-image boot with no network: installed ~3 minutes after logon, task gone afterwards
+  - Not yet observed: the online `wingetApps`/`storeApps` path (the test VMs are offline). `wingetApps` installs a pinned version, which fails once winget-pkgs drops it; store apps get whatever is current. Baked apps that are bootstrappers (Steam, League's Riot Client) still download the real thing at runtime. No launcher in the shell yet, so installed apps start from cmd
 - [ ] Shell: system tray, window list, launcher, notifications
 - [ ] Provisioned AppX removal (Outlook, Teams, Copilot, …)
 - [ ] WSL2 with a nix-built kernel and NixOS-WSL, mounting the Linux drives
@@ -91,6 +93,46 @@ the shell: on a file the size of a 1 TB disk put through exactly these
 steps, booted with fresh firmware variables and a fresh TPM, that took ~2
 minutes with no setup screens. Network or not doesn't matter, OOBE already
 ran offline in the sandbox.
+
+### Apps
+
+Apps are winget package IDs, pinned in `apps.lock.json` like an npm
+lockfile:
+
+```nix
+apps = [ "Mozilla.Firefox" ];          # baked into the image, installed offline
+wingetApps = [ "Valve.Steam" ];        # winget installs the locked version, online
+storeApps = [ "9NKSQGP7F2NH" ];        # Microsoft Store product, online
+```
+
+```sh
+nix run .#lock-apps -- Mozilla.Firefox            # lock (or re-resolve) a baked app
+nix run .#lock-apps -- --winget Valve.Steam --msstore 9NKSQGP7F2NH
+nix run .#lock-apps -- --bump                     # newest winget-pkgs, relock everything
+```
+
+`lock-apps` resolves each ID against the winget-pkgs commit recorded in the
+lock, picks the installer winget would (x64, en-US, machine scope first),
+and records its URL, hash, type and silent switches. Manifests without
+switches get their type's standard ones (msi `/qn`, nullsoft `/S`, inno
+`/VERYSILENT …`, burn `/quiet`). It downloads every baked installer once and
+checks it against the manifest's hash, so a URL whose contents have moved on
+fails at lock time; the download stays in the store for the build.
+
+Unknown IDs, msix/zip/portable-only packages, and exe installers with no
+silent mode fail at lock time. An ID that isn't locked, or is locked as a
+different kind than the config says, fails evaluation with the command that
+fixes it.
+
+The build `fetchurl`s every baked installer into the image under
+`C:\Windows\Setup\defenestrate\apps`. The image's first logon (in the
+sandbox) registers a scheduled task that runs at the user's next logon,
+elevated, as the user: the machine's first real boot. It installs the baked
+apps from disk, then the winget/store ones (retrying for up to an hour
+while winget registers and the network comes up), next to the shell rather
+than in front of it. It logs to `C:\Windows\Setup\defenestrate\apps.log`,
+reruns at the next logon if anything failed, and deletes itself once
+everything is in.
 
 ## How it works
 

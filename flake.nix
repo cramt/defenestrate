@@ -35,22 +35,38 @@
       windowsExe = src: mainProgram: import ./nix/shell.nix { inherit pkgs crane src mainProgram; };
       shell = windowsExe ./shell "defenestrate-shell.exe";
 
+      # Runs on the Linux side, writing apps.lock.json.
+      lock-apps =
+        let craneLib = crane.mkLib pkgs;
+        in craneLib.buildPackage {
+          src = craneLib.cleanCargoSource ./tools/lock-apps;
+          strictDeps = true;
+          meta.mainProgram = "lock-apps";
+        };
+
       vm = mkDistro [ ./configs/default.nix ./configs/vm.nix ];
     in
     {
       lib.${system} = { inherit mkDistro; };
 
       packages.${system} = {
-        inherit shell;
+        inherit shell lock-apps;
         cosmic-bar-prototype = windowsExe ./prototypes/cosmic-bar "cosmic-bar.exe";
         vm-iso = vm.build.iso;
         vm = vm.build.vm;
         default = vm.build.iso;
       };
 
-      apps.${system}.vm = {
-        type = "app";
-        program = "${vm.build.vm}/bin/defenestrate-vm";
+      apps.${system} = {
+        vm = {
+          type = "app";
+          program = "${vm.build.vm}/bin/defenestrate-vm";
+        };
+        # Run from the repo root: it reads and writes ./apps.lock.json.
+        lock-apps = {
+          type = "app";
+          program = nixpkgs.lib.getExe lock-apps;
+        };
       };
     };
 }

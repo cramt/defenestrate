@@ -1,4 +1,4 @@
-{ lib, runCommand, _7zz, wimlib, hivex, xorriso, source, edition, bootPrompt, regFiles, unattend, shellPackage, fonts }:
+{ lib, runCommand, _7zz, wimlib, hivex, xorriso, libxml2, source, edition, bootPrompt, regFiles, unattend, shellPackage, fonts, apps }:
 
 let
   efiBoot = if bootPrompt then "efisys.bin" else "efisys_noprompt.bin";
@@ -19,12 +19,16 @@ let
 in
 runCommand "defenestrate.iso"
   {
-    nativeBuildInputs = [ _7zz wimlib hivex xorriso ];
+    nativeBuildInputs = [ _7zz wimlib hivex xorriso libxml2 ];
     # ~25 GB of scratch space and nothing a substituter would have.
     preferLocalBuild = true;
     allowSubstitutes = false;
   }
   ''
+    # Setup stops on a malformed answer file before it writes anything,
+    # which a headless build only notices hours later.
+    xmllint --noout ${unattend}
+
     # Microsoft's ISO is UDF-only (the ISO9660 side is just a README), which
     # rules out xorriso for reading it.
     7zz x -oiso ${source} -x!sources/install.wim > /dev/null
@@ -48,6 +52,7 @@ runCommand "defenestrate.iso"
     # security descriptor, which is why the registry isn't edited offline.
     wimlib-imagex update install.wim 1 > /dev/null <<EOF
     add payload /Windows/Setup/defenestrate
+    ${lib.optionalString (apps != null) "add ${apps} /Windows/Setup/defenestrate/apps"}
     ${lib.optionalString (shellPackage != null) "add ${shellPackage}/bin '/Program Files/defenestrate'"}
     ${lib.concatMapStrings (f: "add ${f} '/Windows/Fonts/${baseNameOf f}'\n") fonts}
     EOF

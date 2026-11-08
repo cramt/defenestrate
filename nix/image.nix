@@ -1,4 +1,4 @@
-{ runCommand, qemu_kvm, swtpm, OVMFFull, socat, util-linux, jq, mtools, sleuthkit, zstd, e2fsprogs, iso, size ? "64G" }:
+{ lib, runCommand, qemu_kvm, swtpm, OVMFFull, socat, util-linux, jq, mtools, sleuthkit, zstd, e2fsprogs, iso, armsApps, size ? "64G" }:
 
 # A whole-disk Windows image, built in the sandbox: the whole unattended
 # install (windowsPE, specialize, OOBE, first logon's shell switch) runs in
@@ -81,6 +81,13 @@ runCommand "defenestrate-image"
         echo "nothing written for 20 minutes, setup is stuck" >&2
         exit 1
       fi
+      # Setup applies the image within ~15 minutes even on a loaded host;
+      # nothing by now means it stopped on a dialog before touching the disk.
+      if [ "$now" -le 1048576 ] && [ "$elapsed" -ge 3600 ]; then
+        screendump stalled
+        echo "setup hasn't written to the disk in an hour, it's stuck before the install" >&2
+        exit 1
+      fi
       if [ "$elapsed" -ge 10800 ]; then
         screendump timeout
         echo "setup took over 3 hours" >&2
@@ -98,8 +105,14 @@ runCommand "defenestrate-image"
     mdir -i "disk.raw@@$((esp_start * 512))" ::/EFI/Microsoft/Boot/bootmgfw.efi > /dev/null \
       || { echo "setup didn't finish: no Windows Boot Manager on the image's ESP" >&2; exit 1; }
     windows_start=$(sfdisk --json disk.raw | jq '.partitiontable.partitions[2].start')
-    ifind -o "$windows_start" -n /Windows/Setup/defenestrate/firstlogon.log disk.raw > /dev/null \
+    firstlogon=$(ifind -o "$windows_start" -n /Windows/Setup/defenestrate/firstlogon.log disk.raw) \
       || { echo "setup didn't finish: first logon never ran (or C: isn't readable NTFS)" >&2; exit 1; }
+    ${lib.optionalString armsApps ''
+      # Without the task, the apps in the image would never get installed.
+      icat -o "$windows_start" disk.raw "$firstlogon" | tee firstlogon.log
+      grep -q '"defenestrate-apps" has successfully been created' firstlogon.log \
+        || { echo "first logon didn't register the app install task" >&2; exit 1; }
+    ''}
 
     mkdir $out
     stat -c %s disk.raw > $out/size

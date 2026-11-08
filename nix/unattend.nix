@@ -1,4 +1,7 @@
 { lib, config, productKey
+  # Register apps.nix's scheduled task, which installs the apps at the
+  # next logon: the machine's first real boot, for image.nix.
+, armApps ? false
   # How first logon ends once the shell is switched. image.nix powers off
   # instead, which is how its VM knows setup is done.
 , firstLogonEnd ? "reboot"
@@ -132,8 +135,15 @@ in
             <CommandLine>${x ''cmd.exe /c "reg import ${setupDir}\shell.reg > ${setupDir}\firstlogon.log 2>&1"''}</CommandLine>
             <Description>Replace explorer.exe as the shell</Description>
           </SynchronousCommand>
+          ${lib.optionalString armApps ''
+            <SynchronousCommand wcm:action="add">
+              <Order>2</Order>
+              <CommandLine>${x ''cmd.exe /c "schtasks /create /tn defenestrate-apps /xml ${setupDir}\apps\task.xml >> ${setupDir}\firstlogon.log 2>&1"''}</CommandLine>
+              <Description>Install the apps at the next logon</Description>
+            </SynchronousCommand>
+          ''}
           <SynchronousCommand wcm:action="add">
-            <Order>2</Order>
+            <Order>${if armApps then "3" else "2"}</Order>
             <CommandLine>shutdown.exe ${if firstLogonEnd == "reboot" then "/r" else "/s"} /t 0</CommandLine>
             <Description>${if firstLogonEnd == "reboot" then "Log in again under the new shell" else "Done; the next logon gets the new shell"}</Description>
           </SynchronousCommand>

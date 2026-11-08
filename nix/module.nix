@@ -31,6 +31,34 @@ let
   };
 
   windowsName = types.strMatching "[A-Za-z0-9-]{1,15}";
+
+  appIds = description: mkOption {
+    type = types.listOf (types.strMatching "[A-Za-z0-9][A-Za-z0-9.+_-]*");
+    default = [ ];
+    inherit description;
+  };
+
+  # apps.lock.json's shape, as tools/lock-apps writes it. Checked here too so
+  # a hand-edited lock fails evaluation instead of the machine.
+  lockedApp = types.attrTag {
+    baked = mkOption {
+      type = types.submodule {
+        options = {
+          version = mkOption { type = types.str; };
+          url = mkOption { type = types.strMatching "https://.*"; };
+          hash = mkOption { type = types.strMatching "sha256-[A-Za-z0-9+/]{43}="; };
+          file = mkOption { type = types.strMatching "[A-Za-z0-9+._?=-]+"; };
+          installerType = mkOption { type = types.enum [ "msi" "wix" "nullsoft" "inno" "burn" "exe" ]; };
+          args = mkOption { type = types.str; };
+          successCodes = mkOption { type = types.nonEmptyListOf types.int; };
+        };
+      };
+    };
+    winget = mkOption {
+      type = types.submodule { options.version = mkOption { type = types.str; }; };
+    };
+    msstore = mkOption { type = types.submodule { }; };
+  };
 in
 {
   options = {
@@ -149,6 +177,32 @@ in
       '';
     };
 
+    apps = appIds ''
+      winget package IDs whose installers are baked into the image and
+      installed offline on the machine's first real boot. Each must be
+      locked in appsLock (`nix run .#lock-apps -- ID`).
+    '';
+    wingetApps = appIds ''
+      winget package IDs that can't be baked (bootstrappers, installers
+      behind an unversioned URL): winget installs the locked version on the
+      first real boot, which needs the network. `nix run .#lock-apps -- --winget ID`.
+    '';
+    storeApps = appIds ''
+      Microsoft Store product IDs (9N…), installed by winget on the first
+      real boot, online. The store only serves the current version.
+      `nix run .#lock-apps -- --msstore ID`.
+    '';
+    appsLock = mkOption {
+      type = types.path;
+      default = ../apps.lock.json;
+      description = "Lockfile tools/lock-apps writes; pins what apps, wingetApps and storeApps install.";
+    };
+    lockedApps = mkOption {
+      type = types.attrsOf lockedApp;
+      internal = true;
+      readOnly = true;
+    };
+
     registry = {
       software = regHive "HKLM\\SOFTWARE.";
       system = regHive ''
@@ -166,6 +220,8 @@ in
   };
 
   config = {
+    lockedApps = if builtins.pathExists config.appsLock then (lib.importJSON config.appsLock).apps else { };
+
     # 22H2+ OOBE stops at "connect to a network" without this. The interactive
     # escapes (bypassnro.cmd, ms-cxh:localonly) are gone since 24H2; the
     # registry value still works. Lesson from nixconf's saturn-windows-image.sh.
@@ -202,15 +258,22 @@ in
             };
           };
         };
+        # null when no apps are configured.
+        apps = pkgs.callPackage ./apps.nix {
+          locked = config.lockedApps;
+          wanted = { baked = config.apps; winget = config.wingetApps; msstore = config.storeApps; };
+          userName = config.user.name;
+        };
         mkUnattend = { disk, firstLogonEnd ? "reboot" }: pkgs.writeText "autounattend.xml" (import ./unattend.nix {
           config = config // { inherit disk; };
           inherit lib firstLogonEnd;
+          armApps = apps != null;
           productKey = genericKeys.${config.edition};
         });
         mkIso = { unattend, bootPrompt }: pkgs.callPackage ./iso.nix {
           inherit (config) source edition;
           inherit (config) fonts;
-          inherit regFiles unattend bootPrompt;
+          inherit regFiles unattend bootPrompt apps;
           shellPackage = config.shell.package or null;
         };
 
@@ -230,7 +293,7 @@ in
           };
           bootPrompt = false;
         };
-        image = pkgs.callPackage ./image.nix { iso = soleDiskIso; };
+        image = pkgs.callPackage ./image.nix { iso = soleDiskIso; armsApps = apps != null; };
       in
       {
         inherit regFiles unattend iso;
@@ -240,6 +303,6 @@ in
           inherit (config) installTarget;
           inherit image;
         };
-      };
+      } // lib.optionalAttrs (apps != null) { inherit apps; };
   };
 }
