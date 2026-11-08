@@ -71,6 +71,14 @@
       FontWeight.dword = 400;
       FontSize.dword = 18 * 65536;
     };
+    # Windows 11 hands every new console to Windows Terminal once its
+    # package is registered for the user ("Let Windows decide"), and
+    # Terminal ignores all of the above (it came up in Cascadia Mono). This
+    # GUID is conhost, the "Windows Console Host" choice in that setting.
+    "Console\\%%Startup" = {
+      DelegationConsole.sz = "{B23D10C0-E52E-411E-9D5B-C09FDF709C7D}";
+      DelegationTerminal.sz = "{B23D10C0-E52E-411E-9D5B-C09FDF709C7D}";
+    };
     # powershell.exe's own subkeys pin Lucida Console over the defaults above.
     "Console\\%SystemRoot%_System32_WindowsPowerShell_v1.0_powershell.exe".FaceName = null;
     "Console\\%SystemRoot%_SysWOW64_WindowsPowerShell_v1.0_powershell.exe".FaceName = null;

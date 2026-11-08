@@ -7,7 +7,7 @@ the rest of Microsoft's opinions configured away.
 Everything is declared in `configs/` as typed Nix options: edition, locale,
 user, disk layout, replacement shell, and registry values per hive.
 
-![First boot: no explorer, our bar, Win+Enter opened a terminal](docs/first-boot.png)
+![First boot of a flashed image: no explorer, our bar, Win+Enter opened conhost, all in Iosevka](docs/first-boot.png)
 
 ## Status
 
@@ -17,12 +17,13 @@ user, disk layout, replacement shell, and registry values per hive.
 - [x] QEMU test VM with Secure Boot and TPM 2.0
 - [x] Verified install end to end in the VM: unattended setup, specialize registry import, OOBE, first-logon shell switch, our shell running with no explorer.exe
   - Fully hands-off offline (`restrict=on`): a headless run went from the ISO to our shell in ~47 minutes with no input. Online, OOBE's zero-day-patch check fails in the VM and waits for a "Skip" click. On real hardware: install offline, or hit "Try again".
-- [x] Rust shell v0, cross-compiled in the flake (`nix build .#shell`): top bar with a clock and reserved work area, Win+Enter opens a terminal (via a low-level keyboard hook; `RegisterHotKey` can't get Win+Enter even without explorer)
+- [x] Rust shell v0, cross-compiled in the flake (`nix build .#shell`): top bar with a clock and reserved work area, per-monitor DPI aware, Win+Enter opens a terminal (via a low-level keyboard hook; `RegisterHotKey` can't get Win+Enter even without explorer)
+- [x] Iosevka Nerd Font Mono installed system-wide (`fonts`) and used by the bar and every console. Windows 11 hands consoles to Windows Terminal once it's registered, which ignores console fonts, so the default terminal is pinned to conhost
 - [x] libcosmic builds for Windows from Linux (`nix build .#cosmic-bar-prototype`); not run on Windows yet
 - [ ] Shell: system tray, window list, launcher, notifications
 - [ ] Provisioned AppX removal (Outlook, Teams, Copilot, …)
 - [ ] WSL2 with a nix-built kernel and NixOS-WSL, mounting the Linux drives
-- [x] Whole-disk image built in the nix sandbox (`build.image`) and flashed from Linux with no boot media (`build.install`), replacing nixconf's `saturn-windows-image.sh`. Flash-and-boot verified on a disk-sized file; not yet on real hardware
+- [x] Whole-disk image built in the nix sandbox (`build.image`) and flashed from Linux with no boot media (`build.install`), replacing nixconf's `saturn-windows-image.sh`. Flash-and-boot verified on a disk-sized file, and booted to the shell on real hardware
 
 ## Usage
 
@@ -64,7 +65,7 @@ rebooting. The build then checks Windows Boot Manager is on the image's ESP
 and reads first logon's log straight off NTFS with sleuthkit, which also
 proves BitLocker didn't touch C:. Progress goes to the build log; a 20
 minute stall or 3 hours fails the build and leaves screenshots in the build
-dir for `--keep-failed`. ~10 minutes on a desktop. The disk is NVMe, so the
+dir for `--keep-failed`. ~10 minutes on an idle desktop; 65–75 on one shared with other heavy jobs. The disk is NVMe, so the
 image boots on a real NVMe controller through the same inbox driver, no
 sysprep.
 
