@@ -21,7 +21,7 @@ user, disk layout, replacement shell, and registry values per hive.
   - Primary monitor only. Minimized windows drop out of the tiling and, with no taskbar, can't be brought back. Elevated windows and dialogs float, and while an elevated window has focus the shell's keys don't work (Windows doesn't give a non-elevated keyboard hook their input). A crashing shell leaves windows on other workspaces hidden
 - [x] Iosevka Nerd Font Mono installed system-wide (`fonts`) and used by the shell and every console. Windows 11 hands consoles to Windows Terminal once it's registered, which ignores console fonts, so the default terminal is pinned to conhost
 - [x] libcosmic builds for Windows from Linux (`nix build .#cosmic-bar-prototype`); not run on Windows yet
-- [x] Declarative apps (`apps`, `wingetApps`, `storeApps`) pinned in `apps.lock.json` by `nix run .#lock-apps`; baked installers go into the image and install on the first real boot. Verified with Firefox on a flashed-image boot with no network: installed ~3 minutes after logon, task gone afterwards
+- [x] Declarative apps (`apps`, `wingetApps`, `storeApps`) pinned in `apps.lock.json` by `nix run .#lock-apps`; baked installers go into the image and install on the first real boot. Verified on saturn's image booted fresh in QEMU: Firefox (machine-wide, as SYSTEM) and Discord (per-user) installed with the shell's keys working throughout; League's installer asks for elevation
   - Not yet observed: the online `wingetApps`/`storeApps` path (the test VMs are offline). `wingetApps` installs a pinned version, which fails once winget-pkgs drops it; store apps get whatever is current. Baked apps that are bootstrappers (Steam, League's Riot Client) still download the real thing at runtime.
 - [ ] Shell: system tray, notifications, multiple monitors, COSMIC's stacking and swap mode
 - [ ] Provisioned AppX removal (Outlook, Teams, Copilot, …)
@@ -141,6 +141,11 @@ the machine's first real boot, next to the shell rather than in front of it:
 
 Each reruns at the next logon if anything failed and deletes itself once its
 apps are in.
+
+Some per-user installers ask for elevation themselves: League of Legends'
+Riot installer shows a UAC prompt on the first boot, and clicking No (or
+nothing, until it times out) leaves it for the next logon. Discord asks for
+its "System Helper" on its own first launch.
 
 ### Keys
 
