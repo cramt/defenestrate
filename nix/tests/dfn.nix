@@ -36,6 +36,9 @@ pkgs.vmTools.runInLinuxVM (pkgs.runCommand "dfn-test"
     dfn run sh -c 'touch ~/written-from-wsl'
     [ "$(stat -c %u $d/linux/home/user/written-from-wsl)" = 1000 ]
 
+    # The "Linux terminal": the user's login shell, here fed a command.
+    [ "$(echo 'id -u' | dfn shell)" = 1000 ]
+
     dfn apps | tee apps
     grep -q '^firefox.desktop	Firefox' apps || grep -qi 'firefox' apps
 

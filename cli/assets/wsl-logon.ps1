@@ -83,6 +83,15 @@ try {
         $lnk.Description = "$name (Linux)"
         $lnk.Save()
     }
+    # The user's login shell in a console, for terminal programs (which have
+    # no desktop entry to show up as).
+    $file = 'Linux terminal.lnk'
+    $wanted[$file] = $true
+    $lnk = $shell.CreateShortcut((Join-Path $menu $file))
+    $lnk.TargetPath = $wsl
+    $lnk.Arguments = "-d $distro --cd / --exec /defenestrate/dfn shell"
+    $lnk.Description = 'Login shell of the Linux install'
+    $lnk.Save()
     Get-ChildItem $menu -Filter *.lnk | Where-Object { -not $wanted.ContainsKey($_.Name) } | Remove-Item
     Log "$($wanted.Count) Linux apps in the Start Menu"
 } catch {

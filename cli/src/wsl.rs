@@ -48,6 +48,13 @@ pub fn render(config: &Config, cache: &Cache, work: &Path, dir: &Path) -> Result
             // Elevated, for `wsl --mount`, and S4U: in session 0, so no window
             // of it (elevated windows starve the shell's keyboard hook) and no
             // stored password.
+            // Known cost: WSL started from session 0 puts WSLg's viewer there
+            // too, so GUI apps launched while that VM lives are invisible
+            // (github.com/microsoft/wslg/issues/1514). An InteractiveToken
+            // task via `conhost --headless` avoids that and works when run by
+            // hand, but failed at logon with 0x80070003. GUI apps are blocked
+            // anyway under this shell (README), so this stays until both are
+            // solved.
             principal: format!("<UserId>{user}</UserId><LogonType>S4U</LogonType><RunLevel>HighestAvailable</RunLevel>"),
             command: "powershell.exe",
             arguments: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\\Windows\\Setup\\defenestrate\\wsl\\wsl-logon.ps1".into(),

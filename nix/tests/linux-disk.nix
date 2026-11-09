@@ -26,7 +26,10 @@ let
       users.users.user = {
         isNormalUser = true;
         uid = 1000;
-        packages = [ pkgs.firefox ];
+        # Firefox is the point; the others are the smallest Wayland (weston's
+        # demo clients) and X11 (xeyes) programs, for telling WSLg trouble
+        # from Firefox trouble.
+        packages = [ pkgs.firefox pkgs.weston pkgs.xeyes ];
       };
       documentation.enable = false;
       system.stateVersion = "26.05";

@@ -9,6 +9,7 @@
 #   dfn apps           list its desktop entries: <id> TAB <name>
 #   dfn launch <id>    run a desktop entry
 #   dfn run <cmd>...   run a command as the user, through a login shell
+#   dfn shell          the user's own login shell (the "Linux terminal")
 #
 # Two OSes never run at once on a dual boot machine, so sharing the home
 # directory and its profiles is safe as long as Linux was shut down, not
@@ -190,8 +191,13 @@ run)
 	wait_for_wslg
 	as_user 'exec "$@"' "$@"
 	;;
+shell)
+	do_mount
+	wait_for_wslg
+	as_user 'exec "$1" -l' "$(user_field 7)"
+	;;
 *)
-	echo "usage: dfn mount | apps | launch <desktop id> | run <command> [args]" >&2
+	echo "usage: dfn mount | apps | launch <desktop id> | run <command> [args] | shell" >&2
 	exit 2
 	;;
 esac
