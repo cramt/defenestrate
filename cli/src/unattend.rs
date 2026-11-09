@@ -37,9 +37,7 @@ pub struct Variant {
 
 const SETUP_DIR: &str = "%SystemRoot%\\Setup\\defenestrate";
 
-/// `arm_apps` registers the scheduled tasks that install the apps at the
-/// next logon: the machine's first real boot, for an image.
-pub fn render(config: &Config, v: &Variant, arm_apps: bool) -> Result<String> {
+pub fn render(config: &Config, v: &Variant) -> Result<String> {
     let x = escape;
     let component = |name: &str, body: String| {
         format!(
@@ -133,18 +131,10 @@ pub fn render(config: &Config, v: &Variant, arm_apps: bool) -> Result<String> {
         String::new()
     };
 
-    let mut commands =
-        vec![(format!("cmd.exe /c \"reg import {SETUP_DIR}\\shell.reg > {SETUP_DIR}\\firstlogon.log 2>&1\""), "Replace explorer.exe as the shell")];
-    if arm_apps {
-        commands.push((
-            format!("cmd.exe /c \"schtasks /create /tn defenestrate-apps /xml {SETUP_DIR}\\apps\\task.xml >> {SETUP_DIR}\\firstlogon.log 2>&1\""),
-            "Install the apps at the next logon",
-        ));
-        commands.push((
-            format!("cmd.exe /c \"schtasks /create /tn defenestrate-apps-user /xml {SETUP_DIR}\\apps\\task-user.xml >> {SETUP_DIR}\\firstlogon.log 2>&1\""),
-            "Install the per-user apps at the next logon",
-        ));
-    }
+    let mut commands = vec![
+        (format!("cmd.exe /c \"reg import {SETUP_DIR}\\shell.reg > {SETUP_DIR}\\firstlogon.log 2>&1\""), "Replace explorer.exe as the shell"),
+        (format!("cmd.exe /c \"{SETUP_DIR}\\wsl\\wsl-install.cmd >> {SETUP_DIR}\\firstlogon.log 2>&1\""), "Install WSL"),
+    ];
     commands.push(match v.first_logon_end {
         FirstLogonEnd::Reboot => ("shutdown.exe /r /t 0".into(), "Log in again under the new shell"),
         FirstLogonEnd::Poweroff => ("shutdown.exe /s /t 0".into(), "Done; the next logon gets the new shell"),

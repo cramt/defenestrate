@@ -60,10 +60,12 @@ pub fn build(config: &Config, variant: &Variant, source: &Path, cache: &Cache, w
 
     // Only adds new files. Replacing an existing file this way drops its
     // security descriptor, which is why the registry isn't edited offline.
-    let mut commands = vec![format!("add {} /Windows/Setup/defenestrate", quote(&payload)?)];
-    if r.has_apps {
-        commands.push(format!("add {} /Windows/Setup/defenestrate/apps", quote(&r.dir.join("apps"))?));
-    }
+    std::fs::write(r.wsl.dir.join("wsl-install.cmd"), crlf(include_str!("../assets/wsl-install.cmd")))?;
+    let mut commands = vec![
+        format!("add {} /Windows/Setup/defenestrate", quote(&payload)?),
+        format!("add {} {}", quote(&r.wsl.dir)?, crate::wsl::DIR),
+        format!("add {} {}/wsl.msi", quote(&r.wsl.msi)?, crate::wsl::DIR),
+    ];
     if let Some(exe) = &r.shell_exe {
         let dir = work.join("program-files");
         std::fs::create_dir_all(&dir)?;

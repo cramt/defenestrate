@@ -8,13 +8,13 @@ Two halves:
 
 - **`dfnstrate`** (`cli/`), the Linux side: fetches the stock ISO, builds an
   install ISO or a finished whole-disk image from a config, flashes it, and
-  pins apps. A plain Rust binary; it works on any distro. The Nix flake is a
+  sets up WSL to run the machine's Linux install. A plain Rust binary; it works on any distro. The Nix flake is a
   thin layer that runs the same commands, so both paths hit the same code.
 - **The shell** (`shell/`), the Windows side: a tiling window manager that
   replaces explorer.
 
 A config is TOML (or a Nix module setting the same keys): edition, locale,
-user, disk layout, shell, fonts, apps, AppX packages to drop, and registry
+user, disk layout, shell, fonts, the Linux install to reach through WSL, AppX packages to drop, and registry
 values per hive. Every config is layered over the distro's own defaults,
 [`configs/default.toml`](configs/default.toml).
 
@@ -23,7 +23,7 @@ values per hive. Every config is layered over the distro's own defaults,
 ## Status
 
 - [x] Stock ISO → single-edition install ISO (plain ISO9660, split WIM, so it fits a FAT32 stick), BIOS + UEFI boot
-- [x] `dfnstrate`: one Rust CLI for fetch/build/flash/lock, layered TOML configs, a hash-addressed download cache. The flake's ISO, image, VM and install outputs run it, with the cache filled by fixed-output derivations, so a non-Nix build runs the same code as the Nix one
+- [x] `dfnstrate`: one Rust CLI for fetch/build/flash, layered TOML configs, a hash-addressed download cache. The flake's ISO, image, VM and install outputs run it, with the cache filled by fixed-output derivations, so a non-Nix build runs the same code as the Nix one
   - Seen: the Nix and non-Nix ISOs for the VM config have identical contents (every file and all 187k `install.wim` entries; only timestamps and the shell exe differ, the latter because rustc puts random temp dir names in its import libraries). A non-Nix `build image` booted to the shell like a fresh machine. `flash` is ported line for line from the old install script but hasn't been run onto a disk since
 - [x] Stock ISO fetched by driving microsoft.com's download page in headless Chromium (`dfnstrate fetch`); the page's API rejects plain HTTP clients
 - [x] Registry config as typed values (`sz`, `expandSz`, `multiSz`, `dword`, `qword`, `binary`, `"delete"`), validated against the image's own hives at build time
@@ -35,11 +35,11 @@ values per hive. Every config is layered over the distro's own defaults,
   - Primary monitor only. Minimized windows drop out of the tiling and, with no taskbar, can't be brought back. Elevated windows and dialogs float, and while an elevated window has focus the shell's keys don't work (Windows doesn't give a non-elevated keyboard hook their input). A crashing shell leaves windows on other workspaces hidden
 - [x] Iosevka Nerd Font Mono installed system-wide (`fonts`, fetched from the Nerd Fonts release) and used by the shell and every console. Windows 11 hands consoles to Windows Terminal once it's registered, which ignores console fonts, so the default terminal is pinned to conhost
 - [x] libcosmic builds for Windows from Linux (`nix build .#cosmic-bar-prototype`); not run on Windows yet
-- [x] Declarative apps (`apps`, `wingetApps`, `storeApps`) pinned in `apps.lock.json` by `dfnstrate lock`; baked installers go into the image and install on the first real boot. Verified on saturn's image booted fresh in QEMU: Firefox (machine-wide, as SYSTEM) and Discord (per-user) installed with the shell's keys working throughout; League's installer asks for elevation
-  - Not yet observed: the online `wingetApps`/`storeApps` path (the test VMs are offline). `wingetApps` installs a pinned version, which fails once winget-pkgs drops it; store apps get whatever is current. Baked apps that are bootstrappers (Steam, League's Riot Client) still download the real thing at runtime.
 - [ ] Shell: system tray, notifications, multiple monitors, COSMIC's stacking and swap mode
 - [x] Provisioned AppX removal (`appx.remove`): deprovisioned during specialize, names checked against the image at build time. All 17 in the defaults removed in a `build image` run (from `specialize.log` on the image)
-- [ ] WSL2 with a nix-built kernel and NixOS-WSL, mounting the Linux drives
+- [ ] WSL installed offline, and the machine's Linux install run through it (`wsl.linux`): its disks attached and mounted, its apps in the Start Menu, run chrooted as its user
+  - Seen in a VM (Windows nested in KVM, a saturn-shaped btrfs test install as a second disk, `nix build .#test-linux-disk`): WSL installs from the image, the logon task imports the distro, attaches the disk by GPT GUID, mounts it and puts its Firefox in the Start Menu; the launcher starts it, and Firefox runs from the install as its user, with its profile in the install's home. dfn's half is also a flake check (`checks.x86_64-linux.dfn`)
+  - Not seen: its window. In that VM, WSLg's own compositor (Weston, in WSL's system distro) segfaults as Firefox's window opens, and its RDP client never connects. Unknown yet whether real hardware does the same
 - [x] Whole-disk image built in a sandboxed VM (`dfnstrate build image`, `build.image`) and flashed from Linux with no boot media (`dfnstrate flash`, `build.install`), replacing nixconf's `saturn-windows-image.sh`. Flash-and-boot verified on a disk-sized file, and booted to the shell on real hardware
 
 ## Usage
@@ -51,11 +51,18 @@ computerName = "saturn-windows"
 inputLocale = "0406:00000406"          # Danish keyboard
 timeZone = "Romance Standard Time"     # Windows zone ID, not IANA
 installTarget = "/dev/disk/by-id/nvme-Samsung_SSD_970_EVO_1TB_S5H9NS1NB05355E"
-apps = ["Mozilla.Firefox"]
-appsLock = "apps.lock.json"            # relative to this file
 
 [user]
 name = "cramt"
+
+[wsl.linux]                            # the Linux install on the other disk; see below
+user = "cramt"
+disks = ["<lsblk -dno PTUUID of its disk>"]
+mounts = [
+  { device = "LABEL=nvme-pool", target = "/", fsType = "btrfs", options = ["subvol=@root"] },
+  { device = "LABEL=nvme-pool", target = "/nix", fsType = "btrfs", options = ["subvol=@nix"] },
+  { device = "LABEL=nvme-pool", target = "/home", fsType = "btrfs", options = ["subvol=@home"] },
+]
 
 [registry.defaultUser.'Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced']
 HideFileExt.dword = 0
@@ -101,8 +108,11 @@ Both builds fetch the stock ISO the config pins (`[iso]` in
 `configs/default.toml`) into `~/.cache/dfnstrate` first, along with the
 fonts and app installers, all checked by hash. Pass `--iso FILE` to use one
 you already downloaded. `dfnstrate fetch --update` downloads whatever build
-Microsoft serves now and prints the new pin. Builds need ~25 GB of scratch
-next to `-o` (or `--work-dir`).
+Microsoft serves now and prints the new pin. Builds need scratch space
+next to `-o` (or `--work-dir`): ~25 GB for an ISO, ~45 GB for an image. Put
+it on an SSD for `build image`: on spinning disks the VM's writes starve
+its reads from the install CD until Windows drops the CD, and setup fails
+with 0x800701B1 or WinPE blue-screens.
 
 On Arch, `edk2-ovmf` has no Microsoft Secure Boot keys enrolled; setup still
 installs, with Secure Boot in setup mode. `--ovmf-code`/`--ovmf-vars` pick
@@ -174,58 +184,36 @@ steps, booted with fresh firmware variables and a fresh TPM, that took ~2
 minutes with no setup screens. Network or not doesn't matter, OOBE already
 ran offline in the sandbox.
 
-### Apps
+### Linux apps, through WSL
 
-Apps are winget package IDs, pinned in `apps.lock.json` like an npm
-lockfile:
+There's no Windows app management. Windows gets WSL, and on a dual-boot
+machine the apps are the Linux install's own: the same Firefox binary,
+profile, bookmarks and logins.
 
-```toml
-apps = ["Mozilla.Firefox"]          # baked into the image, installed offline
-wingetApps = ["Valve.Steam"]        # winget installs the locked version, online
-storeApps = ["9NKSQGP7F2NH"]        # Microsoft Store product, online
-appsLock = "apps.lock.json"
-```
+WSL's MSI is pinned in `configs/default.toml` and installed at first logon
+from the image, so it needs no network. With `wsl.linux` set, first logon
+also registers the logon task `defenestrate-wsl`. It runs elevated
+(`wsl --mount` needs admin) in session 0, so it never shows a window, and on
+each logon it:
 
-```sh
-dfnstrate lock Mozilla.Firefox            # lock (or re-resolve) a baked app
-dfnstrate lock --winget Valve.Steam --msstore 9NKSQGP7F2NH
-dfnstrate lock --bump                     # newest winget-pkgs, relock everything
-```
+1. imports the `defenestrate` distro the first time. That's static busybox
+   and `dfn` (`cli/assets/dfn.sh`), about a megabyte;
+2. attaches the disks named in `wsl.linux.disks` to WSL (`wsl --mount
+   --bare`), found by GPT disk GUID, which Windows and Linux both report;
+3. runs `dfn mount`, which mounts `wsl.linux.mounts` at `/linux` the way
+   NixOS mounts its `fileSystems`, by `LABEL=` or `UUID=` because device
+   names differ inside WSL, then binds `/proc`, `/dev`, WSLg's sockets and
+   WSL's DNS into it, and gives it a fresh `/run` with `current-system`;
+4. writes a Start Menu shortcut under Programs\Linux for every desktop entry
+   the user would see on Linux. Each one runs `wslg.exe … dfn launch <id>`,
+   which chroots into the install and runs the entry's command as the user
+   through a login shell, so the profiles' environment applies.
 
-`dfnstrate lock` resolves each ID against the winget-pkgs commit recorded in the
-lock, picks the installer winget would (x64, en-US, machine scope first),
-and records its URL, hash, type and silent switches. Manifests without
-switches get their type's standard ones (msi `/qn`, nullsoft `/S`, inno
-`/VERYSILENT …`, burn `/quiet`). It downloads every baked installer once and
-checks it against the manifest's hash, so a URL whose contents have moved on
-fails at lock time; the download stays in the cache for the build.
+The shell's launcher lists the Start Menu, so Linux apps are a Super-tap
+away. Logs go to `%LOCALAPPDATA%\defenestrate\wsl.log`.
 
-Unknown IDs, msix/zip/portable-only packages, and exe installers with no
-silent mode fail at lock time. An ID that isn't locked, or is locked as a
-different kind than the config says, fails the build with the command that
-fixes it.
-
-The build puts every baked installer into the image under
-`C:\Windows\Setup\defenestrate\apps`. The image's first logon (in the
-sandbox) registers two scheduled tasks that run at the user's next logon,
-the machine's first real boot, next to the shell rather than in front of it:
-
-- As SYSTEM, in session 0: machine-wide installers. Logs to
-  `C:\Windows\Setup\defenestrate\apps.log`. Not elevated in the user's
-  session, because the shell's keyboard hook gets no keys while an elevated
-  window has focus, and the installers held it.
-- As the plain user: per-user installers (the lock records each installer's
-  scope), which break when elevated, then winget/store apps, retrying for up
-  to an hour while winget registers and the network comes up. Logs to
-  `%LOCALAPPDATA%\defenestrate\apps.log`.
-
-Each reruns at the next logon if anything failed and deletes itself once its
-apps are in.
-
-Some per-user installers ask for elevation themselves: League of Legends'
-Riot installer shows a UAC prompt on the first boot, and clicking No (or
-nothing, until it times out) leaves it for the next logon. Discord asks for
-its "System Helper" on its own first launch.
+Only one OS runs at a time on a dual boot, so sharing the home directory is
+safe, as long as Linux was shut down rather than hibernated.
 
 ### Keys
 

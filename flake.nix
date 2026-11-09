@@ -29,6 +29,7 @@
       mkDistro = import ./nix/distro.nix { inherit lib pkgs dfnstrate; };
 
       vm = mkDistro [ ./configs/vm.toml ];
+      testLinuxDisk = import ./nix/tests/linux-disk.nix { inherit pkgs lib nixpkgs; };
     in
     {
       lib.${system} = { inherit mkDistro; };
@@ -39,6 +40,8 @@
         vm-iso = vm.build.iso;
         vm = vm.build.vm;
         vm-image = vm.build.image;
+        # A Linux install to attach to the VM, for wsl.linux in configs/vm.toml.
+        test-linux-disk = testLinuxDisk;
         default = dfnstrate;
       };
 
@@ -52,6 +55,8 @@
         # ISO: catches config and generator breakage without a 25 GB build.
         vm-rendered = vm.build.rendered;
         dfnstrate-tests = dfnstrate.passthru.tests;
+        # dfn against a Linux install, in a VM; no Windows needed.
+        dfn = import ./nix/tests/dfn.nix { inherit pkgs; rendered = vm.build.rendered; linuxDisk = testLinuxDisk; };
       };
 
       # Same tools, firmware and shell the package wraps in, so `cargo run`

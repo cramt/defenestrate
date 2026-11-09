@@ -2,10 +2,18 @@
 disk = { wipe = { diskId = 0 } }
 # `dfnstrate vm` boots the disk first, so skipping the prompt can't loop setup.
 bootPrompt = false
-# Exercises the baked-app path on every image build.
-apps = ["Mozilla.Firefox"]
-appsLock = "../apps.lock.json"
 
 [user]
 name = "user"
 autoLogon = true
+
+# The Linux install `nix build .#test-linux-disk` makes, attached to the VM
+# as a second disk; shaped like saturn's (one btrfs pool, three subvolumes).
+[wsl.linux]
+user = "user"
+disks = ["d3f3e5a7-5c4e-4b7a-9f1e-6a0d2c7b8e10"]
+mounts = [
+  { device = "LABEL=linux-pool", target = "/", fsType = "btrfs", options = ["subvol=@root", "compress=zstd:1", "noatime"] },
+  { device = "LABEL=linux-pool", target = "/nix", fsType = "btrfs", options = ["subvol=@nix", "compress=zstd:1", "noatime"] },
+  { device = "LABEL=linux-pool", target = "/home", fsType = "btrfs", options = ["subvol=@home", "compress=zstd:1", "noatime"] },
+]

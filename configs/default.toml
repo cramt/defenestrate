@@ -28,6 +28,12 @@ name = "Windows11_Client_x64_en-us_26300_9457.iso"
 hash = "sha256-vUMH3zK8ivM7OczssRdK6zRThmMPiaK4bHpONrVeplA="
 language = "English (United States)"
 
+# WSL, installed offline during setup. A machine's Linux install, if it has
+# one, goes in wsl.linux (see README).
+[wsl]
+package = { url = "https://github.com/microsoft/WSL/releases/download/3.0.3/wsl.3.0.3.0.x64.msi", hash = "sha256-rpdyhpdCVb0mv5JfAPQPVpLGsghBVcvAVjwJrqCR8hE=" }
+busybox = { url = "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox", hash = "sha256-bhI+fzICqMHpsflNiUFYCiUTU4K5no0+NPuFi7oxE0g=" }
+
 # Ads, upsells and cloud-account funnels. Xbox stays (games want its
 # identity provider), as do the codecs and the small utilities.
 # There's no Copilot to remove: this build doesn't provision one.

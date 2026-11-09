@@ -1,0 +1,113 @@
+//! WSL on the Windows side, and the small distro that reaches the machine's
+//! Linux install. What goes into the image, under
+//! C:\Windows\Setup\defenestrate\wsl:
+//!   wsl.msi          installed at first logon (unattend.rs)
+//! and with wsl.linux set:
+//!   rootfs.tar       the defenestrate distro: busybox, dfn, the mount list
+//!   wsl-logon.ps1    run at every logon by the defenestrate-wsl task
+//!   wsl.json         the disks it attaches
+//!   task.xml         that task
+
+use std::path::{Path, PathBuf};
+
+use anyhow::Result;
+
+use crate::cache::Cache;
+use crate::config::{Config, FileSource, Linux};
+use crate::tasks::{self, LogonTask};
+
+pub const DIR: &str = "/Windows/Setup/defenestrate/wsl";
+pub const TASK: &str = "defenestrate-wsl";
+
+pub struct Payload {
+    /// The MSI, straight from the cache (it's 370 MB).
+    pub msi: PathBuf,
+    /// Everything else, written to the render dir's wsl/.
+    pub dir: PathBuf,
+}
+
+pub fn render(config: &Config, cache: &Cache, work: &Path, dir: &Path) -> Result<Payload> {
+    let wsl = &config.wsl;
+    let msi = cache.materialize(&FileSource::Fetched(wsl.package.clone()), work)?;
+    let out = dir.join("wsl");
+    std::fs::create_dir_all(&out)?;
+    let Some(linux) = &wsl.linux else { return Ok(Payload { msi, dir: out }) };
+
+    let busybox = std::fs::read(cache.materialize(&FileSource::Fetched(wsl.busybox.clone()), work)?)?;
+    std::fs::write(out.join("rootfs.tar"), rootfs(&busybox, linux)?)?;
+    std::fs::write(out.join("wsl-logon.ps1"), include_str!("../assets/wsl-logon.ps1"))?;
+    let disks: Vec<&str> = linux.disks.iter().map(|g| g.as_str()).collect();
+    std::fs::write(out.join("wsl.json"), serde_json::to_string(&serde_json::json!({ "disks": disks }))?)?;
+
+    let user = config.user.name.as_str();
+    std::fs::write(
+        out.join("task.xml"),
+        tasks::xml(&LogonTask {
+            description: "Attaches and mounts the Linux install in WSL, and lists its apps in the Start Menu. Log: %LOCALAPPDATA%\\defenestrate\\wsl.log",
+            user,
+            // Elevated, for `wsl --mount`, and S4U: in session 0, so no window
+            // of it (elevated windows starve the shell's keyboard hook) and no
+            // stored password.
+            principal: format!("<UserId>{user}</UserId><LogonType>S4U</LogonType><RunLevel>HighestAvailable</RunLevel>"),
+            command: "powershell.exe",
+            arguments: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\\Windows\\Setup\\defenestrate\\wsl\\wsl-logon.ps1".into(),
+        })?,
+    )?;
+    Ok(Payload { msi, dir: out })
+}
+
+const APPLETS: &[&str] = &[
+    "sh", "mount", "umount", "ls", "cat", "cp", "mv", "rm", "mkdir", "ln", "chroot", "ps", "dmesg", "grep", "sed", "awk", "head", "tail", "sleep", "env", "id",
+    "blkid", "findfs", "modprobe", "lsmod", "df", "du", "find", "vi", "less",
+];
+
+/// The defenestrate distro's root filesystem, for `wsl --import`.
+fn rootfs(busybox: &[u8], linux: &Linux) -> Result<Vec<u8>> {
+    let mut tar = tar::Builder::new(Vec::new());
+    let mut add = |path: &str, mode: u32, data: &[u8]| -> std::io::Result<()> {
+        let mut h = tar::Header::new_gnu();
+        h.set_mode(mode);
+        h.set_size(data.len() as u64);
+        h.set_mtime(0);
+        h.set_entry_type(tar::EntryType::Regular);
+        tar.append_data(&mut h, path, data)
+    };
+    add("bin/busybox", 0o755, busybox)?;
+    add("defenestrate/dfn", 0o755, include_bytes!("../assets/dfn.sh"))?;
+    add("defenestrate/linux.conf", 0o644, linux_conf(linux).as_bytes())?;
+    add("etc/passwd", 0o644, b"root:x:0:0:root:/root:/bin/sh\n")?;
+    add("etc/group", 0o644, b"root:x:0:\n")?;
+    // The distro only ever runs dfn: no Windows PATH, no C: drive, no fstab.
+    add("etc/wsl.conf", 0o644, b"[automount]\nenabled = false\nmountFsTab = false\n\n[interop]\nappendWindowsPath = false\n\n[user]\ndefault = root\n")?;
+    drop(add);
+    for dir in ["dev", "proc", "sys", "tmp", "run", "mnt", "root", "linux", "lib", "usr"] {
+        let mut h = tar::Header::new_gnu();
+        h.set_entry_type(tar::EntryType::Directory);
+        h.set_mode(if dir == "tmp" { 0o1777 } else { 0o755 });
+        h.set_size(0);
+        h.set_mtime(0);
+        tar.append_data(&mut h, format!("{dir}/"), std::io::empty())?;
+    }
+    // WSL runs commands through /bin/sh and calls mount and friends itself;
+    // the rest is for poking around (`wsl -d defenestrate`).
+    for applet in APPLETS {
+        let mut h = tar::Header::new_gnu();
+        h.set_entry_type(tar::EntryType::Symlink);
+        h.set_mode(0o777);
+        h.set_size(0);
+        h.set_mtime(0);
+        tar.append_link(&mut h, format!("bin/{applet}"), "busybox")?;
+    }
+    Ok(tar.into_inner()?)
+}
+
+/// Sourced by dfn. Every value is checked to be quote-free when the config
+/// loads, so single quotes are enough.
+fn linux_conf(linux: &Linux) -> String {
+    let mut s = format!("USER_NAME='{}'\nmounts() {{\n", linux.user);
+    for m in &linux.mounts {
+        let options: Vec<&str> = m.options.iter().map(|o| o.as_str()).collect();
+        s += &format!("\tm '{}' '{}' '{}' '{}'\n", m.device, m.fs_type, options.join(","), m.target);
+    }
+    s + "}\n"
+}

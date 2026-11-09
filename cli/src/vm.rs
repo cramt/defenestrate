@@ -121,6 +121,9 @@ pub fn run(args: &Args) -> Result<()> {
 /// vCPUs on timer and spinlock emulation. On a loaded host (load ~35 on 8
 /// cores) setup's image apply sat at 0% for 30+ minutes without them and
 /// finished in ~21 with them; boot-to-apply went from 44 to 15 minutes.
+/// It includes hv-crash, so a blue screen makes QEMU stop (a GUEST_PANICKED
+/// event); `build image` reports that rather than mistaking it for the
+/// guest's own power-off.
 /// cache=unsafe on the disks: they're disposable or a build's scratch, so
 /// NTFS flushes needn't fsync.
 pub fn qemu_base(name: &str, code: &Path, vars: &Path, tpm_socket: &Path) -> Command {

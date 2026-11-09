@@ -45,22 +45,79 @@ pub struct Config {
     /// safely (see the README on ACLs).
     #[serde(default)]
     pub fonts: Vec<FileSource>,
-    /// winget IDs whose installers are baked into the image and installed
-    /// offline on the first real boot.
-    #[serde(default)]
-    pub apps: Vec<AppId>,
-    /// winget IDs winget installs on the first real boot, online.
-    #[serde(default)]
-    pub winget_apps: Vec<AppId>,
-    /// Microsoft Store product IDs (9N…), installed on the first real boot.
-    #[serde(default)]
-    pub store_apps: Vec<AppId>,
-    /// Lockfile `defenestrate lock` writes. Needed once any app is listed.
-    pub apps_lock: Option<PathBuf>,
     #[serde(default)]
     pub appx: Appx,
+    pub wsl: Wsl,
     #[serde(default)]
     pub registry: Registry,
+}
+
+/// WSL, which is always installed, and through it the Linux install on the
+/// machine's other disk, if there is one.
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Wsl {
+    /// The WSL MSI (github.com/microsoft/WSL releases), installed during
+    /// setup so nothing is downloaded at first boot.
+    pub package: Fetched,
+    /// A static x86_64 busybox: the whole userland of the small WSL distro
+    /// that mounts the Linux install and runs its programs.
+    pub busybox: Fetched,
+    pub linux: Option<Linux>,
+}
+
+/// The machine's Linux install, run from Windows: its disks are handed to
+/// WSL, mounted like NixOS's fileSystems, and its apps run chrooted in it
+/// as `user`, showing up in the Start Menu.
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Linux {
+    pub user: LinuxName,
+    /// GPT disk GUIDs (`lsblk -dno PTUUID /dev/…`) of the disks the install
+    /// is on. Windows and Linux both name a disk by this.
+    pub disks: Vec<Guid>,
+    /// Mounted in order; the first must be "/".
+    pub mounts: Vec<Mount>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Mount {
+    pub device: Device,
+    pub target: AbsPath,
+    pub fs_type: FsType,
+    #[serde(default)]
+    pub options: Vec<MountOption>,
+}
+
+/// A filesystem by what's written on it, so it's found whatever device name
+/// the disk gets inside WSL.
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(try_from = "String")]
+pub enum Device {
+    Label(String),
+    Uuid(String),
+}
+
+impl TryFrom<String> for Device {
+    type Error = String;
+    fn try_from(s: String) -> Result<Self, String> {
+        let ok = |v: &str| !v.is_empty() && v.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b));
+        match s.split_once('=') {
+            Some(("LABEL", v)) if ok(v) => Ok(Self::Label(v.to_owned())),
+            Some(("UUID", v)) if ok(v) => Ok(Self::Uuid(v.to_owned())),
+            _ => Err(format!("{s:?} isn't LABEL=<label> or UUID=<uuid> (letters, digits, - _ .)")),
+        }
+    }
+}
+
+impl fmt::Display for Device {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::Label(l) => write!(f, "LABEL={l}"),
+            Self::Uuid(u) => write!(f, "UUID={u}"),
+        }
+    }
 }
 
 mod defaults {
@@ -271,6 +328,7 @@ macro_rules! checked_string {
             }
         }
 
+        #[allow(dead_code)]
         impl $name {
             pub fn as_str(&self) -> &str {
                 &self.0
@@ -288,14 +346,32 @@ macro_rules! checked_string {
 checked_string!(WindowsName, "a Windows name (1-15 letters, digits or -)", |s| {
     (1..=15).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 });
-checked_string!(AppId, "a winget or Store ID", |s| {
-    s.starts_with(|c: char| c.is_ascii_alphanumeric()) && s.bytes().all(|b| b.is_ascii_alphanumeric() || b".+_-".contains(&b))
-});
 checked_string!(AppxName, "an AppX package name (the part before the first _)", |s| {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.')
 });
 // Kernel names (nvme0n1, sda) reorder between boots; by-id doesn't.
 checked_string!(ByIdPath, "a /dev/disk/by-id/ path", |s| { s.strip_prefix("/dev/disk/by-id/").is_some_and(|rest| !rest.is_empty() && !rest.contains('/')) });
+
+checked_string!(LinuxName, "a Linux user name", |s| {
+    (1..=32).contains(&s.len())
+        && s.starts_with(|c: char| c.is_ascii_lowercase() || c == '_')
+        && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"-_".contains(&b))
+});
+// Lowercase: Windows prints GUIDs in uppercase, lsblk in lowercase, and the
+// logon script compares them case-insensitively anyway.
+checked_string!(Guid, "a GUID (8-4-4-4-12 hex digits)", |s| {
+    let parts: Vec<&str> = s.split('-').collect();
+    parts.iter().map(|p| p.len()).eq([8, 4, 4, 4, 12]) && parts.iter().all(|p| p.bytes().all(|b| b.is_ascii_hexdigit()))
+});
+// Absolute and plain, since it goes into a shell script.
+checked_string!(AbsPath, "an absolute path of plain components", |s| {
+    s == "/"
+        || (s.starts_with('/')
+            && !s.ends_with('/')
+            && s[1..].split('/').all(|c| !c.is_empty() && c != "." && c != ".." && c.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))))
+});
+checked_string!(FsType, "a filesystem type", |s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()));
+checked_string!(MountOption, "a mount option", |s| { !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.:=@/".contains(&b)) });
 
 /// A sha256 in SRI form, as Nix's fetchurl takes it.
 #[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -416,11 +492,11 @@ fn json_to_toml(v: serde_json::Value, path: &[&str]) -> Option<toml::Value> {
 }
 
 /// Relative paths mean relative to the file that wrote them. Only `path`
-/// keys (of a file source) and `appsLock` hold paths.
+/// keys (of a file source) hold paths.
 fn resolve_paths(table: &mut toml::Table, dir: &Path) {
     for (key, value) in table.iter_mut() {
         match value {
-            toml::Value::String(s) if key == "path" || key == "appsLock" => {
+            toml::Value::String(s) if key == "path" => {
                 *s = dir.join(&*s).to_string_lossy().into_owned();
             }
             toml::Value::Table(t) => resolve_paths(t, dir),
@@ -450,9 +526,13 @@ fn merge(into: &mut toml::Table, from: toml::Table) {
 
 impl Config {
     fn check(&self) -> Result<()> {
-        let any_apps = !(self.apps.is_empty() && self.winget_apps.is_empty() && self.store_apps.is_empty());
-        if any_apps && self.apps_lock.is_none() {
-            bail!("config: apps are listed but appsLock isn't set (create one with `defenestrate lock --lock FILE ID`)");
+        if let Some(linux) = &self.wsl.linux {
+            if linux.mounts.first().is_none_or(|m| m.target.as_str() != "/") {
+                bail!("config: wsl.linux.mounts: the first mount must be \"/\"");
+            }
+            if linux.disks.is_empty() {
+                bail!("config: wsl.linux.disks: name at least the disk \"/\" is on");
+            }
         }
         for (hive, keys) in [("software", &self.registry.software), ("system", &self.registry.system), ("defaultUser", &self.registry.default_user)] {
             for (key, values) in keys {
@@ -467,10 +547,6 @@ impl Config {
             }
         }
         Ok(())
-    }
-
-    pub fn has_apps(&self) -> bool {
-        !(self.apps.is_empty() && self.winget_apps.is_empty() && self.store_apps.is_empty())
     }
 }
 

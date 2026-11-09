@@ -1,20 +1,19 @@
 //! dfnstrate: builds defenestrate (a declarative Windows) from Microsoft's
 //! stock ISO, and flashes it. The Nix flake runs exactly these commands.
 
-mod apps;
 mod cache;
 mod config;
 mod fetch;
 mod flash;
 mod image;
 mod iso;
-mod lock;
-mod lockfile;
 mod registry;
 mod render;
+mod tasks;
 mod tools;
 mod unattend;
 mod vm;
+mod wsl;
 
 use std::path::{Path, PathBuf};
 
@@ -112,13 +111,6 @@ enum Cmd {
     Vm(vm::Args),
     /// Write a built image onto a whole disk, like an SD card.
     Flash(flash::Args),
-    /// Pin winget apps in apps.lock.json.
-    Lock {
-        #[command(flatten)]
-        cache: CacheArgs,
-        #[command(flatten)]
-        args: lock::Args,
-    },
 }
 
 #[derive(Subcommand)]
@@ -198,7 +190,6 @@ fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Vm(args) => vm::run(&args),
         Cmd::Flash(args) => flash::run(&args),
-        Cmd::Lock { cache, args } => lock::run(args, &cache.open()?),
     }
 }
 

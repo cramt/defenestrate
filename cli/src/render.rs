@@ -6,11 +6,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::apps;
 use crate::cache::Cache;
 use crate::config::{Config, Hive, RegValue, Shell};
 use crate::registry::{self, Root};
 use crate::unattend::{self, Variant};
+use crate::wsl;
 
 /// The shell's file name under C:\Program Files\defenestrate.
 pub const BUILTIN_SHELL: &str = "defenestrate-shell.exe";
@@ -37,14 +37,14 @@ pub struct Rendered {
     pub fonts: Vec<(PathBuf, String)>,
     /// The shell exe, when it's ours to install.
     pub shell_exe: Option<PathBuf>,
-    pub has_apps: bool,
+    pub wsl: wsl::Payload,
 }
 
 /// Writes into `dir`:
 /// - reg/<name>.reg (UTF-16, for reg.exe) and reg/ascii/<name>.reg (for hivex)
 /// - autounattend.xml
 /// - appx-remove.txt
-/// - apps/ (only with apps)
+/// - wsl/ (see wsl.rs)
 pub fn render(config: &Config, variant: &Variant, cache: &Cache, work: &Path, dir: &Path) -> Result<Rendered> {
     std::fs::create_dir_all(dir.join("reg/ascii"))?;
 
@@ -89,19 +89,10 @@ pub fn render(config: &Config, variant: &Variant, cache: &Cache, work: &Path, di
     let appx: String = config.appx.remove.iter().map(|n| format!("{n}\r\n")).collect();
     std::fs::write(dir.join("appx-remove.txt"), appx)?;
 
-    let lock = apps::read_lock(config)?;
-    let mut has_apps = false;
-    if let Some(lock) = &lock {
-        let plan = apps::plan(config, lock)?;
-        if !plan.is_empty() {
-            apps::write_payload(config, &plan, cache, work, &dir.join("apps"))?;
-            has_apps = true;
-        }
-    }
+    let wsl = wsl::render(config, cache, work, dir)?;
+    std::fs::write(dir.join("autounattend.xml"), unattend::render(config, variant)?)?;
 
-    std::fs::write(dir.join("autounattend.xml"), unattend::render(config, variant, has_apps)?)?;
-
-    Ok(Rendered { dir: dir.to_path_buf(), fonts, shell_exe, has_apps })
+    Ok(Rendered { dir: dir.to_path_buf(), fonts, shell_exe, wsl })
 }
 
 /// Shell is a plain REG_SZ, so no %ProgramFiles%; setup always installs to C:.

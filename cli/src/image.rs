@@ -54,6 +54,12 @@ pub fn preflight(args: &Args) -> Result<Ready> {
     Ok(Ready { code, vars_template })
 }
 
+/// `work` should be on an SSD. On spinning disks the guest's writes and its
+/// reads from the install CD stall each other long enough for Windows to
+/// drop the CD: setup fails with 0x800701B1 ("device not connected"), or
+/// WinPE blue-screens. 5 of 6 builds with work on a btrfs pool of two HDDs
+/// failed this way; the one since with work on an SSD didn't, nor did the
+/// earlier Nix builds (in /tmp, on the same SSD).
 pub fn build(config: &Config, args: &Args, ready: Ready, iso: &Path, work: &Path, out: &Path) -> Result<()> {
     let Ready { code, vars_template } = ready;
     std::fs::create_dir_all(out)?;
@@ -86,8 +92,11 @@ pub fn build(config: &Config, args: &Args, ready: Ready, iso: &Path, work: &Path
         .args(["-device", "qemu-xhci", "-device", "usb-tablet"])
         .args(["-display", "none"])
         .arg("-monitor")
-        .arg(format!("unix:{},server=on,wait=off", monitor.display()));
+        .arg(format!("unix:{},server=on,wait=off", monitor.display()))
+        .arg("-qmp")
+        .arg(format!("unix:{},server=on,wait=off", work.join("qmp.sock").display()));
     let mut child = qemu.spawn().context("starting QEMU")?;
+    let shutdown = watch_events(work.join("qmp.sock"));
 
     // Unattended setup either writes steadily or is stuck on a dialog nobody
     // will click. Fail on a stall instead of hanging, and leave screenshots
@@ -112,6 +121,14 @@ pub fn build(config: &Config, args: &Args, ready: Ready, iso: &Path, work: &Path
         if let Some(status) = child.try_wait()? {
             if !status.success() {
                 bail!("QEMU exited with {status}");
+            }
+            // QEMU exits 0 for more than the guest powering off. Only that
+            // means first logon finished.
+            std::thread::sleep(Duration::from_secs(1));
+            match shutdown.lock().unwrap().clone() {
+                Some(reason) if reason == "guest-shutdown" => {}
+                Some(reason) => bail!("QEMU stopped, but not because Windows shut down: {reason} (screenshots in {})", work.display()),
+                None => eprintln!("warning: QEMU exited without a SHUTDOWN event on QMP; assuming Windows shut down"),
             }
             break;
         }
@@ -155,6 +172,38 @@ pub fn build(config: &Config, args: &Args, ready: Ready, iso: &Path, work: &Path
     Ok(())
 }
 
+/// Logs QEMU's lifecycle events from QMP (resets, shutdowns with their
+/// reason, guest panics) and keeps the last shutdown reason.
+fn watch_events(socket: PathBuf) -> std::sync::Arc<std::sync::Mutex<Option<String>>> {
+    use std::io::BufRead;
+    let reason = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let out = reason.clone();
+    std::thread::spawn(move || {
+        let stream = (0..100).find_map(|_| {
+            UnixStream::connect(&socket).ok().or_else(|| {
+                std::thread::sleep(Duration::from_millis(100));
+                None
+            })
+        });
+        let Some(mut stream) = stream else {
+            eprintln!("warning: couldn't connect to QMP; QEMU's reason for stopping won't be known");
+            return;
+        };
+        if writeln!(stream, r#"{{"execute":"qmp_capabilities"}}"#).is_err() {
+            return;
+        }
+        for line in BufReader::new(stream).lines().map_while(Result::ok) {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+            let Some(event) = v["event"].as_str() else { continue };
+            eprintln!("QEMU event: {event} {}", v["data"]);
+            if event == "SHUTDOWN" {
+                *reason.lock().unwrap() = v["data"]["reason"].as_str().map(str::to_owned);
+            }
+        }
+    });
+    out
+}
+
 /// A power-off only means something shut Windows down, so check what's on
 /// the disk: Windows Boot Manager on its own ESP, and the log first logon
 /// writes, read straight off NTFS. That last one also fails on a volume
@@ -166,19 +215,23 @@ fn verify(config: &Config, disk: &Path) -> Result<()> {
 
     tools::run(MDIR.cmd().arg("-i").arg(format!("{}@@{}", disk.display(), esp * 512)).arg("::/EFI/Microsoft/Boot/bootmgfw.efi"))
         .context("setup didn't finish: no Windows Boot Manager on the image's ESP")?;
-    let inode = tools::output_string(IFIND.cmd().arg("-o").arg(windows.to_string()).arg("-n").arg("/Windows/Setup/defenestrate/firstlogon.log").arg(disk))
-        .context("setup didn't finish: first logon never ran (or C: isn't readable NTFS)")?;
-
-    if config.has_apps() {
-        // Without the tasks, the apps in the image would never get installed.
-        let log = tools::output(ICAT.cmd().arg("-o").arg(windows.to_string()).arg(disk).arg(inode.trim()))?;
-        let log = String::from_utf8_lossy(&log);
-        eprint!("{log}");
-        for task in ["defenestrate-apps", "defenestrate-apps-user"] {
-            if !log.contains(&format!("\"{task}\" has successfully been created")) {
-                bail!("first logon didn't register the {task} task");
-            }
+    // ifind says "File not found" and exits 0 when it doesn't find one.
+    let find = |path: &str| -> Result<String> {
+        let out = tools::output_string(IFIND.cmd().arg("-o").arg(windows.to_string()).arg("-n").arg(path).arg(disk))?;
+        let inode = out.trim();
+        if inode.is_empty() || !inode.bytes().all(|b| b.is_ascii_digit() || b == b'-') {
+            bail!("{path} isn't on the image ({inode})");
         }
+        Ok(inode.to_owned())
+    };
+    let inode = find("/Windows/Setup/defenestrate/firstlogon.log").context("setup didn't finish: first logon never ran (or C: isn't readable NTFS)")?;
+    let log = tools::output(ICAT.cmd().arg("-o").arg(windows.to_string()).arg(disk).arg(&inode))?;
+    let log = String::from_utf8_lossy(&log);
+    eprint!("first logon's log:\n{log}");
+
+    find("/Program Files/WSL/wsl.exe").context("first logon didn't install WSL (see wsl-install.log next to firstlogon.log)")?;
+    if config.wsl.linux.is_some() && !log.contains(&format!("\"{}\" has successfully been created", crate::wsl::TASK)) {
+        bail!("first logon didn't register the {} task", crate::wsl::TASK);
     }
     Ok(())
 }

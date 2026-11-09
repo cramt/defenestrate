@@ -18,7 +18,7 @@ let
   # they become store paths here.
   resolveDeep = dir: v:
     if builtins.isAttrs v then lib.mapAttrs (k: x:
-      if lib.elem k [ "path" "appsLock" ] && builtins.isString x && !lib.hasPrefix "/" x then dir + "/${x}"
+      if k == "path" && builtins.isString x && !lib.hasPrefix "/" x then dir + "/${x}"
       else resolveDeep dir x) v
     else if builtins.isList v then map (resolveDeep dir) v
     else v;
@@ -36,7 +36,6 @@ let
   # Only for finding what to fetch; dfnstrate does the real merge.
   defaults = lib.importTOML ../configs/default.toml;
   all = [ defaults ] ++ layers;
-  lastDefined = name: lib.foldl (acc: l: l.${name} or acc) null all;
 
   # Every { url, hash } anywhere in the config is a file to fetch.
   collect = v:
@@ -45,12 +44,6 @@ let
     else if builtins.isList v then lib.concatMap collect v
     else [ ];
 
-  appsLock = lastDefined "appsLock";
-  locked = if appsLock == null then { } else (lib.importJSON appsLock).apps;
-  bakedApps = lib.concatMap (id: lib.optional (locked.${id}.baked or null != null) {
-    inherit (locked.${id}.baked) url hash;
-    name = locked.${id}.baked.file;
-  }) (lib.concatMap (l: l.apps or [ ]) all);
 
   iso = lib.foldl (acc: l: acc // (l.iso or { })) { } all;
   # Same name and hash as `nix-store --add-fixed sha256 <iso>`, so an ISO
@@ -74,7 +67,7 @@ let
     '';
 
   cacheKey = hash: lib.replaceStrings [ "/" "+" ] [ "_" "-" ] hash;
-  fetched = lib.listToAttrs (map (s: lib.nameValuePair (cacheKey s.hash) (pkgs.fetchurl s)) (collect all ++ bakedApps));
+  fetched = lib.listToAttrs (map (s: lib.nameValuePair (cacheKey s.hash) (pkgs.fetchurl s)) (collect all));
   cache = pkgs.linkFarm "dfnstrate-cache" (fetched // { ${cacheKey iso.hash} = isoSource; });
 
   run = args: "dfnstrate ${args} ${configArgs} --cache ${cache} --offline";
