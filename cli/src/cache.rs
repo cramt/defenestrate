@@ -36,9 +36,12 @@ impl Cache {
         self.dir.join(hash.cache_key())
     }
 
+    /// The cached file, symlinks resolved: the Nix module's cache is a
+    /// directory of links into the store, and wimlib adds a link as a link,
+    /// which on Windows points at a /nix/store path that isn't there (WSL's
+    /// MSI then failed with 1619, "package could not be opened").
     pub fn lookup(&self, hash: &Sri) -> Option<PathBuf> {
-        let p = self.path(hash);
-        p.exists().then_some(p)
+        std::fs::canonicalize(self.path(hash)).ok()
     }
 
     /// The file with this hash, downloading it from `url` if it isn't cached.
@@ -193,4 +196,25 @@ fn extract_member(archive: &Path, member: &str, dest: &Path) -> Result<()> {
         }
     }
     bail!("no {member} in the archive")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cached_symlinks_resolve_to_the_file() {
+        let dir = std::env::temp_dir().join(format!("dfnstrate-cache-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("store")).unwrap();
+        std::fs::write(dir.join("store/file"), b"x").unwrap();
+        let cache = Cache { dir: dir.join("cache"), offline: true };
+        std::fs::create_dir_all(&cache.dir).unwrap();
+        let hash = hash_file(&dir.join("store/file")).unwrap();
+        std::os::unix::fs::symlink(dir.join("store/file"), cache.path(&hash)).unwrap();
+        let found = cache.lookup(&hash).unwrap();
+        assert!(!found.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(found, std::fs::canonicalize(dir.join("store/file")).unwrap());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
