@@ -79,6 +79,11 @@ let
     allowSubstitutes = false;
   };
 
+  local = {
+    preferLocalBuild = true;
+    allowSubstitutes = false;
+  };
+
   mkIso = forImage: pkgs.runCommand "defenestrate.iso" heavy ''
     ${run "build iso${lib.optionalString forImage " --for-image"}"} --out $out --work-dir work
   '';
@@ -94,11 +99,16 @@ in
     inherit image cache isoSource;
     # For looking at what the config generates: `nix build .#…build.rendered`.
     rendered = pkgs.runCommand "defenestrate-rendered" { nativeBuildInputs = [ dfnstrate ]; } (run "render" + " --out $out");
+    # Both scripts are tiny but reference the ISO or image, which makes those
+    # inputs: built on a remote builder, the 30 GB image would be copied
+    # there for a two-line wrapper.
     vm = pkgs.writeShellApplication {
+      derivationArgs = local;
       name = "defenestrate-vm";
       text = ''exec ${lib.getExe dfnstrate} vm --iso ${isoBuild}/defenestrate.iso "$@"'';
     };
     install = pkgs.writeShellApplication {
+      derivationArgs = local;
       name = "defenestrate-install";
       text = ''exec ${lib.getExe dfnstrate} flash --image ${image} ${configArgs} "$@"'';
     };
