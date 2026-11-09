@@ -1,10 +1,10 @@
-//! Resolves winget package IDs against one pinned commit of
-//! microsoft/winget-pkgs and writes apps.lock.json, which nix/apps.nix
-//! builds from. Think npm's lockfile: the config names packages, the lock
+//! `dfnstrate lock`: resolves winget package IDs against one pinned commit
+//! of microsoft/winget-pkgs and writes apps.lock.json, which the build
+//! reads. Think npm's lockfile: the config names packages, the lock
 //! pins exactly what gets installed.
 //!
-//!   lock-apps [--lock FILE] [--bump] [--winget ID]... [--msstore ID]...
-//!             [--remove ID]... [ID]...
+//!   dfnstrate lock [--lock FILE] [--bump] [--winget ID]... [--msstore ID]...
+//!                  [--remove ID]... [ID]...
 //!
 //! Bare IDs are baked into the image: their installer is pinned (URL +
 //! hash) and installed offline on the machine's first real boot. The rest
@@ -22,120 +22,16 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::path::PathBuf;
-use std::process::Command;
 
 use base64::Engine;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
-type Result<T> = std::result::Result<T, Box<dyn Error>>;
+use crate::cache::Cache;
+use crate::lockfile::{Baked, InstallerType, Lock, LockedApp, Scope};
+
+type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
 const REPO: &str = "microsoft/winget-pkgs";
-
-// The lockfile. nix/apps.nix re-checks this shape with module types, so a
-// hand-edited lock fails evaluation the same way.
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Lock {
-    winget_pkgs_rev: String,
-    apps: BTreeMap<String, LockedApp>,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-enum LockedApp {
-    /// Installer pinned and baked into the image, installed offline.
-    Baked(Baked),
-    /// A winget-pkgs version that winget installs online.
-    Winget { version: String },
-    /// The store only serves a product's current version, so this pins
-    /// nothing; it records that the ID exists.
-    Msstore {},
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Baked {
-    version: String,
-    url: String,
-    /// SRI, as fetchurl takes it.
-    hash: String,
-    /// Store name, and the file name on the machine.
-    file: String,
-    installer_type: InstallerType,
-    /// Decides how it's run: per-user installers break when elevated
-    /// (Discord's Squirrel Update.exe crashes with 0xC0000005), so those
-    /// run as the plain user, everything else elevated.
-    scope: Scope,
-    /// Appended verbatim to the command line: Windows hands programs one
-    /// string, not argv, and manifests write switches that way.
-    args: String,
-    success_codes: Vec<i64>,
-}
-
-#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
-#[serde(rename_all = "lowercase")]
-enum Scope {
-    Machine,
-    User,
-    /// The manifest doesn't say.
-    Unspecified,
-}
-
-/// The installer types that can run unattended from a local file. msix,
-/// zip, portable, msstore and friends aren't here, so they can't be locked
-/// as baked at all.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
-#[serde(rename_all = "lowercase")]
-enum InstallerType {
-    Msi,
-    Wix,
-    Nullsoft,
-    Inno,
-    Burn,
-    Exe,
-}
-
-impl InstallerType {
-    fn parse(s: &str) -> Option<Self> {
-        Some(match s.to_ascii_lowercase().as_str() {
-            "msi" => Self::Msi,
-            "wix" => Self::Wix,
-            "nullsoft" => Self::Nullsoft,
-            "inno" => Self::Inno,
-            "burn" => Self::Burn,
-            "exe" => Self::Exe,
-            _ => return None,
-        })
-    }
-
-    /// What winget itself passes when a manifest has no Silent switch.
-    /// A bare exe has no convention, so the manifest must say.
-    fn default_silent(self) -> Option<&'static str> {
-        match self {
-            Self::Msi | Self::Wix => Some("/qn /norestart"),
-            Self::Nullsoft => Some("/S"),
-            Self::Inno => Some("/SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART"),
-            Self::Burn => Some("/quiet /norestart"),
-            Self::Exe => None,
-        }
-    }
-
-    /// 3010 and 1641 are Windows Installer's "done, reboot needed/started".
-    fn default_success_codes(self) -> &'static [i64] {
-        match self {
-            Self::Msi | Self::Wix | Self::Burn => &[0, 3010, 1641],
-            Self::Nullsoft | Self::Inno | Self::Exe => &[0],
-        }
-    }
-
-    fn extension(self) -> &'static str {
-        match self {
-            Self::Msi | Self::Wix => "msi",
-            _ => "exe",
-        }
-    }
-}
 
 // winget-pkgs installer manifests. Most fields can sit at the root as a
 // default for every installer, or on one installer to override it.
@@ -198,9 +94,7 @@ struct GitHub {
 
 impl GitHub {
     fn api(&self, path: &str) -> Result<Option<serde_json::Value>> {
-        let mut req = ureq::get(&format!("https://api.github.com/{path}"))
-            .set("Accept", "application/vnd.github+json")
-            .set("User-Agent", "defenestrate-lock-apps");
+        let mut req = ureq::get(&format!("https://api.github.com/{path}")).set("Accept", "application/vnd.github+json").set("User-Agent", "dfnstrate-lock");
         if let Some(token) = &self.token {
             req = req.set("Authorization", &format!("Bearer {token}"));
         }
@@ -238,26 +132,16 @@ fn cmp_versions(a: &str, b: &str) -> Ordering {
     }
     let (a, b) = (parts(a), parts(b));
     let zero = (0, String::new());
-    (0..a.len().max(b.len()))
-        .map(|i| a.get(i).unwrap_or(&zero).cmp(b.get(i).unwrap_or(&zero)))
-        .find(|o| o.is_ne())
-        .unwrap_or(Ordering::Equal)
+    (0..a.len().max(b.len())).map(|i| a.get(i).unwrap_or(&zero).cmp(b.get(i).unwrap_or(&zero))).find(|o| o.is_ne()).unwrap_or(Ordering::Equal)
 }
 
 /// Newest version of `id` at `rev`, with its installer manifest.
 fn latest(gh: &GitHub, rev: &str, id: &str) -> Result<(String, Manifest)> {
     let first = id.chars().next().ok_or("empty package ID")?.to_ascii_lowercase();
     let dir = format!("manifests/{first}/{}", id.replace('.', "/"));
-    let listing = gh
-        .api(&format!("repos/{REPO}/contents/{dir}?ref={rev}"))?
-        .ok_or_else(|| format!("{id}: no such package in winget-pkgs@{rev}"))?;
-    let mut names: Vec<&str> = listing
-        .as_array()
-        .ok_or("directory listing isn't a list")?
-        .iter()
-        .filter(|e| e["type"] == "dir")
-        .filter_map(|e| e["name"].as_str())
-        .collect();
+    let listing = gh.api(&format!("repos/{REPO}/contents/{dir}?ref={rev}"))?.ok_or_else(|| format!("{id}: no such package in winget-pkgs@{rev}"))?;
+    let mut names: Vec<&str> =
+        listing.as_array().ok_or("directory listing isn't a list")?.iter().filter(|e| e["type"] == "dir").filter_map(|e| e["name"].as_str()).collect();
     names.sort_by(|a, b| cmp_versions(b, a));
     // The directory also holds sub-packages (Mozilla.Firefox.ESR lives in
     // Mozilla/Firefox/ESR), which have no manifest for this ID, so the
@@ -275,7 +159,7 @@ fn latest(gh: &GitHub, rev: &str, id: &str) -> Result<(String, Manifest)> {
 
 /// Picks the installer winget would on an x64 English machine installing
 /// for everyone, and pins it.
-fn bake(id: &str, version: &str, manifest: &Manifest) -> Result<Baked> {
+fn bake(cache: &Cache, id: &str, version: &str, manifest: &Manifest) -> Result<Baked> {
     let d = &manifest.defaults;
     let arch_rank = |a: &str| match a {
         "x64" => Some(0),
@@ -354,10 +238,16 @@ fn bake(id: &str, version: &str, manifest: &Manifest) -> Result<Baked> {
     }
 
     let file = store_name(&format!("{id}-{version}.{}", ty.extension()));
-    // Downloads it into the store under the name fetchurl will use, so the
-    // build finds it there instead of downloading again, and a URL whose
-    // contents changed since the manifest was written fails now.
-    let actual = prefetch(&url, &file)?;
+    // Downloads it into the cache, so the build finds it there instead of
+    // downloading again, and a URL whose contents changed since the manifest
+    // was written fails now.
+    let got = cache.download(&url)?;
+    let actual = got.hash.to_string();
+    if actual == hash {
+        cache.keep(got)?;
+    } else {
+        let _ = std::fs::remove_file(&got.path);
+    }
     if actual != hash {
         return Err(format!(
             "{id} {version}: {url} hashes to {actual}, but the manifest says {hash}. Probably an unversioned URL that has moved on; lock it with --winget instead."
@@ -381,18 +271,6 @@ fn store_name(name: &str) -> String {
     name.chars().map(|c| if c.is_ascii_alphanumeric() || "+-._?=".contains(c) { c } else { '-' }).collect()
 }
 
-fn prefetch(url: &str, name: &str) -> Result<String> {
-    eprintln!("fetching {url}");
-    let out = Command::new("nix")
-        .args(["--extra-experimental-features", "nix-command", "store", "prefetch-file", "--json", "--hash-type", "sha256", "--name", name, url])
-        .output()?;
-    if !out.status.success() {
-        return Err(format!("downloading {url} failed:\n{}", String::from_utf8_lossy(&out.stderr)).into());
-    }
-    let json: serde_json::Value = serde_json::from_slice(&out.stdout)?;
-    Ok(json["hash"].as_str().ok_or("nix store prefetch-file printed no hash")?.to_owned())
-}
-
 /// Checks a store product exists, through the endpoint winget's msstore
 /// source queries.
 fn check_msstore(id: &str) -> Result<()> {
@@ -410,11 +288,11 @@ enum Kind {
     Msstore,
 }
 
-fn resolve(gh: &GitHub, rev: &str, id: &str, kind: Kind) -> Result<LockedApp> {
+fn resolve(cache: &Cache, gh: &GitHub, rev: &str, id: &str, kind: Kind) -> Result<LockedApp> {
     let app = match kind {
         Kind::Baked => {
             let (version, manifest) = latest(gh, rev, id)?;
-            LockedApp::Baked(bake(id, &version, &manifest)?)
+            LockedApp::Baked(bake(cache, id, &version, &manifest)?)
         }
         Kind::Winget => LockedApp::Winget { version: latest(gh, rev, id)?.0 },
         Kind::Msstore => {
@@ -422,41 +300,51 @@ fn resolve(gh: &GitHub, rev: &str, id: &str, kind: Kind) -> Result<LockedApp> {
             LockedApp::Msstore {}
         }
     };
-    eprintln!("{id}: {}", match &app {
-        LockedApp::Baked(b) => format!("{}, baked {:?} installer ({:?} scope), args {}", b.version, b.installer_type, b.scope, b.args),
-        LockedApp::Winget { version } => format!("{version}, winget at first boot"),
-        LockedApp::Msstore {} => "Microsoft Store, at first boot".to_owned(),
-    });
+    eprintln!(
+        "{id}: {}",
+        match &app {
+            LockedApp::Baked(b) => format!("{}, baked {:?} installer ({:?} scope), args {}", b.version, b.installer_type, b.scope, b.args),
+            LockedApp::Winget { version } => format!("{version}, winget at first boot"),
+            LockedApp::Msstore {} => "Microsoft Store, at first boot".to_owned(),
+        }
+    );
     Ok(app)
 }
 
-fn main() {
-    if let Err(e) = run() {
-        eprintln!("lock-apps: {e}");
-        std::process::exit(1);
-    }
+#[derive(clap::Args)]
+pub struct Args {
+    /// Lockfile to update (created if missing).
+    #[arg(long, default_value = "apps.lock.json")]
+    lock: PathBuf,
+    /// Move the pin to winget-pkgs' current master and re-resolve everything.
+    #[arg(long)]
+    bump: bool,
+    /// Lock for winget to install online at first boot.
+    #[arg(long, value_name = "ID")]
+    winget: Vec<String>,
+    /// Lock a Microsoft Store product (9N…).
+    #[arg(long, value_name = "ID")]
+    msstore: Vec<String>,
+    /// Drop from the lock.
+    #[arg(long, value_name = "ID")]
+    remove: Vec<String>,
+    /// Bake these into the image: installer pinned, installed offline.
+    ids: Vec<String>,
 }
 
-fn run() -> Result<()> {
-    let mut lock_path = PathBuf::from("apps.lock.json");
-    let mut bump = false;
-    let mut wanted: Vec<(String, Kind)> = Vec::new();
-    let mut remove = Vec::new();
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        let mut value = |flag: &str| args.next().ok_or_else(|| format!("{flag} needs a value"));
-        match arg.as_str() {
-            "--lock" => lock_path = value("--lock")?.into(),
-            "--bump" => bump = true,
-            "--winget" => wanted.push((value("--winget")?, Kind::Winget)),
-            "--msstore" => wanted.push((value("--msstore")?, Kind::Msstore)),
-            "--remove" => remove.push(value("--remove")?),
-            s if s.starts_with('-') => return Err(format!("unknown flag {s}").into()),
-            id => wanted.push((id.to_owned(), Kind::Baked)),
-        }
-    }
+pub fn run(args: Args, cache: &Cache) -> anyhow::Result<()> {
+    run_inner(args, cache).map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+fn run_inner(args: Args, cache: &Cache) -> Result<()> {
+    let lock_path = args.lock;
+    let bump = args.bump;
+    let remove = args.remove;
+    let mut wanted: Vec<(String, Kind)> = args.ids.into_iter().map(|id| (id, Kind::Baked)).collect();
+    wanted.extend(args.winget.into_iter().map(|id| (id, Kind::Winget)));
+    wanted.extend(args.msstore.into_iter().map(|id| (id, Kind::Msstore)));
     if wanted.is_empty() && remove.is_empty() && !bump {
-        return Err("usage: lock-apps [--lock FILE] [--bump] [--winget ID]... [--msstore ID]... [--remove ID]... [ID]...".into());
+        return Err("nothing to do: give IDs, --winget/--msstore/--remove IDs, or --bump".into());
     }
 
     let gh = GitHub { token: std::env::var("GITHUB_TOKEN").ok().filter(|t| !t.is_empty()) };
@@ -485,10 +373,7 @@ fn run() -> Result<()> {
     }
     // Everything resolves before anything is written, so one bad ID leaves
     // the lock as it was.
-    let resolved = wanted
-        .iter()
-        .map(|(id, kind)| Ok((id.clone(), resolve(&gh, &lock.winget_pkgs_rev, id, *kind)?)))
-        .collect::<Result<Vec<_>>>()?;
+    let resolved = wanted.iter().map(|(id, kind)| Ok((id.clone(), resolve(cache, &gh, &lock.winget_pkgs_rev, id, *kind)?))).collect::<Result<Vec<_>>>()?;
     lock.apps.extend(resolved);
 
     std::fs::write(&lock_path, serde_json::to_string_pretty(&lock)? + "\n")?;

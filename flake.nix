@@ -13,60 +13,53 @@
   outputs = { self, nixpkgs, crane, rust-overlay }:
     let
       system = "x86_64-linux";
-      # requireFile marks the ISO unfree, which, fair. Allow exactly that.
       pkgs = import nixpkgs {
         inherit system;
         overlays = [ rust-overlay.overlays.default ];
-        config.allowUnfreePredicate = p: nixpkgs.lib.hasPrefix "Windows11_" (nixpkgs.lib.getName p);
       };
-
-      mkDistro = modules:
-        (nixpkgs.lib.evalModules {
-          modules = [
-            ./nix/module.nix
-            {
-              # `packages` is what configs/ reach for: things this flake builds.
-              _module.args = { inherit pkgs; packages = { inherit shell; }; };
-              source = pkgs.callPackage ./nix/source.nix { };
-            }
-          ] ++ modules;
-        }).config;
+      inherit (pkgs) lib;
 
       windowsExe = src: mainProgram: import ./nix/shell.nix { inherit pkgs crane src mainProgram; };
       shell = windowsExe ./shell "defenestrate-shell.exe";
 
-      # Runs on the Linux side, writing apps.lock.json.
-      lock-apps =
-        let craneLib = crane.mkLib pkgs;
-        in craneLib.buildPackage {
-          src = craneLib.cleanCargoSource ./tools/lock-apps;
-          strictDeps = true;
-          meta.mainProgram = "lock-apps";
-        };
+      # The Linux-side tool everything goes through, Nix builds included.
+      dfnstrate = pkgs.callPackage ./nix/dfnstrate.nix { inherit crane shell; };
 
-      vm = mkDistro [ ./configs/default.nix ./configs/vm.nix ];
+      # mkDistro [ ./my-machine.toml ] or [ ./my-machine.nix ]; see nix/distro.nix.
+      mkDistro = import ./nix/distro.nix { inherit lib pkgs dfnstrate; };
+
+      vm = mkDistro [ ./configs/vm.toml ];
     in
     {
       lib.${system} = { inherit mkDistro; };
 
       packages.${system} = {
-        inherit shell lock-apps;
+        inherit shell dfnstrate;
         cosmic-bar-prototype = windowsExe ./prototypes/cosmic-bar "cosmic-bar.exe";
         vm-iso = vm.build.iso;
         vm = vm.build.vm;
-        default = vm.build.iso;
+        vm-image = vm.build.image;
+        default = dfnstrate;
       };
 
       apps.${system} = {
-        vm = {
-          type = "app";
-          program = "${vm.build.vm}/bin/defenestrate-vm";
-        };
-        # Run from the repo root: it reads and writes ./apps.lock.json.
-        lock-apps = {
-          type = "app";
-          program = nixpkgs.lib.getExe lock-apps;
-        };
+        default = { type = "app"; program = lib.getExe dfnstrate; };
+        vm = { type = "app"; program = lib.getExe vm.build.vm; };
       };
+
+      checks.${system} = {
+        # Renders the VM config, which fetches only fonts and Firefox, not the
+        # ISO: catches config and generator breakage without a 25 GB build.
+        vm-rendered = vm.build.rendered;
+        dfnstrate-tests = dfnstrate.passthru.tests;
+      };
+
+      # Same tools, firmware and shell the package wraps in, so `cargo run`
+      # behaves like the installed dfnstrate.
+      devShells.${system}.default = pkgs.mkShell (dfnstrate.passthru.env // {
+        inputsFrom = [ dfnstrate.passthru.unwrapped ];
+        packages = [ pkgs.clippy pkgs.rustfmt ] ++ dfnstrate.passthru.runtime;
+        DEFENESTRATE_SHELL_EXE = "${shell}/bin/defenestrate-shell.exe";
+      });
     };
 }

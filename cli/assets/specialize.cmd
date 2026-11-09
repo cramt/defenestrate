@@ -12,4 +12,7 @@ reg load HKU\DefenestrateDefault "%SystemDrive%\Users\Default\NTUSER.DAT" || exi
 reg import "%here%defaultUser.reg"
 set rc=%errorlevel%
 reg unload HKU\DefenestrateDefault
-exit /b %rc%
+if %rc% neq 0 exit /b %rc%
+
+rem Last, so a package that won't go can't keep the registry config from applying.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%here%remove-appx.ps1"

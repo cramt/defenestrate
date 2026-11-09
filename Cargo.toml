@@ -1,0 +1,9 @@
+# Only the Linux-side tool. The shell cross-compiles to Windows with its own
+# toolchain file, and prototypes are standalone, so both stay out.
+[workspace]
+members = ["cli"]
+exclude = ["shell", "prototypes"]
+resolver = "3"
+
+[profile.release]
+lto = "thin"

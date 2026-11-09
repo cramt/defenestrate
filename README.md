@@ -1,82 +1,161 @@
 # defenestrate
 
-A Windows distro, NixOS style: a flake that takes Microsoft's stock Windows 11
-ISO and builds an install ISO with explorer.exe thrown out of the window and
-the rest of Microsoft's opinions configured away.
+A Windows distro, NixOS style: takes Microsoft's stock Windows 11 ISO and
+builds an install with explorer.exe thrown out of the window and the rest of
+Microsoft's opinions configured away.
 
-Everything is declared in `configs/` as typed Nix options: edition, locale,
-user, disk layout, replacement shell, and registry values per hive.
+Two halves:
+
+- **`dfnstrate`** (`cli/`), the Linux side: fetches the stock ISO, builds an
+  install ISO or a finished whole-disk image from a config, flashes it, and
+  pins apps. A plain Rust binary; it works on any distro. The Nix flake is a
+  thin layer that runs the same commands, so both paths hit the same code.
+- **The shell** (`shell/`), the Windows side: a tiling window manager that
+  replaces explorer.
+
+A config is TOML (or a Nix module setting the same keys): edition, locale,
+user, disk layout, shell, fonts, apps, AppX packages to drop, and registry
+values per hive. Every config is layered over the distro's own defaults,
+[`configs/default.toml`](configs/default.toml).
 
 ![Tiled terminals and Firefox, the Super-tap launcher open, all in Iosevka](docs/first-boot.png)
 
 ## Status
 
 - [x] Stock ISO → single-edition install ISO (plain ISO9660, split WIM, so it fits a FAT32 stick), BIOS + UEFI boot
-- [x] Registry config as typed Nix (`sz`, `expandSz`, `multiSz`, `dword`, `qword`, `binary`, delete), validated against the image's own hives at build time
+- [x] `dfnstrate`: one Rust CLI for fetch/build/flash/lock, layered TOML configs, a hash-addressed download cache. The flake's ISO, image, VM and install outputs run it, with the cache filled by fixed-output derivations, so a non-Nix build runs the same code as the Nix one
+  - Seen: the Nix and non-Nix ISOs for the VM config have identical contents (every file and all 187k `install.wim` entries; only timestamps and the shell exe differ, the latter because rustc puts random temp dir names in its import libraries). A non-Nix `build image` booted to the shell like a fresh machine. `flash` is ported line for line from the old install script but hasn't been run onto a disk since
+- [x] Stock ISO fetched by driving microsoft.com's download page in headless Chromium (`dfnstrate fetch`); the page's API rejects plain HTTP clients
+- [x] Registry config as typed values (`sz`, `expandSz`, `multiSz`, `dword`, `qword`, `binary`, `"delete"`), validated against the image's own hives at build time
 - [x] Generated autounattend.xml: local account, no OOBE, no Microsoft account, optional disk wipe + autologon
 - [x] QEMU test VM with Secure Boot and TPM 2.0
 - [x] Verified install end to end in the VM: unattended setup, specialize registry import, OOBE, first-logon shell switch, our shell running with no explorer.exe
   - Fully hands-off offline (`restrict=on`): a headless run went from the ISO to our shell in ~47 minutes with no input. Online, OOBE's zero-day-patch check fails in the VM and waits for a "Skip" click. On real hardware: install offline, or hit "Try again".
 - [x] Rust shell, cross-compiled in the flake (`nix build .#shell`): a tiling window manager with COSMIC's tiling and keybindings, and a Super-tap launcher over the Start Menu's shortcuts. Seen tiling, focusing, moving and launching in the VM; resize mode, workspaces, float and maximize are unit-tested only so far
   - Primary monitor only. Minimized windows drop out of the tiling and, with no taskbar, can't be brought back. Elevated windows and dialogs float, and while an elevated window has focus the shell's keys don't work (Windows doesn't give a non-elevated keyboard hook their input). A crashing shell leaves windows on other workspaces hidden
-- [x] Iosevka Nerd Font Mono installed system-wide (`fonts`) and used by the shell and every console. Windows 11 hands consoles to Windows Terminal once it's registered, which ignores console fonts, so the default terminal is pinned to conhost
+- [x] Iosevka Nerd Font Mono installed system-wide (`fonts`, fetched from the Nerd Fonts release) and used by the shell and every console. Windows 11 hands consoles to Windows Terminal once it's registered, which ignores console fonts, so the default terminal is pinned to conhost
 - [x] libcosmic builds for Windows from Linux (`nix build .#cosmic-bar-prototype`); not run on Windows yet
-- [x] Declarative apps (`apps`, `wingetApps`, `storeApps`) pinned in `apps.lock.json` by `nix run .#lock-apps`; baked installers go into the image and install on the first real boot. Verified on saturn's image booted fresh in QEMU: Firefox (machine-wide, as SYSTEM) and Discord (per-user) installed with the shell's keys working throughout; League's installer asks for elevation
+- [x] Declarative apps (`apps`, `wingetApps`, `storeApps`) pinned in `apps.lock.json` by `dfnstrate lock`; baked installers go into the image and install on the first real boot. Verified on saturn's image booted fresh in QEMU: Firefox (machine-wide, as SYSTEM) and Discord (per-user) installed with the shell's keys working throughout; League's installer asks for elevation
   - Not yet observed: the online `wingetApps`/`storeApps` path (the test VMs are offline). `wingetApps` installs a pinned version, which fails once winget-pkgs drops it; store apps get whatever is current. Baked apps that are bootstrappers (Steam, League's Riot Client) still download the real thing at runtime.
 - [ ] Shell: system tray, notifications, multiple monitors, COSMIC's stacking and swap mode
-- [ ] Provisioned AppX removal (Outlook, Teams, Copilot, …)
+- [x] Provisioned AppX removal (`appx.remove`): deprovisioned during specialize, names checked against the image at build time. All 17 in the defaults removed in a `build image` run (from `specialize.log` on the image)
 - [ ] WSL2 with a nix-built kernel and NixOS-WSL, mounting the Linux drives
-- [x] Whole-disk image built in the nix sandbox (`build.image`) and flashed from Linux with no boot media (`build.install`), replacing nixconf's `saturn-windows-image.sh`. Flash-and-boot verified on a disk-sized file, and booted to the shell on real hardware
+- [x] Whole-disk image built in a sandboxed VM (`dfnstrate build image`, `build.image`) and flashed from Linux with no boot media (`dfnstrate flash`, `build.install`), replacing nixconf's `saturn-windows-image.sh`. Flash-and-boot verified on a disk-sized file, and booted to the shell on real hardware
 
 ## Usage
 
-Download the Windows 11 ISO named in `nix/source.nix` from
-<https://www.microsoft.com/software-download/windows11> and add it to the store
-once:
+A machine config, e.g. `my-machine.toml`:
 
-```sh
-nix-store --add-root ./windows-iso.gcroot -r \
-  "$(nix-store --add-fixed sha256 Windows11_Client_x64_en-us_26300_9457.iso)"
+```toml
+computerName = "saturn-windows"
+inputLocale = "0406:00000406"          # Danish keyboard
+timeZone = "Romance Standard Time"     # Windows zone ID, not IANA
+installTarget = "/dev/disk/by-id/nvme-Samsung_SSD_970_EVO_1TB_S5H9NS1NB05355E"
+apps = ["Mozilla.Firefox"]
+appsLock = "apps.lock.json"            # relative to this file
+
+[user]
+name = "cramt"
+
+[registry.defaultUser.'Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced']
+HideFileExt.dword = 0
 ```
 
-The GC root matters: nothing else references the ISO, so the next
-`nix-collect-garbage` would delete it.
+Configs given with `-c` are layered in order over `configs/default.toml`:
+tables merge, lists append, other values are replaced. `user.name` is the
+only required key. Leave `disk` at the default `interactive` for a USB
+stick; `installTarget` is only for `flash`.
+
+### Without Nix
+
+Build dfnstrate (stable Rust) with the shell compiled in. The shell is a
+Windows binary, so it needs the MinGW cross toolchain once:
+
+```sh
+# Arch / CachyOS: sudo pacman -S rustup mingw-w64-gcc
+rustup target add x86_64-pc-windows-gnu
+cargo build --release --manifest-path shell/Cargo.toml --target x86_64-pc-windows-gnu
+DEFENESTRATE_SHELL_EXE=$PWD/shell/target/x86_64-pc-windows-gnu/release/defenestrate-shell.exe \
+  cargo install --path cli
+```
+
+The programs it drives, by command. Each command checks for its own before
+starting and names what's missing:
+
+| Command | Needs (Arch packages) |
+| --- | --- |
+| `fetch` (and `build` without `--iso`) | `chromium` (or Chrome) |
+| `build iso` | `7zip wimlib hivex libisoburn` |
+| `build image`, `vm` | the above, `qemu-full swtpm edk2-ovmf mtools sleuthkit util-linux`, and access to `/dev/kvm` |
+| `flash` | `util-linux ntfs-3g efibootmgr sudo` |
 
 Then:
 
 ```sh
-nix build .#vm-iso   # ISO for the test VM: wipes disk 0, logs straight in
+dfnstrate build iso -c my-machine.toml -o out/iso       # USB stick ISO
+dfnstrate build image -c my-machine.toml -o out/image   # finished install, set up in a VM
+dfnstrate flash --image out/image -c my-machine.toml    # erases installTarget
+```
+
+Both builds fetch the stock ISO the config pins (`[iso]` in
+`configs/default.toml`) into `~/.cache/dfnstrate` first, along with the
+fonts and app installers, all checked by hash. Pass `--iso FILE` to use one
+you already downloaded. `dfnstrate fetch --update` downloads whatever build
+Microsoft serves now and prints the new pin. Builds need ~25 GB of scratch
+next to `-o` (or `--work-dir`).
+
+On Arch, `edk2-ovmf` has no Microsoft Secure Boot keys enrolled; setup still
+installs, with Secure Boot in setup mode. `--ovmf-code`/`--ovmf-vars` pick
+other firmware.
+
+### With Nix
+
+```sh
+nix run github:cramt/defenestrate -- build iso -c my-machine.toml -o out/iso   # the same CLI, tools included
+```
+
+Or as derivations, which fetch everything as fixed-output derivations and
+run dfnstrate offline in the sandbox:
+
+```nix
+machine = defenestrate.lib.x86_64-linux.mkDistro [ ./my-machine.toml ];  # or a .nix module with the same keys
+# machine.build.iso / .image / .vm / .install / .rendered
+```
+
+```sh
+nix build .#vm-iso   # ISO for the test VM (configs/vm.toml): wipes disk 0, logs straight in
 nix run .#vm         # boot it in QEMU; state lives in ./.vm
 ```
 
+The ISO fixed-output derivation has the same store path as
+`nix-store --add-fixed sha256 <the pinned ISO>`, so an ISO already added
+that way is used without downloading.
+
 A full install in the VM takes about an hour on a loaded 8-core desktop
 with the VM disk on an HDD. Shell logs go to `%LOCALAPPDATA%\defenestrate\shell.log`.
-
-The build needs ~25 GB of scratch space and takes a few minutes, mostly
-spent exporting the edition out of the 8 GB `install.wim`.
-
-For real hardware, build a config with `lib.x86_64-linux.mkDistro [ ./configs/default.nix ./my-machine.nix ]`.
-It must set `user.name` and should leave `disk` at the default `interactive`.
+The ISO build takes a few minutes, mostly spent exporting the edition out of
+the 8 GB `install.wim`.
 
 ### Installing onto a disk without a USB stick
 
-`build.image` is a whole-disk image built in the nix sandbox: the whole
+`dfnstrate build image` (`build.image`) is a whole-disk image: the whole
 unattended install (setup, specialize, OOBE, first logon's shell switch)
-runs in the VM above (KVM, `requiredSystemFeatures = [ "kvm" ]`) against a
+runs in a VM like the one above (KVM; under Nix, `requiredSystemFeatures = [ "kvm" ]`) against a
 64 GiB scratch disk, offline, and first logon powers the VM off instead of
 rebooting. The build then checks Windows Boot Manager is on the image's ESP
 and reads first logon's log straight off NTFS with sleuthkit, which also
 proves BitLocker didn't touch C:. Progress goes to the build log; a 20
-minute stall or 3 hours fails the build and leaves screenshots in the build
-dir for `--keep-failed`. ~10 minutes on an idle desktop; 65–75 on one shared with other heavy jobs. The disk is NVMe, so the
+minute stall or 3 hours fails the build and leaves screenshots in the work
+dir (under Nix, keep it with `--keep-failed`). ~10 minutes on an idle desktop; 65–75 on one shared with other heavy jobs. The disk is NVMe, so the
 image boots on a real NVMe controller through the same inbox driver, no
 sysprep.
 
-`build.install` flashes it, like an SD card image:
+`dfnstrate flash` (`build.install`) flashes it, like an SD card image:
 
 ```sh
-nix run .#…build.install                         # erases installTarget
-nix run .#…build.install -- /dev/disk/by-id/nvme-…   # or any whole disk, by-id
+dfnstrate flash --image out/image -c my-machine.toml       # erases installTarget
+dfnstrate flash --image out/image /dev/disk/by-id/nvme-…   # or any whole disk, by-id
+nix run .#…build.install                                    # the same, from a mkDistro config
 ```
 
 It refuses a disk that isn't addressed by-id, a partition, anything smaller
@@ -100,32 +179,33 @@ ran offline in the sandbox.
 Apps are winget package IDs, pinned in `apps.lock.json` like an npm
 lockfile:
 
-```nix
-apps = [ "Mozilla.Firefox" ];          # baked into the image, installed offline
-wingetApps = [ "Valve.Steam" ];        # winget installs the locked version, online
-storeApps = [ "9NKSQGP7F2NH" ];        # Microsoft Store product, online
+```toml
+apps = ["Mozilla.Firefox"]          # baked into the image, installed offline
+wingetApps = ["Valve.Steam"]        # winget installs the locked version, online
+storeApps = ["9NKSQGP7F2NH"]        # Microsoft Store product, online
+appsLock = "apps.lock.json"
 ```
 
 ```sh
-nix run .#lock-apps -- Mozilla.Firefox            # lock (or re-resolve) a baked app
-nix run .#lock-apps -- --winget Valve.Steam --msstore 9NKSQGP7F2NH
-nix run .#lock-apps -- --bump                     # newest winget-pkgs, relock everything
+dfnstrate lock Mozilla.Firefox            # lock (or re-resolve) a baked app
+dfnstrate lock --winget Valve.Steam --msstore 9NKSQGP7F2NH
+dfnstrate lock --bump                     # newest winget-pkgs, relock everything
 ```
 
-`lock-apps` resolves each ID against the winget-pkgs commit recorded in the
+`dfnstrate lock` resolves each ID against the winget-pkgs commit recorded in the
 lock, picks the installer winget would (x64, en-US, machine scope first),
 and records its URL, hash, type and silent switches. Manifests without
 switches get their type's standard ones (msi `/qn`, nullsoft `/S`, inno
 `/VERYSILENT …`, burn `/quiet`). It downloads every baked installer once and
 checks it against the manifest's hash, so a URL whose contents have moved on
-fails at lock time; the download stays in the store for the build.
+fails at lock time; the download stays in the cache for the build.
 
 Unknown IDs, msix/zip/portable-only packages, and exe installers with no
 silent mode fail at lock time. An ID that isn't locked, or is locked as a
-different kind than the config says, fails evaluation with the command that
+different kind than the config says, fails the build with the command that
 fixes it.
 
-The build `fetchurl`s every baked installer into the image under
+The build puts every baked installer into the image under
 `C:\Windows\Setup\defenestrate\apps`. The image's first logon (in the
 sandbox) registers two scheduled tasks that run at the user's next logon,
 the machine's first real boot, next to the shell rather than in front of it:

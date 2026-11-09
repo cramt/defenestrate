@@ -1,3 +1,5 @@
 /.vm/
 result*
 /windows-iso.gcroot
+/target/
+/.playwright-mcp/

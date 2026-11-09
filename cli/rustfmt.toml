@@ -1,0 +1,3 @@
+# The code was written wide (lock-apps had ~160-column lines); keep it so.
+max_width = 160
+use_small_heuristics = "Max"
