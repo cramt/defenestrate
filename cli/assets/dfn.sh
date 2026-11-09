@@ -17,7 +17,8 @@
 set -eu
 
 ROOT=/linux
-. /defenestrate/linux.conf # USER_NAME, and mounts(), a list of `m` calls
+# _session runs inside the install, where the distro's files aren't.
+[ "${1:-}" = _session ] || . /defenestrate/linux.conf # USER_NAME, and mounts(), a list of `m` calls
 
 bb=/bin/busybox
 
@@ -62,10 +63,12 @@ do_mount() {
 		# /mnt/wslg so nothing is created on the install's own disk.
 		bind /mnt/wslg "$ROOT/run/wslg"
 		$bb mkdir -p "$ROOT/run/defenestrate"
-		# chpst for dropping to the user once inside the chroot.
-		$bb cp $bb "$ROOT/run/defenestrate/busybox"
 		resolv
 	fi
+	# What _session runs on inside the install. Copied every time so an
+	# updated dfn takes effect without a remount.
+	$bb cp $bb "$ROOT/run/defenestrate/busybox"
+	$bb cp /defenestrate/dfn "$ROOT/run/defenestrate/dfn"
 }
 
 # Follows symlinks the way the install sees them: its profile links are
@@ -122,16 +125,52 @@ wait_for_wslg() {
 }
 
 # as_user COMMAND: runs a bash -lc COMMAND (with "$@" after it) as the user,
-# chrooted, with the environment a desktop session would give it. The
-# runtime dir is WSLg's own (world-writable, its sockets made by its uid
+# inside the install, with the environment a desktop session would give it.
+# The runtime dir is WSLg's own (world-writable, its sockets made by its uid
 # 1000, which is also the usual first Linux user).
+#
+# Not a plain chroot: the kernel refuses user namespaces to a chrooted
+# process (EPERM from clone(CLONE_NEWUSER), "CanCreateUserNamespace()
+# clone() failure"), and Firefox-family sandboxes need them. In a private
+# mount namespace the install is moved onto / and then chrooted into, which
+# the kernel counts as the namespace's root: WSL's own init enters a distro
+# this way (src/linux/init/main.cpp).
 as_user() {
-	cmd=$1
-	shift
+	exec $bb unshare -m /defenestrate/dfn _enter "$@"
+}
+
+# The second half of as_user, in its own mount namespace: switch root to
+# the install the way WSL's init does.
+enter() {
+	gid=$(user_field 4)
 	home=$(user_field 6)
-	exec $bb chroot "$ROOT" /run/defenestrate/busybox chpst -u "$USER_NAME" \
-		/run/defenestrate/busybox env -i \
-		HOME="$home" USER="$USER_NAME" LOGNAME="$USER_NAME" \
+	$bb mount --make-rprivate /
+	cd "$ROOT"
+	$bb mount --move . /
+	# Absolute paths still resolve from the old root until the chroot (the
+	# kernel doesn't follow a mount on a lookup's starting point); the
+	# working directory is the install, so go through it.
+	exec ./run/defenestrate/busybox chroot . /run/defenestrate/busybox sh /run/defenestrate/dfn _session "$USER_NAME" "$gid" "$home" "$@"
+}
+
+# Inside the install, as root: drop to the user and run COMMAND (with "$@"
+# after it) through a login shell.
+session() {
+	user=$1 gid=$2 home=$3 cmd=$4
+	shift 4
+	bb=/run/defenestrate/busybox
+	# setpriv --init-groups gives the user their supplementary groups too
+	# (secrets are often group-readable: onepassword-secrets for op-secrets);
+	# busybox chpst only sets the primary one, so it's just the fallback.
+	# Word-split on purpose: user names and gids are checked to be plain.
+	if [ -x /run/current-system/sw/bin/setpriv ]; then
+		drop="/run/current-system/sw/bin/setpriv --reuid=$user --regid=$gid --init-groups"
+	else
+		drop="$bb chpst -u $user"
+	fi
+	# shellcheck disable=SC2086
+	exec $drop $bb env -i \
+		HOME="$home" USER="$user" LOGNAME="$user" \
 		XDG_RUNTIME_DIR=/run/wslg/runtime-dir WAYLAND_DISPLAY=wayland-0 DISPLAY=:0 \
 		PULSE_SERVER=unix:/run/wslg/runtime-dir/pulse/native \
 		/run/current-system/sw/bin/bash -lc "cd ~; $cmd" dfn "$@"
@@ -171,6 +210,14 @@ eval "exec $exec"
 '
 
 case ${1:-} in
+_enter)
+	shift
+	enter "$@"
+	;;
+_session)
+	shift
+	session "$@"
+	;;
 mount)
 	do_mount
 	;;

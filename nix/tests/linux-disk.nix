@@ -23,9 +23,13 @@ let
       fileSystems."/" = subvol "@root";
       fileSystems."/nix" = subvol "@nix";
       fileSystems."/home" = subvol "@home";
+      # Like op-secrets' onepassword-secrets: a group the user is only a
+      # supplementary member of, owning a secret dfn's session must read.
+      users.groups.secrets = { };
       users.users.user = {
         isNormalUser = true;
         uid = 1000;
+        extraGroups = [ "secrets" ];
         # Firefox is the point; the others are the smallest Wayland (weston's
         # demo clients) and X11 (xeyes) programs, for telling WSLg trouble
         # from Firefox trouble.
@@ -79,5 +83,9 @@ pkgs.vmTools.runInLinuxVM (pkgs.runCommand "test-linux-disk"
     grep '^user:' /mnt/etc/passwd
     # dfn runs Firefox as uid 1000, which needs a home it can write.
     [ "$(stat -c %u /mnt/home/user)" = 1000 ]
+    mkdir -p /mnt/var/lib/test-secret
+    echo s3cret > /mnt/var/lib/test-secret/key
+    chown "0:$(awk -F: '$1 == "secrets" { print $3 }' /mnt/etc/group)" /mnt/var/lib/test-secret/key
+    chmod 640 /mnt/var/lib/test-secret/key
     umount /mnt/home /mnt/nix /mnt /pool
   '')
