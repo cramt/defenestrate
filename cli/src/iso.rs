@@ -48,38 +48,20 @@ pub fn build(config: &Config, variant: &Variant, source: &Path, cache: &Cache, w
     check_registry(&install_wim, &r.dir, work)?;
     check_appx(config, &install_wim)?;
 
-    eprintln!("adding the payload");
-    let payload = work.join("payload");
-    std::fs::create_dir_all(&payload)?;
-    for f in &REG_FILES {
-        std::fs::copy(r.dir.join(format!("reg/{}.reg", f.name)), payload.join(format!("{}.reg", f.name)))?;
-    }
-    std::fs::copy(r.dir.join("appx-remove.txt"), payload.join("appx-remove.txt"))?;
-    std::fs::write(payload.join("specialize.cmd"), crlf(include_str!("../assets/specialize.cmd")))?;
-    std::fs::write(payload.join("remove-appx.ps1"), crlf(include_str!("../assets/remove-appx.ps1")))?;
-
     // Only adds new files. Replacing an existing file this way drops its
     // security descriptor, which is why the registry isn't edited offline.
-    std::fs::write(r.wsl.dir.join("wsl-install.cmd"), crlf(include_str!("../assets/wsl-install.cmd")))?;
-    let mut commands = vec![
-        format!("add {} /Windows/Setup/defenestrate", quote(&payload)?),
-        format!("add {} {}", quote(&r.wsl.dir)?, crate::wsl::DIR),
-        format!("add {} {}/wsl.msi", quote(&r.wsl.msi)?, crate::wsl::DIR),
-    ];
-    if let Some(exe) = &r.shell_exe {
-        let dir = work.join("program-files");
-        std::fs::create_dir_all(&dir)?;
-        let name = match &config.shell {
-            crate::config::Shell::Exe(s) => s.file_name()?,
-            _ => render::BUILTIN_SHELL.to_owned(),
-        };
-        std::fs::copy(exe, dir.join(name))?;
-        commands.push(format!("add {} \"/Program Files/defenestrate\"", quote(&dir)?));
-    }
-    for (path, name) in &r.fonts {
-        commands.push(format!("add {} \"/Windows/Fonts/{name}\"", quote(path)?));
-    }
-    tools::run_with_input(WIMLIB.cmd().arg("update").arg(&install_wim).arg("1"), &(commands.join("\n") + "\n"))?;
+    // wimlib creates the parent directories, and adds a symlink as a link
+    // (to a path Windows doesn't have), hence canonicalize.
+    eprintln!("adding the payload");
+    let commands = r
+        .files
+        .iter()
+        .map(|f| {
+            let source = std::fs::canonicalize(&f.source).with_context(|| f.source.display().to_string())?;
+            Ok(format!("add {} {}\n", quote(&source)?, quote(Path::new(&format!("/{}", f.dest)))?))
+        })
+        .collect::<Result<String>>()?;
+    tools::run_with_input(WIMLIB.cmd().arg("update").arg(&install_wim).arg("1"), &commands)?;
 
     // A single-edition install.wim is still ~7.5 GB, over ISO9660's 4 GiB
     // file limit. Setup takes split images natively, which keeps the ISO
@@ -160,10 +142,6 @@ fn check_appx(config: &Config, install_wim: &Path) -> Result<()> {
         bail!("appx.remove names packages this image doesn't ship:\n  {}", missing.join("\n  "));
     }
     Ok(())
-}
-
-fn crlf(s: &str) -> String {
-    s.replace("\r\n", "\n").replace('\n', "\r\n")
 }
 
 /// wimlib's update commands take double-quoted paths.

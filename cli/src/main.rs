@@ -3,6 +3,7 @@
 
 mod cache;
 mod config;
+mod disk;
 mod fetch;
 mod flash;
 mod image;
@@ -12,6 +13,7 @@ mod render;
 mod tasks;
 mod tools;
 mod unattend;
+mod update;
 mod vm;
 mod wsl;
 
@@ -25,7 +27,9 @@ use config::Config;
 use unattend::Variant;
 
 #[derive(Parser)]
-#[command(version, about)]
+// Lets `update` add --cache and --offline when it reruns itself under sudo,
+// whether or not the caller already gave them.
+#[command(version, about, args_override_self = true)]
 struct Cli {
     #[command(subcommand)]
     command: Cmd,
@@ -111,6 +115,16 @@ enum Cmd {
     Vm(vm::Args),
     /// Write a built image onto a whole disk, like an SD card.
     Flash(flash::Args),
+    /// Rewrite defenestrate's own files (the shell, the WSL payload) on an
+    /// installed Windows, from Linux while Windows is shut down. No reflash.
+    Update {
+        #[command(flatten)]
+        config: ConfigArgs,
+        #[command(flatten)]
+        cache: CacheArgs,
+        #[command(flatten)]
+        args: update::Args,
+    },
 }
 
 #[derive(Subcommand)]
@@ -190,6 +204,7 @@ fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Vm(args) => vm::run(&args),
         Cmd::Flash(args) => flash::run(&args),
+        Cmd::Update { config, cache, args } => update::run(&config.load()?, &cache.open()?, &args),
     }
 }
 

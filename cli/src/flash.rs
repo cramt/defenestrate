@@ -6,14 +6,14 @@
 use std::fs::File;
 use std::io::{BufRead, Read, Write};
 use std::os::unix::fs::FileTypeExt;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::config::{self, ByIdPath};
+use crate::config;
+use crate::disk;
 use crate::image::{IMAGE_FILE, SIZE_FILE};
-use crate::tools::{self, BLKDISCARD, BLOCKDEV, EFIBOOTMGR, FINDMNT, LSBLK, NTFSRESIZE, PARTX, SFDISK, SUDO, UDEVADM};
+use crate::tools::{self, BLKDISCARD, BLOCKDEV, EFIBOOTMGR, FINDMNT, LSBLK, NTFSRESIZE, PARTX, SFDISK, UDEVADM};
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -29,58 +29,11 @@ pub struct Args {
 
 pub fn run(args: &Args) -> Result<()> {
     tools::require(&[LSBLK, FINDMNT, BLKDISCARD, SFDISK, PARTX, BLOCKDEV, UDEVADM, NTFSRESIZE, EFIBOOTMGR])?;
-    let target = match &args.target {
-        Some(t) => ByIdPath::try_from(t.clone()).map_err(anyhow::Error::msg)?,
-        None if !args.configs.is_empty() => config::load(&args.configs, true)?.install_target.context("no target given and the config has no installTarget")?,
-        None => bail!("usage: dfnstrate flash --image DIR /dev/disk/by-id/<whole disk>  (erases it; a config's installTarget sets a default)"),
-    };
-    let target = target.as_str();
+    const USAGE: &str = "dfnstrate flash --image DIR /dev/disk/by-id/<whole disk>  (erases it; a config's installTarget sets a default)";
+    let install_target = if args.configs.is_empty() { None } else { config::load(&args.configs, true)?.install_target };
+    let disk = disk::unused(disk::target(args.target.as_deref(), install_target, USAGE)?)?;
+    let (target, dev, sys) = (disk.target.as_str(), disk.dev.as_path(), &disk.sys);
     let die = |msg: String| -> Result<()> { bail!("{msg}") };
-
-    if target.contains("-part") {
-        die(format!("{target} is a partition. Windows gets the whole disk, its own ESP included."))?;
-    }
-    let meta = std::fs::metadata(target).with_context(|| target.to_owned())?;
-    if !meta.file_type().is_block_device() {
-        die(format!("{target} is not a block device"))?;
-    }
-    let dev = std::fs::canonicalize(target)?;
-    let lsblk = |args: &[&str]| tools::output_string(LSBLK.cmd().args(args).arg(&dev));
-    if lsblk(&["-dno", "TYPE"])?.trim() != "disk" {
-        die(format!("{} is not a whole disk", dev.display()))?;
-    }
-
-    // Refuse anything in use. Mountpoints alone miss a multi-device btrfs,
-    // which shows its mount on one member only, so filesystem UUIDs are
-    // matched against everything mounted too. Holders catch md, LVM and dm.
-    let mounts: Vec<String> = lsblk(&["-rno", "MOUNTPOINTS"])?.lines().filter(|l| !l.is_empty()).map(str::to_owned).collect();
-    if !mounts.is_empty() {
-        die(format!("{} has mounted filesystems: {}", dev.display(), mounts.join(" ")))?;
-    }
-    let mounted = tools::output_string(FINDMNT.cmd().arg("-rno").arg("UUID"))?;
-    let mounted: Vec<&str> = mounted.lines().filter(|l| !l.is_empty()).collect();
-    for uuid in lsblk(&["-rno", "UUID"])?.lines().filter(|l| !l.is_empty()) {
-        if mounted.contains(&uuid) {
-            die(format!("{} holds part of the mounted filesystem {uuid}", dev.display()))?;
-        }
-    }
-    let name = dev.file_name().context("device has no name")?.to_string_lossy().into_owned();
-    let sys = Path::new("/sys/block").join(&name);
-    let mut holder_dirs = vec![sys.join("holders")];
-    for e in std::fs::read_dir(&sys)? {
-        let e = e?;
-        if e.file_name().to_string_lossy().starts_with(&name) {
-            holder_dirs.push(e.path().join("holders"));
-        }
-    }
-    for dir in holder_dirs {
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            let holders: Vec<String> = entries.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
-            if !holders.is_empty() {
-                die(format!("{} is in use by {}", dev.display(), holders.join(" ")))?;
-            }
-        }
-    }
 
     let image_size: u64 = std::fs::read_to_string(args.image.join(SIZE_FILE))
         .with_context(|| format!("{} isn't a `build image` output", args.image.display()))?
@@ -94,21 +47,12 @@ pub fn run(args: &Args) -> Result<()> {
         die("not booted in UEFI mode, so there's no firmware boot entry to add".into())?;
     }
 
-    // Checked as the caller, then again as root: only writing the disk
-    // needs root.
-    // SAFETY: geteuid has no preconditions.
-    if unsafe { libc::geteuid() } != 0 {
-        tools::require(&[SUDO])?;
-        let exe = std::env::current_exe()?;
-        let mut sudo = SUDO.cmd();
-        sudo.arg("--").arg(exe).args(std::env::args_os().skip(1));
-        if args.target.is_none() {
-            sudo.arg(target);
-        }
-        return Err(sudo.exec()).context("re-running under sudo");
+    // Only writing the disk needs root.
+    if !disk::is_root() {
+        disk::rerun_as_root(args.target.is_none().then(|| target.into()))?;
     }
 
-    std::process::Command::new(LSBLK.path().unwrap()).args(["-o", "NAME,SIZE,MODEL,SERIAL,FSTYPE,LABEL"]).arg(&dev).status()?;
+    std::process::Command::new(LSBLK.path().unwrap()).args(["-o", "NAME,SIZE,MODEL,SERIAL,FSTYPE,LABEL"]).arg(dev).status()?;
     println!("\nEverything on {target} will be erased.");
     print!("Type ERASE to install Windows onto it: ");
     std::io::stdout().flush()?;
@@ -120,23 +64,23 @@ pub fn run(args: &Args) -> Result<()> {
 
     // Discarding first means nothing of the old contents survives past the
     // image, and the SSD knows the rest is free.
-    if tools::run(BLKDISCARD.cmd().arg("-f").arg(&dev)).is_err() {
+    if tools::run(BLKDISCARD.cmd().arg("-f").arg(dev)).is_err() {
         eprintln!("discard unsupported, writing over the old contents");
     }
-    write_image(&args.image.join(IMAGE_FILE), &dev, image_size)?;
+    write_image(&args.image.join(IMAGE_FILE), dev, image_size)?;
 
     // The image is smaller than the disk: put the backup GPT at the disk's
     // real end, then grow Windows, the last partition, into the rest. sfdisk
     // resizes in place, keeping the partition GUID the BCD boots by.
-    tools::run(SFDISK.cmd().args(["--relocate", "gpt-bak-std"]).arg(&dev))?;
-    tools::run_with_input(SFDISK.cmd().args(["--wipe-partitions", "never", "-N", "3"]).arg(&dev), ", +\n")?;
+    tools::run(SFDISK.cmd().args(["--relocate", "gpt-bak-std"]).arg(dev))?;
+    tools::run_with_input(SFDISK.cmd().args(["--wipe-partitions", "never", "-N", &disk::WINDOWS_PART.to_string()]).arg(dev), ", +\n")?;
     // sfdisk re-reads the table itself; a second BLKRRPART races udev's probe
     // of the new partitions and fails with EBUSY. partx updates the kernel's
     // view partition by partition, which works on a busy disk.
     tools::run(UDEVADM.cmd().arg("settle"))?;
-    tools::run(PARTX.cmd().arg("-u").arg(&dev))?;
+    tools::run(PARTX.cmd().arg("-u").arg(dev))?;
     tools::run(UDEVADM.cmd().arg("settle"))?;
-    let windows = format!("{target}-part3");
+    let windows = disk.partition(disk::WINDOWS_PART);
     if !std::fs::metadata(&windows).is_ok_and(|m| m.file_type().is_block_device()) {
         die(format!("{windows} didn't show up after the resize"))?;
     }
@@ -165,7 +109,7 @@ pub fn run(args: &Args) -> Result<()> {
 
     // The image has no firmware entry of its own. --create-only leaves
     // BootOrder alone, so the existing OS still boots by default.
-    let esp = format!("{target}-part1");
+    let esp = disk.partition(1);
     let partuuid = tools::output_string(LSBLK.cmd().args(["-no", "PARTUUID"]).arg(&esp))?.trim().to_owned();
     if partuuid.is_empty() {
         die(format!("{esp} has no partition UUID, so there's nothing to point a boot entry at"))?;
@@ -174,7 +118,7 @@ pub fn run(args: &Args) -> Result<()> {
     if entries.to_lowercase().contains(&partuuid.to_lowercase()) {
         println!("firmware already has a boot entry for {esp}");
     } else {
-        tools::run(EFIBOOTMGR.cmd().args(["--create-only", "--disk"]).arg(&dev).args([
+        tools::run(EFIBOOTMGR.cmd().args(["--create-only", "--disk"]).arg(dev).args([
             "--part",
             "1",
             "--label",

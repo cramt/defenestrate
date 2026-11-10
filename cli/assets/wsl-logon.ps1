@@ -1,7 +1,8 @@
 # Runs at each logon of the configured user, elevated, from the scheduled
 # task defenestrate-wsl (registered at first logon). Puts the machine's Linux
 # install within reach of WSL:
-#   - imports the defenestrate distro (busybox and dfn) the first time,
+#   - imports the defenestrate distro (busybox and dfn) the first time, and
+#     again whenever rootfs.tar has changed,
 #   - attaches the install's disks to WSL (`wsl --mount --bare` needs admin,
 #     which is why this is a task rather than something the shell does),
 #   - mounts the install inside WSL (dfn mount),
@@ -40,10 +41,23 @@ try {
     Log 'logon'
     $registered = Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss' -ErrorAction SilentlyContinue |
         Where-Object { (Get-ItemProperty $_.PSPath).DistributionName -eq $distro }
+    # rootfs.tar is the distro's source of truth: `dfnstrate update` can
+    # replace it from Linux, and nothing in the distro is worth keeping (it's
+    # busybox, dfn and the mount list), so a changed one is imported afresh.
+    $rootfs = Join-Path $here 'rootfs.tar'
+    $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $rootfs).Hash
+    $stamp = Join-Path $state 'rootfs.sha256'
+    $imported = if (Test-Path -LiteralPath $stamp) { (Get-Content -Raw -LiteralPath $stamp).Trim() } else { '' }
+    if ($registered -and $imported -ne $hash) {
+        Log "rootfs.tar changed, re-importing the $distro distro"
+        Wsl @('--unregister', $distro) | Out-Null
+        $registered = $null
+    }
     if (-not $registered) {
         Log "importing the $distro distro"
         $dir = Join-Path $state 'wsl'
-        Wsl @('--import', $distro, $dir, (Join-Path $here 'rootfs.tar'), '--version', '2') | Out-Null
+        Wsl @('--import', $distro, $dir, $rootfs, '--version', '2') | Out-Null
+        Set-Content -LiteralPath $stamp -Value $hash -NoNewline
     }
 
     foreach ($guid in $config.disks) {

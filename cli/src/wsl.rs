@@ -2,47 +2,53 @@
 //! Linux install. What goes into the image, under
 //! C:\Windows\Setup\defenestrate\wsl:
 //!   wsl.msi          installed at first logon (unattend.rs)
+//!   wsl-install.cmd  which installs it, and registers the task below
 //! and with wsl.linux set:
-//!   rootfs.tar       the defenestrate distro: busybox, dfn, the mount list
+//!   rootfs.tar       the defenestrate distro: busybox, dfn, the mount list;
+//!                    re-imported at the next logon whenever it changes
 //!   wsl-logon.ps1    run at every logon by the defenestrate-wsl task
 //!   wsl.json         the disks it attaches
 //!   task.xml         that task
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::Result;
 
 use crate::cache::Cache;
 use crate::config::{Config, FileSource, Linux};
+use crate::render::{InstallFile, ReadAt};
 use crate::tasks::{self, LogonTask};
 
-pub const DIR: &str = "/Windows/Setup/defenestrate/wsl";
+/// Relative to C:.
+pub const DIR: &str = "Windows/Setup/defenestrate/wsl";
 pub const TASK: &str = "defenestrate-wsl";
 
-pub struct Payload {
-    /// The MSI, straight from the cache (it's 370 MB).
-    pub msi: PathBuf,
-    /// Everything else, written to the render dir's wsl/.
-    pub dir: PathBuf,
-}
-
-pub fn render(config: &Config, cache: &Cache, work: &Path, dir: &Path) -> Result<Payload> {
+/// Writes the payload to `dir`/wsl, except the MSI, which stays in the
+/// cache (it's 370 MB).
+pub fn render(config: &Config, cache: &Cache, work: &Path, dir: &Path) -> Result<Vec<InstallFile>> {
     let wsl = &config.wsl;
-    let msi = cache.materialize(&FileSource::Fetched(wsl.package.clone()), work)?;
     let out = dir.join("wsl");
     std::fs::create_dir_all(&out)?;
-    let Some(linux) = &wsl.linux else { return Ok(Payload { msi, dir: out }) };
+    let mut files = vec![InstallFile::new(format!("{DIR}/wsl.msi"), cache.materialize(&FileSource::Fetched(wsl.package.clone()), work)?, ReadAt::Setup)];
+    let mut write = |name: &str, data: &[u8], read: ReadAt| -> Result<()> {
+        std::fs::write(out.join(name), data)?;
+        files.push(InstallFile::new(format!("{DIR}/{name}"), out.join(name), read));
+        Ok(())
+    };
+    write("wsl-install.cmd", crate::render::crlf(include_str!("../assets/wsl-install.cmd")).as_bytes(), ReadAt::Setup)?;
+    let Some(linux) = &wsl.linux else { return Ok(files) };
 
     let busybox = std::fs::read(cache.materialize(&FileSource::Fetched(wsl.busybox.clone()), work)?)?;
-    std::fs::write(out.join("rootfs.tar"), rootfs(&busybox, linux)?)?;
-    std::fs::write(out.join("wsl-logon.ps1"), include_str!("../assets/wsl-logon.ps1"))?;
+    write("rootfs.tar", &rootfs(&busybox, linux)?, ReadAt::EveryLogon)?;
+    write("wsl-logon.ps1", include_bytes!("../assets/wsl-logon.ps1"), ReadAt::EveryLogon)?;
     let disks: Vec<&str> = linux.disks.iter().map(|g| g.as_str()).collect();
-    std::fs::write(out.join("wsl.json"), serde_json::to_string(&serde_json::json!({ "disks": disks }))?)?;
+    write("wsl.json", serde_json::to_string(&serde_json::json!({ "disks": disks }))?.as_bytes(), ReadAt::EveryLogon)?;
 
     let user = config.user.name.as_str();
-    std::fs::write(
-        out.join("task.xml"),
-        tasks::xml(&LogonTask {
+    // Registered once, at first logon.
+    write(
+        "task.xml",
+        &tasks::xml(&LogonTask {
             description: "Attaches and mounts the Linux install in WSL, and lists its apps in the Start Menu. Log: %LOCALAPPDATA%\\defenestrate\\wsl.log",
             user,
             // Elevated, for `wsl --mount`, and S4U: in session 0, so no window
@@ -59,8 +65,10 @@ pub fn render(config: &Config, cache: &Cache, work: &Path, dir: &Path) -> Result
             command: "powershell.exe",
             arguments: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\\Windows\\Setup\\defenestrate\\wsl\\wsl-logon.ps1".into(),
         })?,
+        ReadAt::Setup,
     )?;
-    Ok(Payload { msi, dir: out })
+    drop(write);
+    Ok(files)
 }
 
 const APPLETS: &[&str] = &[

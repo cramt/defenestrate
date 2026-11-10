@@ -69,8 +69,12 @@ let
   cacheKey = hash: lib.replaceStrings [ "/" "+" ] [ "_" "-" ] hash;
   fetched = lib.listToAttrs (map (s: lib.nameValuePair (cacheKey s.hash) (pkgs.fetchurl s)) (collect all));
   cache = pkgs.linkFarm "dfnstrate-cache" (fetched // { ${cacheKey iso.hash} = isoSource; });
+  # For render and update, which never read the ISO: fetching it takes a
+  # browser and 7 GB.
+  isoFreeCache = pkgs.linkFarm "dfnstrate-cache" fetched;
 
-  run = args: "dfnstrate ${args} ${configArgs} --cache ${cache} --offline";
+  runWith = c: args: "dfnstrate ${args} ${configArgs} --cache ${c} --offline";
+  run = runWith cache;
 
   # ~25 GB of scratch space and nothing a substituter would have.
   heavy = {
@@ -98,10 +102,10 @@ in
     iso = isoBuild;
     inherit image cache isoSource;
     # For looking at what the config generates: `nix build .#…build.rendered`.
-    rendered = pkgs.runCommand "defenestrate-rendered" { nativeBuildInputs = [ dfnstrate ]; } (run "render" + " --out $out");
-    # Both scripts are tiny but reference the ISO or image, which makes those
-    # inputs: built on a remote builder, the 30 GB image would be copied
-    # there for a two-line wrapper.
+    rendered = pkgs.runCommand "defenestrate-rendered" { nativeBuildInputs = [ dfnstrate ]; } (runWith isoFreeCache "render" + " --out $out");
+    # These scripts are tiny but reference the ISO, the image or the cache,
+    # which makes those inputs: built on a remote builder, the 30 GB image
+    # would be copied there for a two-line wrapper.
     vm = pkgs.writeShellApplication {
       derivationArgs = local;
       name = "defenestrate-vm";
@@ -111,6 +115,11 @@ in
       derivationArgs = local;
       name = "defenestrate-install";
       text = ''exec ${lib.getExe dfnstrate} flash --image ${image} ${configArgs} "$@"'';
+    };
+    update = pkgs.writeShellApplication {
+      derivationArgs = local;
+      name = "defenestrate-update";
+      text = ''exec ${lib.getExe dfnstrate} update ${configArgs} --cache ${isoFreeCache} --offline "$@"'';
     };
   };
 }

@@ -41,6 +41,8 @@ values per hive. Every config is layered over the distro's own defaults,
   - Seen in a VM (Windows nested in KVM, a saturn-shaped btrfs test install as a second disk, `nix build .#test-linux-disk`): WSL installs from the image, the logon task imports the distro, attaches the disk by GPT GUID, mounts it and puts its Firefox in the Start Menu; the launcher starts it, and Firefox runs from the install as its user, with its profile in the install's home. dfn's half is also a flake check (`checks.x86_64-linux.dfn`)
   - GUI windows don't show under defenestrate's shell. WSLg's viewer (msrdc) hangs at "Configuring remote session" without explorer, in RemoteApp and full-desktop mode alike, even with the shell process killed; a dummy `Shell_TrayWnd` doesn't help. With explorer as the shell and WSL started from the user's session, the test install's `xeyes` and Firefox do show up, in the same nested VM. Separately, WSL started from session 0 (the logon task) puts the viewer in session 0 ([wslg#1514](https://github.com/microsoft/wslg/issues/1514))
   - Terminal programs work: Start Menu → "Linux terminal" (`dfn shell`) opens the user's login shell from the install, as the user, in their home
+- [x] Updating an install from Linux without a reflash (`dfnstrate update`, `build.update`): the shell, fonts and WSL payload are rewritten in place on the shut-down Windows partition, each keeping its NTFS security descriptor, and the logon task re-imports the distro when `rootfs.tar` changed
+  - Seen on a `build image` output booted in the VM: `update` rewrote `rootfs.tar` and `wsl-logon.ps1` with their descriptors unchanged; at the next logon the distro was re-imported with the new `dfn` and mounted the test install, which the image's older distro had failed to; the logon after that didn't re-import. The partition was reached through ntfs-3g in a user namespace, so the by-id disk route has only been run as far as its refusals (a mounted disk, a partition, a non-by-id path), not onto a real disk
 - [x] Whole-disk image built in a sandboxed VM (`dfnstrate build image`, `build.image`) and flashed from Linux with no boot media (`dfnstrate flash`, `build.install`), replacing nixconf's `saturn-windows-image.sh`. Flash-and-boot verified on a disk-sized file, and booted to the shell on real hardware
 
 ## Usage
@@ -96,6 +98,7 @@ starting and names what's missing:
 | `build iso` | `7zip wimlib hivex libisoburn` |
 | `build image`, `vm` | the above, `qemu-full swtpm edk2-ovmf mtools sleuthkit util-linux`, and access to `/dev/kvm` |
 | `flash` | `util-linux ntfs-3g efibootmgr sudo` |
+| `update` | `util-linux ntfs-3g sudo` |
 
 Then:
 
@@ -103,6 +106,7 @@ Then:
 dfnstrate build iso -c my-machine.toml -o out/iso       # USB stick ISO
 dfnstrate build image -c my-machine.toml -o out/image   # finished install, set up in a VM
 dfnstrate flash --image out/image -c my-machine.toml    # erases installTarget
+dfnstrate update -c my-machine.toml                     # new shell/WSL payload onto it, no erase
 ```
 
 Both builds fetch the stock ISO the config pins (`[iso]` in
@@ -130,7 +134,7 @@ run dfnstrate offline in the sandbox:
 
 ```nix
 machine = defenestrate.lib.x86_64-linux.mkDistro [ ./my-machine.toml ];  # or a .nix module with the same keys
-# machine.build.iso / .image / .vm / .install / .rendered
+# machine.build.iso / .image / .vm / .install / .update / .rendered
 ```
 
 ```sh
@@ -185,6 +189,40 @@ steps, booted with fresh firmware variables and a fresh TPM, that took ~2
 minutes with no setup screens. Network or not doesn't matter, OOBE already
 ran offline in the sandbox.
 
+### Updating an install
+
+A fix to the shell or the WSL payload doesn't need a rebuild and reflash.
+With Windows shut down, `dfnstrate update` (`build.update`) renders the
+config and rewrites defenestrate's files on the Windows partition from
+Linux:
+
+```sh
+dfnstrate update -c my-machine.toml --dry-run    # what would change
+dfnstrate update -c my-machine.toml              # installTarget, or name the disk by-id
+nix run .#…build.update
+```
+
+It takes the same disk `flash` does (by-id, whole disk, nothing on it in
+use), re-runs itself under sudo and mounts partition 3 with ntfs-3g. It
+refuses a hibernated volume, or one Fast Startup left half-open (the default
+config turns Fast Startup off), and one Windows didn't shut down cleanly.
+Then, per file the build puts on C:
+
+- unchanged: left alone;
+- changed, and read at every logon: rewritten in place. That's the shell
+  exe, the fonts, and the WSL payload (`wsl-logon.ps1`, `wsl.json`,
+  `rootfs.tar`, which the logon task re-imports);
+- changed, but only read by setup (the `.reg` files, `specialize.cmd`, the
+  WSL MSI and task): left alone and listed, since they take a reflash;
+- not on the install: never created, and listed. Each would need setup to
+  register it (a font, a shell under a new name, `wsl.linux` added later),
+  and ntfs-3g gives a file it creates a descriptor granting Everyone full
+  control.
+
+In place means truncated and rewritten, not replaced: the file stays the same
+NTFS file with its own security descriptor (see the ACL note at the end).
+Changes take effect at the next logon.
+
 ### Linux apps, through WSL
 
 There's no Windows app management. Windows gets WSL, and on a dual-boot
@@ -197,8 +235,10 @@ also registers the logon task `defenestrate-wsl`. It runs elevated
 (`wsl --mount` needs admin) in session 0, so it never shows a window, and on
 each logon it:
 
-1. imports the `defenestrate` distro the first time. That's static busybox
-   and `dfn` (`cli/assets/dfn.sh`), about a megabyte;
+1. imports the `defenestrate` distro from `rootfs.tar` the first time, and
+   again whenever that file has changed (by its SHA-256), so `update` reaches
+   it. That's static busybox and `dfn` (`cli/assets/dfn.sh`), about a
+   megabyte, with nothing in it worth keeping;
 2. attaches the disks named in `wsl.linux.disks` to WSL (`wsl --mount
    --bare`), found by GPT disk GUID, which Windows and Linux both report;
 3. runs `dfn mount`, which mounts `wsl.linux.mounts` at `/linux` the way
