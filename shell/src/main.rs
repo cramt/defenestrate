@@ -6,6 +6,7 @@
 #![cfg_attr(not(windows), allow(dead_code))]
 
 mod fuzzy;
+mod motion;
 mod tree;
 mod wm;
 
@@ -15,6 +16,8 @@ mod desktop;
 mod keys;
 #[cfg(windows)]
 mod launcher;
+#[cfg(windows)]
+mod overlay;
 
 #[cfg(not(windows))]
 fn main() {
@@ -192,6 +195,10 @@ mod windows_main {
                         Action::Drag(d) => desktop::drag(d),
                     }
                 }
+                LRESULT(0)
+            }
+            desktop::WM_FRAME => {
+                desktop::on_frame();
                 LRESULT(0)
             }
             WM_TIMER => {

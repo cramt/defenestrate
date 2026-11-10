@@ -8,6 +8,7 @@
 //! the ones that need UI this doesn't have yet: stacking, swap mode,
 //! focusing groups, and other monitors.
 
+use crate::motion::{Pace, View};
 use crate::tree::{Axis, Direction, Point, Rect, Tree};
 
 pub const WORKSPACES: usize = 9;
@@ -62,11 +63,24 @@ pub struct Effects<W> {
     pub place: Vec<(W, Rect)>,
     pub focus: Option<W>,
     pub close: Option<W>,
+    /// How the layout change gets onto the screen (motion.rs).
+    pub pace: Pace,
+    /// A workspace switch asked for this one, even if it's already shown:
+    /// in COSMIC that cuts a running switch short.
+    pub activated: Option<usize>,
 }
 
 impl<W> Default for Effects<W> {
     fn default() -> Self {
-        Effects { show: Vec::new(), hide: Vec::new(), place: Vec::new(), focus: None, close: None }
+        Effects {
+            show: Vec::new(),
+            hide: Vec::new(),
+            place: Vec::new(),
+            focus: None,
+            close: None,
+            pace: Pace::Animated,
+            activated: None,
+        }
     }
 }
 
@@ -161,6 +175,29 @@ impl<W: Copy + Eq> Wm<W> {
         self.current().focus
     }
 
+    pub fn active(&self) -> usize {
+        self.current
+    }
+
+    /// What workspace `i` shows, for animating: its tiles even when
+    /// one of them is maximized over the rest.
+    pub fn view(&self, i: usize) -> View<W> {
+        let s = &self.spaces[i];
+        View { tiles: if s.tiling { s.tiled.layout(self.area) } else { Vec::new() }, maximized: s.maximized, area: self.area }
+    }
+
+    pub fn views(&self) -> Vec<View<W>> {
+        (0..WORKSPACES).map(|i| self.view(i)).collect()
+    }
+
+    /// Windows on workspace `i` that the shell doesn't place.
+    pub fn floating(&self, i: usize) -> Vec<W> {
+        let s = &self.spaces[i];
+        let mut free = if s.tiling { s.floating.clone() } else { s.windows() };
+        free.retain(|&w| Some(w) != s.maximized);
+        free
+    }
+
     /// Every window the tiling places, on every workspace: the ones that
     /// go without a title bar.
     pub fn tiled(&self) -> Vec<W> {
@@ -205,7 +242,7 @@ impl<W: Copy + Eq> Wm<W> {
     pub fn move_edge(&mut self, w: W, corner: [Direction; 2], at: i32) -> Effects<W> {
         let area = self.area;
         self.current_mut().tiled.move_edge(w, corner, at, area);
-        self.placement()
+        Effects { pace: Pace::Instant, ..self.placement() }
     }
 
     fn arrange(&self) -> Vec<(W, Rect)> {
@@ -252,16 +289,16 @@ impl<W: Copy + Eq> Wm<W> {
 
     /// Every window where it belongs, touching nothing else.
     pub fn placement(&self) -> Effects<W> {
-        Effects { place: self.arrange(), ..Effects::default() }
+        Effects { place: self.arrange(), pace: Pace::Instant, ..Effects::default() }
     }
 
     fn switch(&mut self, to: usize) -> Effects<W> {
         if to == self.current {
-            return Effects::default();
+            return Effects { activated: Some(to), ..Effects::default() };
         }
         let hide = self.current().windows();
         self.current = to;
-        Effects { show: self.current().windows(), hide, ..self.relayout() }
+        Effects { show: self.current().windows(), hide, activated: Some(to), ..self.relayout() }
     }
 
     fn send(&mut self, to: usize) -> Effects<W> {
@@ -316,7 +353,8 @@ impl<W: Copy + Eq> Wm<W> {
             Command::Resize { dir, outwards } => {
                 let Some(f) = focus else { return Effects::default() };
                 s.tiled.resize(f, dir, outwards);
-                self.relayout()
+                // COSMIC's keyboard resize isn't animated either.
+                Effects { pace: Pace::Instant, ..self.relayout() }
             }
             Command::ToggleOrientation => {
                 let Some(f) = focus else { return Effects::default() };
@@ -442,6 +480,7 @@ mod tests {
     fn switching_hides_and_shows_and_remembers() {
         let mut wm = wm_with(2);
         let fx = wm.command(Command::Switch(ws(2)));
+        assert_eq!(fx.activated, Some(1));
         assert_eq!(fx.hide, [1, 2]);
         assert!(fx.show.is_empty());
         assert_eq!(fx.focus, None);
@@ -450,7 +489,8 @@ mod tests {
         wm.add(3);
         let fx = wm.command(Command::SwitchStep(Step::Previous));
         assert_eq!((fx.hide, fx.show, fx.focus), (vec![3], vec![1, 2], Some(2)));
-        assert_eq!(wm.command(Command::SwitchStep(Step::Previous)), Effects::default(), "no wrapping");
+        let fx = wm.command(Command::SwitchStep(Step::Previous));
+        assert_eq!(fx, Effects { activated: Some(0), ..Effects::default() }, "no wrapping, but it counts as a switch");
     }
 
     #[test]
@@ -505,6 +545,28 @@ mod tests {
         assert_eq!(wm.edge(2, corner), Some((Axis::Horizontal, 800)));
         let fx = wm.move_edge(2, corner, 1000);
         assert_eq!(rect(&fx, 1), Some(Rect { left: 0, top: 0, right: 1000, bottom: 1000 }));
+    }
+
+    #[test]
+    fn views_keep_a_maximized_windows_tile() {
+        let mut wm = wm_with(2);
+        wm.command(Command::Maximize);
+        let v = wm.view(0);
+        assert_eq!(v.maximized, Some(2));
+        assert_eq!(v.tiles.len(), 2);
+        assert_eq!(rect(&wm.placement(), 2), Some(AREA), "while the real window fills the screen");
+        wm.command(Command::ToggleTiling);
+        assert!(wm.view(0).tiles.is_empty());
+        assert_eq!(wm.floating(0), [1], "all of them float, but the maximized one is drawn as such");
+    }
+
+    #[test]
+    fn resizes_are_instant_and_the_rest_animate() {
+        let mut wm = wm_with(2);
+        assert_eq!(wm.add(3).pace, Pace::Animated);
+        assert_eq!(wm.command(Command::Resize { dir: Direction::Left, outwards: true }).pace, Pace::Instant);
+        assert_eq!(wm.move_edge(1, [Direction::Right, Direction::Down], 900).pace, Pace::Instant);
+        assert_eq!(wm.command(Command::Maximize).pace, Pace::Animated);
     }
 
     #[test]

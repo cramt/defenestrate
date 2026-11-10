@@ -5,6 +5,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{CloseHandle, COLORREF, HANDLE, HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
@@ -14,9 +15,11 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION};
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
 use windows::Win32::UI::Input::KeyboardAndMouse::{INPUT, INPUT_MOUSE, SendInput};
+use windows::Win32::UI::Shell::{QUNS_RUNNING_D3D_FULL_SCREEN, SHQueryUserNotificationState};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, EVENT_OBJECT_CLOAKED, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_SHOW,
     EVENT_OBJECT_UNCLOAKED, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, EnumWindows, GA_ROOT,
+    GetForegroundWindow, HWND_BOTTOM,
     GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClientRect, GetPropW, GetSystemMetrics, GetWindow, GetWindowLongPtrW,
     GetWindowRect, GetWindowThreadProcessId, HWND_TOPMOST, IsHungAppWindow, IsIconic, IsWindowVisible, IsZoomed, KillTimer,
     LWA_ALPHA, PostMessageW, RegisterClassW, RemovePropW, SM_CXSCREEN, SM_CYSCREEN, SPI_SETWORKAREA, SW_HIDE, SW_RESTORE,
@@ -29,6 +32,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{BOOL, PCWSTR, w};
 
 use crate::keys::{Button, Drag};
+use crate::motion::{Animator, Frame, Pace, Sprite};
+use crate::overlay::{self, Look};
 use crate::tree::{Axis, Direction, Point, Rect};
 use crate::wm::{Command, Effects, Grab, Wm};
 use crate::{log, scaled};
@@ -40,6 +45,12 @@ pub const WM_WINEVENT: u32 = WM_APP + 1;
 /// The shell's window gets this WM_TIMER id when the windows whose title
 /// bars came or went should be placed again (see `sync_captions`).
 pub const REPLACE_TIMER: usize = 0xdf1;
+pub use crate::overlay::WM_FRAME;
+
+/// How long, once nothing moves, the overlay waits for the windows that
+/// slid or faded out to be hidden, so they don't flash as it goes. A hung
+/// app's window doesn't get longer than this.
+const SETTLE: Duration = Duration::from_millis(100);
 
 /// How close to the screen's edge, or to the line between two tiles, a
 /// dragged window has to be dropped to join that group (COSMIC's 32).
@@ -67,8 +78,29 @@ enum Dragging {
     FloatCorner { w: HWND, from: Point, start: RECT, corner: [Direction; 2] },
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Phase {
+    Idle,
+    /// The overlay is up, drawing motion.rs's frames.
+    Running,
+    /// Done moving; waiting until `until` at most for what left to be hidden.
+    Settling { until: Duration },
+}
+
 thread_local! {
     static WM: RefCell<Option<Wm<HWND>>> = const { RefCell::new(None) };
+    static ANIM: RefCell<Option<Animator<HWND>>> = const { RefCell::new(None) };
+    static PHASE: Cell<Phase> = const { Cell::new(Phase::Idle) };
+    static EPOCH: Cell<Option<Instant>> = const { Cell::new(None) };
+    /// Off while the shell picks up the windows already open: those
+    /// shouldn't fade in.
+    static ANIMATING: Cell<bool> = const { Cell::new(false) };
+    /// Windows to hide once the animation is over: until then they're
+    /// what slides or fades out.
+    static DEFERRED: RefCell<Vec<HWND>> = const { RefCell::new(Vec::new()) };
+    /// Windows asked to move that haven't yet: where they were, and where
+    /// they're going.
+    static PENDING: RefCell<Vec<(HWND, RECT, RECT)>> = const { RefCell::new(Vec::new()) };
     static EVENTS_TO: Cell<HWND> = const { Cell::new(HWND(std::ptr::null_mut())) };
     static ELEVATED: Cell<bool> = const { Cell::new(false) };
     static DRAGGING: Cell<Option<Dragging>> = const { Cell::new(None) };
@@ -104,8 +136,13 @@ pub fn start(events_to: HWND) {
         }
     }
     WM.set(Some(Wm::new(area)));
+    EPOCH.set(Some(Instant::now()));
     if let Err(e) = create_preview() {
         log(&format!("creating the drop preview failed: {e}"));
+    }
+    match overlay::create(events_to) {
+        Ok(()) => log(&format!("window animations {}", if overlay::enabled() { "on" } else { "off (Animation effects)" })),
+        Err(e) => log(&format!("creating the animation overlay failed: {e}")),
     }
 
     let mut existing: Vec<HWND> = Vec::new();
@@ -122,6 +159,7 @@ pub fn start(events_to: HWND) {
             update(|wm| Some(wm.add(w)));
         }
     }
+    ANIMATING.set(true);
 
     let flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
     // Narrow ranges: one spanning everything would wake the shell for
@@ -174,6 +212,10 @@ pub fn on_event(event: u32, w: HWND) {
         }
         _ => None,
     });
+    // A game going fullscreen mid-animation gets the screen to itself at once.
+    if event == EVENT_SYSTEM_FOREGROUND && PHASE.get() != Phase::Idle && fullscreen_app() {
+        cut();
+    }
 }
 
 pub fn command(c: Command) {
@@ -194,6 +236,7 @@ pub fn refocus() {
 /// Shows everything this hid and gives back every title bar, so no window
 /// is lost or stuck without one if the shell exits.
 pub fn release() {
+    cut();
     let hidden = WM.with_borrow(|wm| wm.as_ref().map(Wm::hidden).unwrap_or_default());
     for w in hidden {
         unsafe {
@@ -285,6 +328,7 @@ fn is_elevated(process: HANDLE) -> bool {
 }
 
 fn apply(fx: Effects<HWND>) {
+    let animating = animate(fx.pace, fx.activated);
     unsafe {
         // Async throughout: a hung app must not hang the shell.
         for &w in &fx.show {
@@ -293,8 +337,18 @@ fn apply(fx: Effects<HWND>) {
         for &(w, r) in &fx.place {
             place(w, r);
         }
-        for &w in &fx.hide {
-            let _ = ShowWindowAsync(w, SW_HIDE);
+        if animating {
+            // Kept on screen for the overlay to draw, but under everything,
+            // so a click mid-animation finds the windows that stay.
+            for &w in &fx.hide {
+                let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS;
+                let _ = SetWindowPos(w, Some(HWND_BOTTOM), 0, 0, 0, 0, flags);
+            }
+            DEFERRED.with_borrow_mut(|d| d.extend(&fx.hide));
+        } else {
+            for &w in &fx.hide {
+                let _ = ShowWindowAsync(w, SW_HIDE);
+            }
         }
         if let Some(w) = fx.focus {
             focus(w);
@@ -302,6 +356,218 @@ fn apply(fx: Effects<HWND>) {
         if let Some(w) = fx.close {
             let _ = PostMessageW(Some(w), WM_CLOSE, WPARAM(0), LPARAM(0));
         }
+    }
+}
+
+fn now() -> Duration {
+    EPOCH.get().map(|e| e.elapsed()).unwrap_or_default()
+}
+
+/// Hands the window manager's new state to the animator and, if anything
+/// on screen animates, puts the overlay up showing the screen as it is,
+/// before anything moves. True while the overlay is up.
+fn animate(pace: Pace, activated: Option<usize>) -> bool {
+    let Some((views, active)) = WM.with_borrow(|wm| wm.as_ref().map(|wm| (wm.views(), wm.active()))) else { return false };
+    let at = now();
+    let running = PHASE.get() != Phase::Idle;
+    let allowed = ANIMATING.get() && (running || (overlay::enabled() && !fullscreen_app()));
+    ANIM.with_borrow_mut(|a| {
+        let a = a.get_or_insert_with(|| Animator::new(views.clone(), active));
+        if allowed {
+            a.push(views, pace, &|w| visible_frame(w).map(|(_, r)| r), at);
+            if let Some(to) = activated {
+                a.activate(to, at);
+            }
+        } else {
+            a.rest(views, active);
+        }
+    });
+    if !allowed {
+        return false;
+    }
+    let frame = frame(at);
+    if !running {
+        if !frame.moving {
+            return false;
+        }
+        draw(&frame.sprites);
+        overlay::show(screen());
+        let shown = now();
+        ANIM.with_borrow_mut(|a| a.as_mut().map(|a| a.restart(at, shown)));
+    }
+    PHASE.set(Phase::Running);
+    true
+}
+
+/// A game in exclusive fullscreen, or any other app's window covering the
+/// whole screen: the overlay mustn't go over those, or slow them down.
+fn fullscreen_app() -> bool {
+    if unsafe { SHQueryUserNotificationState() }.is_ok_and(|s| s == QUNS_RUNNING_D3D_FULL_SCREEN) {
+        return true;
+    }
+    let w = unsafe { GetForegroundWindow() };
+    if w.is_invalid() || WM.with_borrow(|wm| wm.as_ref().is_some_and(|wm| wm.manages(w))) || !on_screen(w) {
+        return false;
+    }
+    let mut pid = 0;
+    unsafe { GetWindowThreadProcessId(w, Some(&mut pid)) };
+    let s = screen();
+    pid != unsafe { GetCurrentProcessId() }
+        && window_rect(w).is_some_and(|r| r.left <= s.left && r.top <= s.top && r.right >= s.right && r.bottom >= s.bottom)
+}
+
+/// Every top-level window, top first.
+fn z_order() -> Vec<HWND> {
+    let mut all: Vec<HWND> = Vec::new();
+    unsafe {
+        let _ = EnumWindows(Some(collect), LPARAM((&raw mut all) as isize));
+    }
+    all
+}
+
+/// The window's rect, and the part of it you see (Windows 10+ windows have
+/// invisible resize borders), on screen.
+fn visible_frame(w: HWND) -> Option<(RECT, Rect)> {
+    let outer = window_rect(w)?;
+    let mut v = RECT::default();
+    let ok = unsafe { DwmGetWindowAttribute(w, DWMWA_EXTENDED_FRAME_BOUNDS, (&raw mut v).cast(), size_of::<RECT>() as u32) };
+    let v = if ok.is_ok() { v } else { outer };
+    Some((outer, Rect { left: v.left, top: v.top, right: v.right, bottom: v.bottom }))
+}
+
+/// Whether every window placed has moved: COSMIC holds a tiling change back
+/// (its TilingBlocker) until the apps have acked and drawn a buffer at their
+/// new sizes, or 500 ms. Windows says nothing about when another process
+/// has repainted, so a window counts as done once it's handled the move:
+/// it's left where it was (an app with a minimum size may not end up
+/// exactly where it was put), or it's gone.
+fn settled() -> bool {
+    PENDING.with_borrow_mut(|p| {
+        p.retain(|&(w, from, to)| match window_rect(w) {
+            Some(now) => now == from && now != to && unsafe { IsWindowVisible(w).as_bool() },
+            None => false,
+        });
+        p.is_empty()
+    })
+}
+
+fn frame(at: Duration) -> Frame<HWND> {
+    let z = z_order();
+    let floating = |i: usize| {
+        let mut free = WM.with_borrow(|wm| wm.as_ref().map(|wm| wm.floating(i)).unwrap_or_default());
+        free.retain(|&w| on_screen(w));
+        free.sort_by_key(|w| z.iter().position(|x| x == w));
+        free.into_iter().filter_map(|w| Some((w, visible_frame(w)?.1))).collect()
+    };
+    let settled = settled();
+    ANIM.with_borrow_mut(|a| a.as_mut().map(|a| a.frame(at, settled, &floating))).unwrap_or(Frame { sprites: Vec::new(), moving: false })
+}
+
+/// The overlay's picture: windows the shell doesn't manage (dialogs, the
+/// launcher) where they are, on top as they'd be; under them, the animation.
+fn draw(sprites: &[Sprite<HWND>]) {
+    let overlay = overlay::window();
+    let mut scene: Vec<(HWND, Rect, f64)> = Vec::new();
+    for w in z_order() {
+        let managed = WM.with_borrow(|wm| wm.as_ref().is_some_and(|wm| wm.manages(w)));
+        if w != overlay && !managed && on_screen(w)
+            && let Some((_, r)) = visible_frame(w)
+        {
+            scene.push((w, r, 1.0));
+        }
+    }
+    scene.extend(sprites.iter().map(|s| (s.window, s.rect, s.alpha)));
+    let looks: Vec<(HWND, Look)> = scene
+        .into_iter()
+        .rev()
+        .filter_map(|(w, at, alpha)| {
+            // A closed window has nothing left to draw, as in COSMIC.
+            let (outer, seen) = visible_frame(w)?;
+            let source = RECT {
+                left: seen.left - outer.left,
+                top: seen.top - outer.top,
+                right: seen.right - outer.left,
+                bottom: seen.bottom - outer.top,
+            };
+            Some((w, Look { at, alpha, source }))
+        })
+        .collect();
+    overlay::draw(&looks);
+}
+
+/// The pacing thread's tick: one composited frame went by.
+pub fn on_frame() {
+    overlay::frame_taken();
+    let phase = PHASE.get();
+    if phase == Phase::Idle {
+        return;
+    }
+    let at = now();
+    let frame = frame(at);
+    draw(&frame.sprites);
+    if frame.moving {
+        PHASE.set(Phase::Running);
+        return;
+    }
+    match phase {
+        Phase::Running => {
+            settle();
+            if DEFERRED.with_borrow(Vec::is_empty) {
+                finish();
+            } else {
+                PHASE.set(Phase::Settling { until: at + SETTLE });
+            }
+        }
+        Phase::Settling { until } => {
+            let hidden = DEFERRED.with_borrow(|d| d.iter().all(|&w| unsafe { !IsWindowVisible(w).as_bool() }));
+            if hidden || at >= until {
+                finish();
+            }
+        }
+        Phase::Idle => {}
+    }
+}
+
+/// Hides what slid or faded out, unless it's back on screen meanwhile (a
+/// quick switch back to its workspace).
+fn settle() {
+    let gone: Vec<HWND> = DEFERRED.take();
+    let gone: Vec<HWND> = WM.with_borrow(|wm| {
+        let Some(wm) = wm else { return Vec::new() };
+        gone.into_iter().filter(|&w| wm.manages(w) && !wm.is_shown(w)).collect()
+    });
+    for &w in &gone {
+        unsafe {
+            let _ = ShowWindowAsync(w, SW_HIDE);
+        }
+    }
+    // A click mid-slide can land on a window that was leaving.
+    let clicked_away = gone.contains(&unsafe { GetForegroundWindow() });
+    DEFERRED.set(gone);
+    if clicked_away {
+        refocus();
+    }
+}
+
+fn finish() {
+    if PHASE.get() == Phase::Running {
+        settle();
+    }
+    PHASE.set(Phase::Idle);
+    DEFERRED.take();
+    overlay::hide();
+}
+
+/// Stops everything where it ends up, at once.
+fn cut() {
+    let state = WM.with_borrow(|wm| wm.as_ref().map(|wm| (wm.views(), wm.active())));
+    ANIM.with_borrow_mut(|a| {
+        if let (Some(a), Some((views, active))) = (a, state) {
+            a.rest(views, active);
+        }
+    });
+    if PHASE.get() != Phase::Idle {
+        finish();
     }
 }
 
@@ -322,7 +588,14 @@ fn place(w: HWND, r: Rect) {
             (l, t, rr, b) = (visible.left - outer.left, visible.top - outer.top, outer.right - visible.right, outer.bottom - visible.bottom);
         }
         let flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS;
-        if let Err(e) = SetWindowPos(w, None, r.left - l, r.top - t, r.width() + l + rr, r.height() + t + b, flags) {
+        let to = RECT { left: r.left - l, top: r.top - t, right: r.right + rr, bottom: r.bottom + b };
+        if outer != to {
+            PENDING.with_borrow_mut(|p| {
+                p.retain(|&(x, ..)| x != w);
+                p.push((w, outer, to));
+            });
+        }
+        if let Err(e) = SetWindowPos(w, None, to.left, to.top, to.right - to.left, to.bottom - to.top, flags) {
             log(&format!("placing {w:?} failed: {e}"));
         }
     }
@@ -347,6 +620,7 @@ fn window_rect(w: HWND) -> Option<RECT> {
 }
 
 fn move_to(w: HWND, r: RECT) {
+    PENDING.with_borrow_mut(|p| p.retain(|&(x, ..)| x != w));
     let flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS;
     unsafe {
         let _ = SetWindowPos(w, None, r.left, r.top, r.right - r.left, r.bottom - r.top, flags);
@@ -370,6 +644,8 @@ pub fn drag(d: Drag) {
             let w = unsafe { GetAncestor(WindowFromPoint(POINT { x: at.x, y: at.y }), GA_ROOT) };
             let Some(grab) = WM.with_borrow_mut(|wm| wm.as_mut().and_then(|wm| wm.grab(w))) else { return };
             let Some(start) = window_rect(w) else { return };
+            // The overlay would show the window in its tile, not under the pointer.
+            cut();
             focus(w);
             let centre = Point { x: (start.left + start.right) / 2, y: (start.top + start.bottom) / 2 };
             let corner = [
@@ -416,6 +692,7 @@ pub fn drag(d: Drag) {
         Drag::End(at) => {
             if let Some(Dragging::Tile { w, .. }) = DRAGGING.take() {
                 preview(None);
+                ANIM.with_borrow_mut(|a| a.as_mut().map(|a| a.forget(w)));
                 update(|wm| Some(wm.drop(w, at, scaled(DROP_BAND))));
             }
         }
