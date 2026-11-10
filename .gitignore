@@ -3,3 +3,5 @@ result*
 /windows-iso.gcroot
 /target/
 /.playwright-mcp/
+# shell/ is its own crate (Windows target), outside the root workspace
+/shell/target
