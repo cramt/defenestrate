@@ -17,6 +17,10 @@
 //! hook gets a thread of its own, at high priority, that only decides
 //! which binding a key is and queues it; the GUI thread does the work when
 //! WM_ACTION arrives.
+//!
+//! A low-level mouse hook on the same thread turns Super+left-drag and
+//! Super+right-drag into COSMIC's move and resize grabs. Like COSMIC, the
+//! grab lasts until the button comes up, even if Super goes first.
 
 use std::cell::Cell;
 use std::collections::VecDeque;
@@ -31,11 +35,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_RWIN, VK_SHIFT, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetMessageW, HC_ACTION, KBDLLHOOKSTRUCT, MSG, PostMessageW, SetWindowsHookExW,
-    WH_KEYBOARD_LL, WM_APP, WM_KEYDOWN, WM_SYSKEYDOWN,
+    CallNextHookEx, DispatchMessageW, GetMessageW, HC_ACTION, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, PostMessageW,
+    SetWindowsHookExW, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
 };
 
-use crate::tree::Direction;
+use crate::tree::{Direction, Point};
 use crate::wm::{Command, Step, WorkspaceId};
 
 pub const WM_ACTION: u32 = WM_APP + 2;
@@ -48,6 +53,23 @@ pub enum Action {
     Lock,
     LogOut,
     Wm(Command),
+    Drag(Drag),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Button {
+    /// Moves the window.
+    Left,
+    /// Resizes it from the corner nearest the pointer.
+    Right,
+}
+
+/// A Super+drag, in screen pixels.
+#[derive(Clone, Copy, Debug)]
+pub enum Drag {
+    Start(Button, Point),
+    Move(Point),
+    End(Point),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -71,6 +93,8 @@ thread_local! {
     static SUPER: Cell<Super> = const { Cell::new(Super::Up) };
     static MODE: Cell<Mode> = const { Cell::new(Mode::Normal) };
     static NOTIFY: Cell<HWND> = const { Cell::new(HWND(std::ptr::null_mut())) };
+    /// The button holding a Super+drag, until it comes up.
+    static DRAGGING: Cell<Option<Button>> = const { Cell::new(None) };
 }
 
 // Filled by the hook thread, drained by the GUI thread.
@@ -84,8 +108,13 @@ pub fn install(notify: HWND) -> windows::core::Result<()> {
     std::thread::spawn(move || unsafe {
         NOTIFY.set(HWND(notify as *mut _));
         let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
-        let hook = GetModuleHandleW(None).and_then(|m| SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), Some(m.into()), 0));
+        let module = GetModuleHandleW(None).ok();
+        let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), module.map(Into::into), 0);
         let ok = hook.is_ok();
+        // Dragging is a nicety; the keys still work without it.
+        if ok && let Err(e) = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), module.map(Into::into), 0) {
+            crate::log(&format!("installing the mouse hook failed: {e}"));
+        }
         let _ = done.send(hook.map(|_| ()));
         if ok {
             // The hook is called from this loop, so it lives as long as it runs.
@@ -183,11 +212,23 @@ fn held(key: VIRTUAL_KEY) -> bool {
 }
 
 fn queue(action: Action) {
-    if let Ok(mut q) = QUEUE.lock() {
-        q.push_back(action);
+    let Ok(mut q) = QUEUE.lock() else { return };
+    // Only where the pointer is now matters, and a mouse sends a lot of
+    // moves; the GUI thread mustn't fall behind on them.
+    if let Action::Drag(Drag::Move(at)) = action
+        && let Some(Action::Drag(Drag::Move(last))) = q.back_mut()
+    {
+        *last = at;
+        return;
     }
-    unsafe {
-        let _ = PostMessageW(Some(NOTIFY.get()), WM_ACTION, WPARAM(0), LPARAM(0));
+    // One WM_ACTION drains the whole queue, so one is enough until then.
+    let idle = q.is_empty();
+    q.push_back(action);
+    drop(q);
+    if idle {
+        unsafe {
+            let _ = PostMessageW(Some(NOTIFY.get()), WM_ACTION, WPARAM(0), LPARAM(0));
+        }
     }
 }
 
@@ -241,6 +282,33 @@ unsafe extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRE
             }
         } else if down && on_key_down(key) {
             return LRESULT(1);
+        }
+    }
+    unsafe { CallNextHookEx(None, code, wparam, lparam) }
+}
+
+/// Super+button starts a drag, which then swallows that button's release
+/// too, so the app under the pointer never sees half a click. A drag counts
+/// as a chord: releasing Super afterwards doesn't open the launcher.
+unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code == HC_ACTION as i32 {
+        let pt = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) }.pt;
+        let at = Point { x: pt.x, y: pt.y };
+        match (wparam.0 as u32, DRAGGING.get()) {
+            (msg @ (WM_LBUTTONDOWN | WM_RBUTTONDOWN), None) if SUPER.get() != Super::Up => {
+                SUPER.set(Super::Down { chorded: true });
+                let button = if msg == WM_LBUTTONDOWN { Button::Left } else { Button::Right };
+                DRAGGING.set(Some(button));
+                queue(Action::Drag(Drag::Start(button, at)));
+                return LRESULT(1);
+            }
+            (WM_MOUSEMOVE, Some(_)) => queue(Action::Drag(Drag::Move(at))),
+            (WM_LBUTTONUP, Some(Button::Left)) | (WM_RBUTTONUP, Some(Button::Right)) => {
+                DRAGGING.set(None);
+                queue(Action::Drag(Drag::End(at)));
+                return LRESULT(1);
+            }
+            _ => {}
         }
     }
     unsafe { CallNextHookEx(None, code, wparam, lparam) }

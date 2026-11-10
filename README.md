@@ -31,7 +31,7 @@ values per hive. Every config is layered over the distro's own defaults,
 - [x] QEMU test VM with Secure Boot and TPM 2.0
 - [x] Verified install end to end in the VM: unattended setup, specialize registry import, OOBE, first-logon shell switch, our shell running with no explorer.exe
   - Fully hands-off offline (`restrict=on`): a headless run went from the ISO to our shell in ~47 minutes with no input. Online, OOBE's zero-day-patch check fails in the VM and waits for a "Skip" click. On real hardware: install offline, or hit "Try again".
-- [x] Rust shell, cross-compiled in the flake (`nix build .#shell`): a tiling window manager with COSMIC's tiling and keybindings, and a Super-tap launcher over the Start Menu's shortcuts. Seen tiling, focusing, moving and launching in the VM; resize mode, workspaces, float and maximize are unit-tested only so far
+- [x] Rust shell, cross-compiled in the flake (`nix build .#shell`): a tiling window manager with COSMIC's tiling tree, keybindings and Super+drag, gapless and without title bars on tiles, and a Super-tap launcher over the Start Menu's shortcuts. Seen in the VM: tiling, focusing, moving into thirds by keyboard and by Super+drag (with the drop preview), Super+right-drag resizing, floating and re-tiling (title bar back and gone again), a killed and restarted shell picking its tiles back up, and launching; resize mode, workspaces and maximize are unit-tested only so far
   - Primary monitor only. Minimized windows drop out of the tiling and, with no taskbar, can't be brought back. Elevated windows and dialogs float, and while an elevated window has focus the shell's keys don't work (Windows doesn't give a non-elevated keyboard hook their input). A crashing shell leaves windows on other workspaces hidden
 - [x] Iosevka Nerd Font Mono installed system-wide (`fonts`, fetched from the Nerd Fonts release) and used by the shell and every console. Windows 11 hands consoles to Windows Terminal once it's registered, which ignores console fonts, so the default terminal is pinned to conhost
 - [x] libcosmic builds for Windows from Linux (`nix build .#cosmic-bar-prototype`); not run on Windows yet
@@ -289,9 +289,11 @@ has the feature:
 | Super+Shift+direction | Move the window |
 | Super+Ctrl+direction | Previous/next workspace (with Shift: take the window along) |
 | Super+1–9, Super+Shift+1–9 | Switch to / send the window to a workspace |
-| Super+O | Flip the split the window is in |
+| Super+O | Flip the group the window is in |
 | Super+M, Super+G, Super+Y | Maximize, float the window, tiling off for the workspace |
 | Super+R (Super+Shift+R) | Resize mode: directions grow (shrink) that edge, Enter/Escape leave |
+| Super+left-drag | Move the window. A tile follows the pointer and drops back into the tiling where it's let go, with a preview of where: on the screen's edge it joins the whole layout, on the line between two tiles it joins their group, on a tile it splits that tile on the nearer side. A floating window just moves |
+| Super+right-drag | Resize from the corner nearest the pointer: a tile moves the line between it and its neighbour, a floating window its corner |
 | Super+Q | Close |
 | Super+T, Super+Enter | Terminal |
 | Super+F | Home folder |
@@ -301,6 +303,16 @@ Win+L would lock the session before the shell could see it, so the
 default config sets `DisableLockWorkstation`. That blocks `LockWorkStation()`
 too, so Super+Escape locks by disconnecting the session (`tsdiscon`), which
 shows the same lock screen and reconnects to the same session on sign-in.
+
+The tiling is COSMIC's tree: a group holds any number of windows side by
+side or stacked, sharing its length. As in COSMIC, a new window splits the
+focused one in half; a window moved or dropped into a group gets an equal
+share, so three windows dragged into one row get a third each. Tiles sit
+edge to edge with no gaps, and windows lose their title bar while they're
+tiled, getting it back when they float or the shell exits. Apps that draw
+their own title bar (Firefox, Chromium, Electron apps like Discord) keep
+it. Super+drag needs the mouse hook, so like the keys it does nothing while
+an elevated window has focus.
 
 ## How it works
 

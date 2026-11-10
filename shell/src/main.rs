@@ -54,7 +54,7 @@ mod windows_main {
     use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem, SetProcessDpiAwarenessContext};
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, MSG, PostQuitMessage, RegisterClassW, TranslateMessage,
-        WM_DESTROY, WM_DISPLAYCHANGE, WM_ENDSESSION, WNDCLASSW, WS_EX_TOOLWINDOW, WS_POPUP,
+        WM_DESTROY, WM_DISPLAYCHANGE, WM_ENDSESSION, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW, WS_POPUP,
     };
     use windows::core::{Result, w};
 
@@ -62,7 +62,6 @@ mod windows_main {
     use crate::{desktop, launcher};
 
     // In 96 DPI pixels; scaled to the real DPI at startup.
-    const GAP: i32 = 8;
     const FONT_HEIGHT: i32 = 18;
     // Installed by configs/default.nix (`fonts`). GDI quietly substitutes
     // something else if it's missing.
@@ -135,7 +134,7 @@ mod windows_main {
             if let Err(e) = launcher::create(instance, font) {
                 log(&format!("creating the launcher failed: {e}"));
             }
-            desktop::start(main, scaled(GAP));
+            desktop::start(main);
             log("managing windows");
 
             let mut msg = MSG::default();
@@ -190,8 +189,13 @@ mod windows_main {
                             }
                         }
                         Action::Wm(c) => desktop::command(c),
+                        Action::Drag(d) => desktop::drag(d),
                     }
                 }
+                LRESULT(0)
+            }
+            WM_TIMER => {
+                desktop::on_timer(wparam.0);
                 LRESULT(0)
             }
             WM_DISPLAYCHANGE => {
