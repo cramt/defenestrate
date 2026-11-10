@@ -233,5 +233,8 @@ fn verify(config: &Config, disk: &Path) -> Result<()> {
     if config.wsl.linux.is_some() && !log.contains(&format!("\"{}\" has successfully been created", crate::wsl::TASK)) {
         bail!("first logon didn't register the {} task", crate::wsl::TASK);
     }
+    if !config.apps.is_empty() && !log.contains(&format!("\"{}\" has successfully been created", crate::apps::TASK)) {
+        bail!("first logon didn't register the {} task", crate::apps::TASK);
+    }
     Ok(())
 }

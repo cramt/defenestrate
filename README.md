@@ -37,6 +37,7 @@ values per hive. Every config is layered over the distro's own defaults,
 - [x] libcosmic builds for Windows from Linux (`nix build .#cosmic-bar-prototype`); not run on Windows yet
 - [ ] Shell: system tray, notifications, multiple monitors, COSMIC's stacking and swap mode
 - [x] Provisioned AppX removal (`appx.remove`): deprovisioned during specialize, names checked against the image at build time. All 17 in the defaults removed in a `build image` run (from `specialize.log` on the image)
+- [x] Windows apps (`apps`): winget IDs, unpinned, installed by winget at the first real boot from a logon task first logon registers. Seen in the VM under our shell, online: the script installed Firefox elevated, and an equivalent logon task fired at the next logon, installed 7-Zip and deleted itself. Not yet seen from a fresh `build image`
 - [ ] WSL installed offline, and the machine's Linux install run through it (`wsl.linux`): its disks attached and mounted, its apps in the Start Menu, run chrooted as its user
   - Seen in a VM (Windows nested in KVM, a saturn-shaped btrfs test install as a second disk, `nix build .#test-linux-disk`): WSL installs from the image, the logon task imports the distro, attaches the disk by GPT GUID, mounts it and puts its Firefox in the Start Menu; the launcher starts it, and Firefox runs from the install as its user, with its profile in the install's home. dfn's half is also a flake check (`checks.x86_64-linux.dfn`)
   - Linux GUI windows are a non-goal. WSLg's viewer (msrdc) only connects while a real explorer runs as the shell: a dump of it under our shell shows its connection thread never starting, and faking explorer's documented surface (Shell_TrayWnd and its appbar/tray messages, the shell window, the shell-ready events, TaskbarCreated) doesn't change that. Running explorer hidden underneath works, but this Windows exists to be a console for kernel-anticheat games, so explorer stays out. The experiment is on branch `t3/wslg-windows-under-shell`
@@ -54,6 +55,7 @@ computerName = "saturn-windows"
 inputLocale = "0406:00000406"          # Danish keyboard
 timeZone = "Romance Standard Time"     # Windows zone ID, not IANA
 installTarget = "/dev/disk/by-id/nvme-Samsung_SSD_970_EVO_1TB_S5H9NS1NB05355E"
+apps = ["RiotGames.LeagueOfLegends.EUW", "Discord.Discord"]   # winget IDs; see below
 
 [user]
 name = "cramt"
@@ -222,6 +224,25 @@ Then, per file the build puts on C:
 In place means truncated and rewritten, not replaced: the file stays the same
 NTFS file with its own security descriptor (see the ACL note at the end).
 Changes take effect at the next logon.
+
+### Windows apps
+
+`apps` is a list of winget package IDs (`winget search` finds them). Nothing
+is pinned or baked into the image: winget installs whatever version it has
+at the machine's first real boot, which suits game launchers, since they
+update themselves anyway.
+
+First logon registers the logon task `defenestrate-apps`. On a `build image`
+that first logon is the sandbox VM's, offline, so the task first runs on the
+real machine. It runs elevated in the user's session, so machine-wide
+installers don't each ask for UAC and per-user ones land in the user's
+profile, and installs each ID with `winget install --exact --silent`. winget
+needs the network and its own per-user registration, so it retries for up to
+an hour. Each ID that's in is recorded in
+`%LOCALAPPDATA%\defenestrate\apps-done.txt`, a failed run tries again at the
+next logon, and once everything is in the task deletes itself. While an
+installer's window has focus the shell's keys don't work, since an elevated
+window starves its keyboard hook. Log: `%LOCALAPPDATA%\defenestrate\apps.log`.
 
 ### Linux apps, through WSL
 

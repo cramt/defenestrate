@@ -1,6 +1,7 @@
 //! dfnstrate: builds defenestrate (a declarative Windows) from Microsoft's
 //! stock ISO, and flashes it. The Nix flake runs exactly these commands.
 
+mod apps;
 mod cache;
 mod config;
 mod disk;

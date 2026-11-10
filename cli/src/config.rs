@@ -45,6 +45,11 @@ pub struct Config {
     /// safely (see the README on ACLs).
     #[serde(default)]
     pub fonts: Vec<FileSource>,
+    /// winget package IDs, installed at the machine's first real boot with
+    /// whatever version winget has then. Not pinned: game launchers update
+    /// themselves anyway.
+    #[serde(default)]
+    pub apps: Vec<AppId>,
     #[serde(default)]
     pub appx: Appx,
     pub wsl: Wsl,
@@ -352,6 +357,9 @@ checked_string!(AppxName, "an AppX package name (the part before the first _)", 
 // Kernel names (nvme0n1, sda) reorder between boots; by-id doesn't.
 checked_string!(ByIdPath, "a /dev/disk/by-id/ path", |s| { s.strip_prefix("/dev/disk/by-id/").is_some_and(|rest| !rest.is_empty() && !rest.contains('/')) });
 
+checked_string!(AppId, "a winget package ID", |s| {
+    s.starts_with(|c: char| c.is_ascii_alphanumeric()) && s.bytes().all(|b| b.is_ascii_alphanumeric() || b".+_-".contains(&b))
+});
 checked_string!(LinuxName, "a Linux user name", |s| {
     (1..=32).contains(&s.len())
         && s.starts_with(|c: char| c.is_ascii_lowercase() || c == '_')

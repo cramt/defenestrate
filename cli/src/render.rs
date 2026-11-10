@@ -134,6 +134,7 @@ pub fn render(config: &Config, variant: &Variant, cache: &Cache, work: &Path, di
     }
 
     files.extend(wsl::render(config, cache, work, dir)?);
+    files.extend(crate::apps::render(config, dir)?);
     std::fs::write(dir.join("autounattend.xml"), unattend::render(config, variant)?)?;
 
     Ok(Rendered { dir: dir.to_path_buf(), files })
