@@ -71,7 +71,7 @@ impl InstallFile {
 /// - reg/<name>.reg (UTF-16, for reg.exe) and reg/ascii/<name>.reg (for hivex)
 /// - autounattend.xml
 /// - appx-remove.txt, specialize.cmd, remove-appx.ps1
-/// - wsl/ (see wsl.rs)
+/// - wsl/ (see wsl.rs), apps/ (apps.rs), reboot/ (reboot_to_linux.rs)
 pub fn render(config: &Config, variant: &Variant, cache: &Cache, work: &Path, dir: &Path) -> Result<Rendered> {
     std::fs::create_dir_all(dir.join("reg/ascii"))?;
 
@@ -135,6 +135,7 @@ pub fn render(config: &Config, variant: &Variant, cache: &Cache, work: &Path, di
 
     files.extend(wsl::render(config, cache, work, dir)?);
     files.extend(crate::apps::render(config, dir)?);
+    files.extend(crate::reboot_to_linux::render(config, dir)?);
     std::fs::write(dir.join("autounattend.xml"), unattend::render(config, variant)?)?;
 
     Ok(Rendered { dir: dir.to_path_buf(), files })
@@ -238,6 +239,10 @@ mod tests {
             (format!("{s}/apps/apps.json"), ReadAt::EveryLogon),
             (format!("{s}/apps/install-apps.ps1"), ReadAt::EveryLogon),
             (format!("{s}/apps/task.xml"), ReadAt::Setup),
+            (format!("{s}/reboot/reboot.json"), ReadAt::EveryLogon),
+            (format!("{s}/reboot/reboot-to-linux.ps1"), ReadAt::EveryLogon),
+            (format!("{s}/reboot/register.ps1"), ReadAt::Setup),
+            (format!("{s}/reboot/task.xml"), ReadAt::Setup),
         ];
         want.sort();
         assert_eq!(got, want.iter().map(|(p, r)| (p.as_str(), *r)).collect::<Vec<_>>());

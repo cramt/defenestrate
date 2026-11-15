@@ -54,8 +54,30 @@ pub struct Config {
     #[serde(default)]
     pub appx: Appx,
     pub wsl: Wsl,
+    /// Which firmware boot entry "Reboot to Linux" boots once.
+    #[serde(default)]
+    pub linux_boot_entry: LinuxBootEntry,
     #[serde(default)]
     pub registry: Registry,
+}
+
+/// The firmware boot entry the Start Menu's "Reboot to Linux" sets as the
+/// one-time boot (UEFI BootNext). Windows can't tell a Linux entry from any
+/// other non-Windows one, so `auto` guesses and a description pins it.
+#[derive(Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub enum LinuxBootEntry {
+    /// The first entry in the firmware's boot order that boots a file off a
+    /// disk partition other than Windows Boot Manager or the removable-media
+    /// fallback (\EFI\BOOT\BOOTX64.EFI), which is what a USB stick left in
+    /// would be. Shell, network and setup-menu entries boot no such file.
+    #[default]
+    Auto,
+    /// The entry with exactly this description (`efibootmgr` on Linux lists
+    /// them), e.g. "Linux Boot Manager" for systemd-boot.
+    Description(BootEntryDescription),
+    /// No "Reboot to Linux" at all: a Windows-only machine.
+    None,
 }
 
 /// WSL, which is always installed, and through it the Linux install on the
@@ -416,6 +438,11 @@ checked_string!(ByIdPath, "a /dev/disk/by-id/ path", |s| { s.strip_prefix("/dev/
 checked_string!(AppId, "a winget package ID", |s| {
     s.starts_with(|c: char| c.is_ascii_alphanumeric()) && s.bytes().all(|b| b.is_ascii_alphanumeric() || b".+_-".contains(&b))
 });
+// Any printable text: it goes to the reboot script as JSON, never through a
+// shell, and UEFI caps descriptions nowhere near this.
+checked_string!(BootEntryDescription, "a boot entry description (1-255 printable characters)", |s| {
+    (1..=255).contains(&s.chars().count()) && !s.chars().any(char::is_control)
+});
 checked_string!(LinuxName, "a Linux user name", |s| {
     (1..=32).contains(&s.len())
         && s.starts_with(|c: char| c.is_ascii_lowercase() || c == '_')
@@ -651,6 +678,24 @@ mod tests {
             merge(&mut t, toml::from_str(&format!("[user]\nname = \"x\"\n{bad}")).unwrap());
             assert!(toml::Value::Table(t).try_into::<Config>().is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn linux_boot_entry_forms() {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct T {
+            linux_boot_entry: LinuxBootEntry,
+        }
+        let parse = |s: &str| toml::from_str::<T>(s).map(|t| t.linux_boot_entry);
+        assert_eq!(parse("linuxBootEntry = \"auto\"").unwrap(), LinuxBootEntry::Auto);
+        assert_eq!(parse("linuxBootEntry = \"none\"").unwrap(), LinuxBootEntry::None);
+        assert_eq!(
+            parse("linuxBootEntry = { description = \"Linux Boot Manager\" }").unwrap(),
+            LinuxBootEntry::Description(BootEntryDescription::try_from("Linux Boot Manager".to_owned()).unwrap())
+        );
+        assert!(parse("linuxBootEntry = { description = \"\" }").is_err());
+        assert!(parse("linuxBootEntry = \"Linux Boot Manager\"").is_err());
     }
 
     #[test]

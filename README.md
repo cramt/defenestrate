@@ -50,6 +50,7 @@ values per hive. Every config is layered over the distro's own defaults,
   - Seen on a `build image` output booted in the VM: `update` rewrote `rootfs.tar` and `wsl-logon.ps1` with their descriptors unchanged; at the next logon the distro was re-imported with the new `dfn` and mounted the test install, which the image's older distro had failed to; the logon after that didn't re-import. The partition was reached through ntfs-3g in a user namespace, so the by-id disk route has only been run as far as its refusals (a mounted disk, a partition, a non-by-id path), not onto a real disk
 - [x] `dfnstrate reboot`: into Windows once, by the firmware's BootNext, so the boot after it is Linux again. Picks the Windows Boot Manager entry whose ESP is on a disk that's attached, refuses to guess between two (`--entry`), `--no-reboot` only sets it. Unit-tested; not yet run on real hardware
 - [x] `dfnstrate doctor`: a read-only preflight run as the user, one line per check with the fix: UEFI, Secure Boot (with a fix for the bootloader it finds: lanzaboote, systemd-boot, GRUB, shim), TPM 2.0, `/dev/kvm`, every command's tools and the OVMF, scratch and cache space, whether the work dir is on a spinning disk, Windows Boot Manager entries live or stale, an RTC on local time, and disk swap Linux could hibernate to. Exits non-zero on any failure. Parsing is unit-tested; run on one NixOS machine so far
+- [x] "Reboot to Linux" in the launcher: boots the firmware's Linux entry once (BootNext, via `{fwbootmgr}` bootsequence) and reboots, through an on-demand elevated task, so no UAC prompt (`linuxBootEntry`). Seen in the VM, with Windows Boot Manager first in BootOrder and a "Linux Boot Manager" entry (a UEFI shell on the ESP) last: the shortcut started the task unelevated with no window and no prompt, the script picked the Linux entry, the next boot was the UEFI shell, and the boot after that was Windows again. First logon's registration was run by hand there, not from a fresh `build image`; the nothing-matches path and a `description` pin are untested
 - [x] Whole-disk image built in a sandboxed VM (`dfnstrate build image`, `build.image`) and flashed from Linux with no boot media (`dfnstrate flash`, `build.install`), replacing nixconf's `saturn-windows-image.sh`. Flash-and-boot verified on a disk-sized file, and booted to the shell on real hardware
 
 ## Usage
@@ -247,6 +248,48 @@ Then, per file the build puts on C:
 In place means truncated and rewritten, not replaced: the file stays the same
 NTFS file with its own security descriptor (see the ACL note at the end).
 Changes take effect at the next logon.
+
+### Switching between Linux and Windows
+
+`flash` leaves the firmware's boot order on Linux, so a plain reboot from
+either side normally lands in Linux. Each side has a one-shot switch that
+sets the firmware's BootNext, which lasts exactly one boot:
+
+- From Linux, `dfnstrate reboot` boots Windows once (`--no-reboot` only
+  sets it, `--entry XXXX` picks the Boot#### entry).
+- From Windows, "Reboot to Linux" in the launcher boots Linux once. It
+  doesn't trust the boot order, since Windows, major updates especially,
+  sometimes puts Windows Boot Manager back in front of it.
+
+"Reboot to Linux" needs admin to set BootNext and the shell isn't elevated,
+so first logon registers the task `defenestrate-reboot-to-linux`: no
+trigger, elevated, in session 0. A task's own user can start it unelevated,
+so the shortcut runs `schtasks /run` (under `conhost --headless`, so no
+console flashes up) with no UAC prompt. Which entry is Linux comes from
+`linuxBootEntry`:
+
+```toml
+linuxBootEntry = "auto"                                  # the default
+linuxBootEntry = { description = "Linux Boot Manager" }  # as efibootmgr lists it
+linuxBootEntry = "none"                                  # Windows-only machine: no shortcut
+```
+
+`auto` takes the first entry in the firmware's boot order that boots an
+`.efi` file other than Windows Boot Manager's, which leaves out the UEFI
+shell, network boot and setup-menu entries (they have no file). It also
+leaves out the removable-media fallback path `\EFI\BOOT\BOOTX64.EFI`, so a
+USB stick left plugged in doesn't win. A Linux install that only boots
+through that fallback path needs a `description`. When nothing matches,
+nothing happens: no reboot, and the reason goes to
+`%LOCALAPPDATA%\defenestrate\reboot.log`, which also lists every firmware
+entry seen. Entries are read through the BCD WMI provider rather than
+parsed out of `bcdedit /enum`, whose labels are translated on non-English
+Windows.
+
+`update` can rewrite the script and `reboot.json` on an install that
+already has them, but it can't add the feature to an older install: the
+task and the shortcut are registered at first logon, and `update` never
+creates files. That takes a reflash.
 
 ### Windows apps
 

@@ -141,6 +141,12 @@ pub fn render(config: &Config, v: &Variant) -> Result<String> {
             "Install the apps at the next logon",
         ));
     }
+    if crate::reboot_to_linux::enabled(config) {
+        commands.push((
+            format!("cmd.exe /c \"powershell.exe -NoProfile -ExecutionPolicy Bypass -File {SETUP_DIR}\\reboot\\register.ps1 -Task {} >> {SETUP_DIR}\\firstlogon.log 2>&1\"", crate::reboot_to_linux::TASK),
+            "Register Reboot to Linux",
+        ));
+    }
     commands.push(match v.first_logon_end {
         FirstLogonEnd::Reboot => ("shutdown.exe /r /t 0".into(), "Log in again under the new shell"),
         FirstLogonEnd::Poweroff => ("shutdown.exe /s /t 0".into(), "Done; the next logon gets the new shell"),

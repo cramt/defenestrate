@@ -12,6 +12,7 @@ mod flash;
 mod image;
 mod iso;
 mod reboot;
+mod reboot_to_linux;
 mod registry;
 mod render;
 mod tasks;
