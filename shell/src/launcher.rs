@@ -11,18 +11,18 @@ use std::process::Command;
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateSolidBrush, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DeleteObject,
-    DrawTextW, EndPaint, FillRect, HFONT, InvalidateRect, PAINTSTRUCT, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    DrawTextW, EndPaint, FillRect, InvalidateRect, PAINTSTRUCT, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::Input::KeyboardAndMouse::{VK_DOWN, VK_ESCAPE, VK_NEXT, VK_PRIOR, VK_RETURN, VK_TAB, VK_UP};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetSystemMetrics, IDC_ARROW, KillTimer, LoadCursorW, RegisterClassW, SM_CXSCREEN,
-    SM_CYSCREEN, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOSIZE, SetTimer, SetWindowPos, ShowWindow, WA_INACTIVE, WM_ACTIVATE,
+    CreateWindowExW, DefWindowProcW, IDC_ARROW, KillTimer, LoadCursorW, RegisterClassW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE,
+    SetTimer, SetWindowPos, ShowWindow, WA_INACTIVE, WM_ACTIVATE,
     WM_CHAR, WM_KEYDOWN, WM_PAINT, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{Result, w};
 
-use crate::{desktop, fuzzy, log, scaled};
+use crate::{desktop, font, fuzzy, log, scaled, use_dpi};
 
 const ROWS: usize = 10;
 pub const WIDTH: i32 = 640;
@@ -76,11 +76,9 @@ enum Launch {
 thread_local! {
     static STATE: RefCell<State> = RefCell::new(State::default());
     static WINDOW: Cell<HWND> = const { Cell::new(HWND(std::ptr::null_mut())) };
-    static FONT: Cell<HFONT> = const { Cell::new(HFONT(std::ptr::null_mut())) };
 }
 
-pub fn create(instance: HINSTANCE, font: HFONT) -> Result<()> {
-    FONT.set(font);
+pub fn create(instance: HINSTANCE) -> Result<()> {
     let class = w!("DefenestrateLauncher");
     unsafe {
         RegisterClassW(&WNDCLASSW {
@@ -128,10 +126,15 @@ fn show() {
         s.refilter();
     });
     unsafe {
-        // Centred, a quarter of the way down: where the eye already is.
-        let x = (GetSystemMetrics(SM_CXSCREEN) - scaled(WIDTH)) / 2;
-        let y = GetSystemMetrics(SM_CYSCREEN) / 4;
-        let _ = SetWindowPos(window, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+        // On the monitor the pointer is on, as COSMIC opens it on the
+        // active output, sized for that monitor's DPI. Centred, a quarter
+        // of the way down: where the eye already is.
+        let (area, dpi) = desktop::overlay_spot();
+        use_dpi(dpi);
+        let (width, height) = (scaled(WIDTH), scaled(ROW_HEIGHT) * (ROWS as i32 + 1) + scaled(PADDING) * 2);
+        let x = area.left + (area.width() - width) / 2;
+        let y = area.top + area.height() / 4;
+        let _ = SetWindowPos(window, None, x, y, width, height, SWP_NOACTIVATE);
         let _ = ShowWindow(window, SW_SHOW);
         SetTimer(Some(window), CLOCK_TIMER, 1000, None);
     }
@@ -277,7 +280,7 @@ fn paint(window: HWND) {
         let background = CreateSolidBrush(BACKGROUND);
         FillRect(hdc, &client, background);
         let _ = DeleteObject(background.into());
-        SelectObject(hdc, FONT.get().into());
+        SelectObject(hdc, font().into());
         SetBkMode(hdc, TRANSPARENT);
 
         let (pad, row) = (scaled(PADDING), scaled(ROW_HEIGHT));

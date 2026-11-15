@@ -43,6 +43,10 @@
 //!   jumping to it; "switching" to the workspace already active ends it.
 //!   Each workspace keeps its own tiling and floating animations meanwhile.
 //!
+//! - Monitors: COSMIC renders each output by itself, each with its own
+//!   workspaces and their animations, so a switch on one slides only that
+//!   one's, clipped to it.
+//!
 //! Left out because the shell has no such thing: stacks, swap and resize
 //! modes, the overview, minimizing to a panel icon, fullscreen requests.
 
@@ -50,6 +54,7 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use crate::tree::Rect;
+use crate::wm::{OutputId, Screen};
 
 /// Tiling, maximize and workspace switching.
 pub const ANIMATION: Duration = Duration::from_millis(200);
@@ -328,7 +333,8 @@ pub struct Frame<W> {
     pub moving: bool,
 }
 
-pub struct Animator<W> {
+/// One monitor's workspaces and their animations.
+pub struct Monitor<W> {
     spaces: Vec<Space<W>>,
     active: usize,
     /// COSMIC's `previously_active`: the workspace sliding out, and when
@@ -336,15 +342,15 @@ pub struct Animator<W> {
     previous: Option<(usize, Duration)>,
 }
 
-impl<W: Copy + Eq> Animator<W> {
+impl<W: Copy + Eq> Monitor<W> {
     /// Everything at rest as `views` has it, `active` shown.
     pub fn new(views: Vec<View<W>>, active: usize) -> Self {
-        Animator { spaces: views.into_iter().map(Space::at_rest).collect(), active, previous: None }
+        Monitor { spaces: views.into_iter().map(Space::at_rest).collect(), active, previous: None }
     }
 
-    /// Stops everything where the views say, without animating.
-    pub fn rest(&mut self, views: Vec<View<W>>, active: usize) {
-        *self = Animator::new(views, active);
+    /// The monitor's area, as its shown workspace has it.
+    pub fn area(&self) -> Rect {
+        self.spaces[self.active].area
     }
 
     /// Takes the window manager's current views, one per workspace, and
@@ -438,9 +444,90 @@ impl<W: Copy + Eq> Animator<W> {
     }
 }
 
+/// What one monitor shows, front to back, kept inside `clip`: a workspace
+/// sliding out mustn't show on the monitor next to it.
+pub struct Layer<W> {
+    pub clip: Rect,
+    pub sprites: Vec<Sprite<W>>,
+}
+
+pub struct Scene<W> {
+    pub layers: Vec<Layer<W>>,
+    /// False once everything shown on every monitor is at rest.
+    pub moving: bool,
+}
+
+/// Every monitor's animations.
+pub struct Animator<W> {
+    monitors: Vec<(OutputId, Monitor<W>)>,
+}
+
+impl<W: Copy + Eq> Animator<W> {
+    pub fn new(screens: Vec<Screen<W>>) -> Self {
+        Animator { monitors: screens.into_iter().map(|s| (s.id, Monitor::new(s.views, s.active))).collect() }
+    }
+
+    /// Stops everything where the window manager says, without animating.
+    pub fn rest(&mut self, screens: Vec<Screen<W>>) {
+        *self = Animator::new(screens);
+    }
+
+    /// Takes the window manager's monitors and animates what changed on
+    /// each. A monitor that's new starts at rest; one that's gone goes.
+    pub fn push(&mut self, screens: Vec<Screen<W>>, pace: Pace, rect_of: &dyn Fn(W) -> Option<Rect>, now: Duration) {
+        let mut old = std::mem::take(&mut self.monitors);
+        for s in screens {
+            let m = match old.iter().position(|(id, _)| *id == s.id) {
+                Some(i) => {
+                    let (_, mut m) = old.swap_remove(i);
+                    m.push(s.views, pace, rect_of, now);
+                    m
+                }
+                None => Monitor::new(s.views, s.active),
+            };
+            self.monitors.push((s.id, m));
+        }
+    }
+
+    /// A switch on monitor `id` to workspace `to`.
+    pub fn activate(&mut self, id: &OutputId, to: usize, now: Duration) {
+        if let Some((_, m)) = self.monitors.iter_mut().find(|(x, _)| x == id) {
+            m.activate(to, now);
+        }
+    }
+
+    pub fn restart(&mut self, from: Duration, to: Duration) {
+        for (_, m) in &mut self.monitors {
+            m.restart(from, to);
+        }
+    }
+
+    pub fn forget(&mut self, w: W) {
+        for (_, m) in &mut self.monitors {
+            m.forget(w);
+        }
+    }
+
+    /// The screen at `now`. `floating(id, i)` is what floats on that
+    /// monitor's workspace `i`, top first, where it really is.
+    pub fn frame(&mut self, now: Duration, settled: bool, floating: &dyn Fn(&OutputId, usize) -> Vec<(W, Rect)>) -> Scene<W> {
+        let mut layers = Vec::new();
+        let mut moving = false;
+        for (id, m) in &mut self.monitors {
+            let f = m.frame(now, settled, &|i| floating(id, i));
+            moving |= f.moving;
+            layers.push(Layer { clip: m.area(), sprites: f.sprites });
+        }
+        Scene { layers, moving }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One monitor's animator: what most of these test.
+    type Animator<W> = Monitor<W>;
 
     const AREA: Rect = Rect { left: 0, top: 0, right: 1600, bottom: 1000 };
     const LEFT: Rect = Rect { left: 0, top: 0, right: 800, bottom: 1000 };
@@ -744,5 +831,38 @@ mod tests {
         let s = sprites(&mut a, 100);
         assert_eq!(sprite(&s, 2), Sprite { window: 2, rect: LEFT, alpha: 0.5 });
         assert_eq!(sprite(&s, 1).rect, ease_rect(LEFT, RIGHT, 0.5));
+    }
+
+    fn screen(name: &str, active: usize, views: Vec<View<u32>>) -> Screen<u32> {
+        Screen { id: OutputId(name.into()), active, views }
+    }
+
+    #[test]
+    fn a_switch_on_one_monitor_slides_only_that_one_inside_its_area() {
+        let b_area = Rect { left: 1600, top: 0, right: 2880, bottom: 1024 };
+        let b = |tiles: &[(u32, Rect)]| View { tiles: tiles.to_vec(), maximized: None, area: b_area };
+        let mut a = super::Animator::new(vec![
+            screen("A", 0, vec![view(&[(1, AREA)], None), view(&[(2, AREA)], None)]),
+            screen("B", 0, vec![b(&[(3, b_area)]), b(&[])]),
+        ]);
+        a.activate(&OutputId("A".into()), 1, ms(0));
+        let scene = a.frame(ms(100), true, &|_, _| Vec::new());
+        assert!(scene.moving);
+        assert_eq!(scene.layers[0].clip, AREA);
+        assert_eq!(sprite(&scene.layers[0].sprites, 1).rect, shifted(AREA, -500));
+        assert_eq!(scene.layers[1].clip, b_area);
+        assert_eq!(scene.layers[1].sprites, [Sprite { window: 3, rect: b_area, alpha: 1.0 }], "B stays put");
+        assert!(!a.frame(ms(200), true, &|_, _| Vec::new()).moving);
+    }
+
+    #[test]
+    fn monitors_come_and_go_at_rest() {
+        let mut a = super::Animator::new(vec![screen("A", 0, vec![view(&[(1, AREA)], None)])]);
+        a.push(vec![screen("A", 0, vec![view(&[(1, AREA)], None)]), screen("B", 0, vec![view(&[(2, RIGHT)], None)])], Pace::Animated, &nowhere, ms(0));
+        let scene = a.frame(ms(0), true, &|_, _| Vec::new());
+        assert!(!scene.moving, "a new monitor doesn't fade its windows in");
+        assert_eq!(scene.layers.len(), 2);
+        a.push(vec![screen("B", 0, vec![view(&[(2, RIGHT)], None)])], Pace::Animated, &nowhere, ms(10));
+        assert_eq!(a.frame(ms(10), true, &|_, _| Vec::new()).layers.len(), 1);
     }
 }

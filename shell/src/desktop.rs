@@ -3,6 +3,11 @@
 //! `Effects` it returns. Super+drags (keys.rs) and the window switcher's
 //! choice (switcher.rs) are carried out here too. Runs entirely on the
 //! shell's one GUI thread.
+//!
+//! Monitors come from EnumDisplayMonitors, in physical pixels (the shell is
+//! Per-Monitor V2 DPI aware, main.rs), each known to the `Wm` by its monitor
+//! device's interface path, which stays the same when it's unplugged and
+//! plugged back into the same port. WM_DISPLAYCHANGE reads them again.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -10,7 +15,11 @@ use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{CloseHandle, COLORREF, HANDLE, HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
-use windows::Win32::Graphics::Gdi::{ClientToScreen, CreateSolidBrush};
+use windows::Win32::Graphics::Gdi::{
+    ClientToScreen, CreateSolidBrush, DISPLAY_DEVICEW, EnumDisplayDevicesW, EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR,
+    MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW, MonitorFromWindow,
+};
+use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION};
@@ -18,7 +27,8 @@ use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
 use windows::Win32::UI::Input::KeyboardAndMouse::{INPUT, INPUT_MOUSE, SendInput};
 use windows::Win32::UI::Shell::{QUNS_RUNNING_D3D_FULL_SCREEN, SHQueryUserNotificationState};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, EVENT_OBJECT_CLOAKED, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_SHOW,
+    CreateWindowExW, DefWindowProcW, EDD_GET_DEVICE_INTERFACE_NAME, EVENT_OBJECT_CLOAKED, GetCursorPos, MONITORINFOF_PRIMARY,
+    SetCursorPos, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_SHOW,
     EVENT_OBJECT_UNCLOAKED, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, EnumWindows, GA_ROOT,
     GetForegroundWindow, HWND_BOTTOM,
     GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClientRect, GetPropW, GetSystemMetrics, GetWindow, GetWindowLongPtrW,
@@ -34,11 +44,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{BOOL, PCWSTR, w};
 
 use crate::keys::{Button, Drag};
-use crate::motion::{Animator, Frame, Pace, Sprite};
+use crate::motion::{Animator, Pace, Scene};
 use crate::overlay::{self, Look};
 use crate::tree::{Axis, Direction, Point, Rect};
-use crate::wm::{Command, Effects, Grab, Wm};
-use crate::{log, scaled};
+use crate::wm::{Command, Effects, Grab, Hold, OutputId, Screens, Wm};
+use crate::{log, scaled_at};
 
 /// Posted to the shell's window for every WinEvent: wparam the event,
 /// lparam the window. Hook callbacks only post, so all state changes
@@ -109,14 +119,117 @@ thread_local! {
     static PREVIEW: Cell<HWND> = const { Cell::new(HWND(std::ptr::null_mut())) };
     /// Windows the shell took the title bar from.
     static STRIPPED: RefCell<Vec<HWND>> = const { RefCell::new(Vec::new()) };
+    static MONITORS: RefCell<Vec<Monitor>> = const { RefCell::new(Vec::new()) };
+}
+
+#[derive(Clone)]
+struct Monitor {
+    id: OutputId,
+    rect: Rect,
+    dpi: u32,
+    primary: bool,
+}
+
+/// Every monitor, the primary first: it's where an unplugged monitor's
+/// workspaces go when the shell starts with them all there.
+fn monitors() -> Vec<Monitor> {
+    let mut found: Vec<Monitor> = Vec::new();
+    unsafe {
+        let _ = EnumDisplayMonitors(None, None, Some(found_monitor), LPARAM((&raw mut found) as isize));
+    }
+    found.sort_by_key(|m| !m.primary);
+    if found.is_empty() {
+        log("EnumDisplayMonitors found nothing; using the primary screen's size");
+        let rect = unsafe { Rect { left: 0, top: 0, right: GetSystemMetrics(SM_CXSCREEN), bottom: GetSystemMetrics(SM_CYSCREEN) } };
+        found.push(Monitor { id: OutputId("primary".into()), rect, dpi: 96, primary: true });
+    }
+    found
+}
+
+unsafe extern "system" fn found_monitor(m: HMONITOR, _: HDC, _: *mut RECT, out: LPARAM) -> BOOL {
+    let mut info = MONITORINFOEXW { monitorInfo: MONITORINFO { cbSize: size_of::<MONITORINFOEXW>() as u32, ..Default::default() }, ..Default::default() };
+    if !unsafe { GetMonitorInfoW(m, (&raw mut info).cast()) }.as_bool() {
+        return true.into();
+    }
+    let device = String::from_utf16_lossy(&info.szDevice[..info.szDevice.iter().position(|&c| c == 0).unwrap_or(32)]);
+    // The adapter's \\.\DISPLAYn gets handed out again in a different
+    // order after a change; the monitor behind it has a path that doesn't.
+    let mut dd = DISPLAY_DEVICEW { cb: size_of::<DISPLAY_DEVICEW>() as u32, ..Default::default() };
+    let path = unsafe { EnumDisplayDevicesW(windows::core::PCWSTR(info.szDevice.as_ptr()), 0, &mut dd, EDD_GET_DEVICE_INTERFACE_NAME) }
+        .as_bool()
+        .then(|| String::from_utf16_lossy(&dd.DeviceID[..dd.DeviceID.iter().position(|&c| c == 0).unwrap_or(128)]))
+        .filter(|p| !p.is_empty());
+    let (mut x, mut y) = (96, 96);
+    let _ = unsafe { GetDpiForMonitor(m, MDT_EFFECTIVE_DPI, &mut x, &mut y) };
+    // No taskbar or other appbar reserves any of it: tile the whole monitor.
+    let r = info.monitorInfo.rcMonitor;
+    unsafe { &mut *(out.0 as *mut Vec<Monitor>) }.push(Monitor {
+        id: OutputId(path.unwrap_or(device)),
+        rect: Rect { left: r.left, top: r.top, right: r.right, bottom: r.bottom },
+        dpi: x,
+        primary: info.monitorInfo.dwFlags & MONITORINFOF_PRIMARY != 0,
+    });
+    true.into()
+}
+
+fn screens(list: &[Monitor]) -> Screens {
+    Screens::new(list.iter().map(|m| (m.id.clone(), m.rect)).collect()).expect("monitors() never returns none")
+}
+
+/// The DPI of the monitor `p` is on (the primary's if none).
+fn dpi_at(p: Point) -> u32 {
+    MONITORS.with_borrow(|ms| ms.iter().find(|m| m.rect.contains(p)).or(ms.first()).map_or(96, |m| m.dpi))
+}
+
+fn monitor_of(r: Rect) -> Option<OutputId> {
+    let c = r.centre();
+    MONITORS.with_borrow(|ms| ms.iter().find(|m| m.rect.contains(c)).map(|m| m.id.clone()))
+}
+
+/// The box around every monitor, which the animation overlay covers.
+fn desktop_bounds() -> Rect {
+    MONITORS.with_borrow(|ms| {
+        ms.iter().map(|m| m.rect).reduce(|a, b| Rect { left: a.left.min(b.left), top: a.top.min(b.top), right: a.right.max(b.right), bottom: a.bottom.max(b.bottom) })
+    })
+    .unwrap_or_else(|| unsafe { Rect { left: 0, top: 0, right: GetSystemMetrics(SM_CXSCREEN), bottom: GetSystemMetrics(SM_CYSCREEN) } })
+}
+
+fn cursor() -> Option<Point> {
+    let mut p = POINT::default();
+    unsafe { GetCursorPos(&mut p) }.ok().map(|()| Point { x: p.x, y: p.y })
+}
+
+/// One hold of the modifiers, from keys.rs, for the command being run.
+pub fn command(c: Command, hold: Hold) {
+    update(|wm| Some(wm.command(c, hold)));
+}
+
+/// Where the launcher and the switcher open: the monitor the pointer is
+/// on, as COSMIC opens them on the active output. With its DPI.
+pub fn overlay_spot() -> (Rect, u32) {
+    let at = WM.with_borrow_mut(|wm| {
+        let wm = wm.as_mut()?;
+        if let Some(p) = cursor() {
+            wm.pointer(p);
+        }
+        Some(wm.active_area())
+    });
+    let area = at.unwrap_or_else(desktop_bounds);
+    (area, dpi_at(area.centre()))
 }
 
 /// Runs `f` on the state and applies what it returns, with the state no
 /// longer borrowed: moving, showing and focusing windows pumps messages,
 /// and those can land back here.
 fn update(f: impl FnOnce(&mut Wm<HWND>) -> Option<Effects<HWND>>) {
+    let pointer = cursor();
     let fx = WM.with_borrow_mut(|wm| {
         let wm = wm.as_mut()?;
+        // COSMIC's active output follows every pointer motion; asking where
+        // the pointer is now comes to the same thing.
+        if let Some(p) = pointer {
+            wm.pointer(p);
+        }
         let fx = f(wm)?;
         // Our own focusing may not come back as a foreground event, and the
         // switcher's order mustn't depend on it.
@@ -134,19 +247,11 @@ fn update(f: impl FnOnce(&mut Wm<HWND>) -> Option<Effects<HWND>>) {
 pub fn start(events_to: HWND) {
     EVENTS_TO.set(events_to);
     ELEVATED.set(is_elevated(unsafe { GetCurrentProcess() }));
-    let area = screen();
-    // A shell that sets the work area owns it; the previous shell (or the
-    // bar this one used to have) may have left part of it reserved. No
-    // SPIF_SENDCHANGE: that broadcasts WM_SETTINGCHANGE and waits on every
-    // window, and on a first boot a busy installer stalled it long enough
-    // that the shell never got as far as its keyboard hook.
-    unsafe {
-        let mut full = RECT { left: area.left, top: area.top, right: area.right, bottom: area.bottom };
-        if let Err(e) = SystemParametersInfoW(SPI_SETWORKAREA, 0, Some((&raw mut full).cast()), Default::default()) {
-            log(&format!("resetting the work area failed: {e}"));
-        }
-    }
-    WM.set(Some(Wm::new(area)));
+    let found = monitors();
+    log(&format!("monitors: {}", describe(&found)));
+    reset_work_area(&found);
+    WM.set(Some(Wm::new(screens(&found))));
+    MONITORS.set(found);
     EPOCH.set(Some(Instant::now()));
     if let Err(e) = create_preview() {
         log(&format!("creating the drop preview failed: {e}"));
@@ -170,7 +275,12 @@ pub fn start(events_to: HWND) {
             if unsafe { IsIconic(w) }.as_bool() {
                 WM.with_borrow_mut(|wm| wm.as_mut().map(|wm| wm.add_minimized(w)));
             } else {
-                update(|wm| Some(wm.add(w)));
+                // A restarted shell keeps each window on its monitor.
+                let centre = visible_frame(w).map(|(_, r)| r.centre());
+                update(|wm| Some(match centre {
+                    Some(c) => wm.add_at(w, c),
+                    None => wm.add(w),
+                }));
             }
         }
     }
@@ -242,10 +352,6 @@ pub fn on_event(event: u32, w: HWND) {
     }
 }
 
-pub fn command(c: Command) {
-    update(|wm| Some(wm.command(c)));
-}
-
 /// What the window switcher lists, most recently focused first: COSMIC
 /// lists every toplevel, so besides the managed windows (minimized, or on
 /// other workspaces) that's every window Windows' own Alt+Tab would show,
@@ -287,9 +393,36 @@ pub fn activate(w: HWND) {
     WM.with_borrow_mut(|wm| wm.as_mut().map(|wm| wm.focused(w)));
 }
 
+/// WM_DISPLAYCHANGE: a monitor came or went, or one changed resolution.
 pub fn screen_changed() {
-    let area = screen();
-    update(|wm| Some(wm.set_area(area)));
+    let found = monitors();
+    log(&format!("monitors changed: {}", describe(&found)));
+    reset_work_area(&found);
+    let list = screens(&found);
+    MONITORS.set(found);
+    // Windows has moved what was on a monitor that went away onto another,
+    // and those moves aren't ours to animate.
+    cut();
+    update(|wm| Some(wm.set_screens(list)));
+}
+
+fn describe(list: &[Monitor]) -> String {
+    list.iter().map(|m| format!("{} {:?} at {} dpi", m.id.0, m.rect, m.dpi)).collect::<Vec<_>>().join(", ")
+}
+
+/// A shell that sets the work area owns it; the previous shell (or the bar
+/// this one used to have) may have left part of it reserved. Windows only
+/// has one to set, the primary monitor's. No SPIF_SENDCHANGE: that
+/// broadcasts WM_SETTINGCHANGE and waits on every window, and on a first
+/// boot a busy installer stalled it long enough that the shell never got as
+/// far as its keyboard hook.
+fn reset_work_area(list: &[Monitor]) {
+    let Some(primary) = list.iter().find(|m| m.primary).or(list.first()) else { return };
+    let r = primary.rect;
+    let mut full = RECT { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+    if let Err(e) = unsafe { SystemParametersInfoW(SPI_SETWORKAREA, 0, Some((&raw mut full).cast()), Default::default()) } {
+        log(&format!("resetting the work area failed: {e}"));
+    }
 }
 
 /// Gives focus back to the workspace's focused window, e.g. after the
@@ -320,11 +453,6 @@ pub fn on_timer(id: usize) {
         }
         update(|wm| Some(wm.placement()));
     }
-}
-
-/// The primary monitor. Others aren't managed yet.
-fn screen() -> Rect {
-    unsafe { Rect { left: 0, top: 0, right: GetSystemMetrics(SM_CXSCREEN), bottom: GetSystemMetrics(SM_CYSCREEN) } }
 }
 
 fn cloaked(w: HWND) -> bool {
@@ -417,7 +545,7 @@ fn is_elevated(process: HANDLE) -> bool {
 }
 
 fn apply(fx: Effects<HWND>) {
-    let animating = animate(fx.pace, fx.activated);
+    let animating = animate(fx.pace, &fx.activated);
     unsafe {
         // Async throughout: a hung app must not hang the shell.
         for &w in &fx.show {
@@ -428,8 +556,25 @@ fn apply(fx: Effects<HWND>) {
         for &w in &fx.restore {
             let _ = ShowWindowAsync(w, SW_RESTORE);
         }
+        let mut crossed = false;
         for &(w, r) in &fx.place {
+            crossed |= visible_frame(w).is_some_and(|(_, now)| monitor_of(now) != monitor_of(r));
             place(w, r);
+        }
+        for &(w, from, to) in &fx.carry {
+            if let Some(r) = window_rect(w) {
+                move_to(w, carried(r, from, to));
+                crossed = true;
+            }
+        }
+        // A Per-Monitor aware app moved onto a monitor with another DPI
+        // resizes itself to what WM_DPICHANGED suggests, over where it was
+        // put; so it's put there again once it has.
+        if crossed {
+            SetTimer(Some(EVENTS_TO.get()), REPLACE_TIMER, 250, None);
+        }
+        if let Some(p) = fx.pointer {
+            let _ = SetCursorPos(p.x, p.y);
         }
         if animating {
             // Kept on screen for the overlay to draw, but under everything,
@@ -457,23 +602,36 @@ fn now() -> Duration {
     EPOCH.get().map(|e| e.elapsed()).unwrap_or_default()
 }
 
+/// COSMIC keeps a floating window's place relative to its output when it
+/// moves it to another (`position_relative`).
+fn carried(r: RECT, from: Rect, to: Rect) -> RECT {
+    let (w, h) = (r.right - r.left, r.bottom - r.top);
+    let along = |at: i32, start: i32, len: i32, size: i32, to_start: i32, to_len: i32| {
+        let room = (len - size).max(1);
+        to_start + ((at - start).clamp(0, room) as i64 * (to_len - size).max(0) as i64 / room as i64) as i32
+    };
+    let left = along(r.left, from.left, from.width(), w, to.left, to.width());
+    let top = along(r.top, from.top, from.height(), h, to.top, to.height());
+    RECT { left, top, right: left + w, bottom: top + h }
+}
+
 /// Hands the window manager's new state to the animator and, if anything
 /// on screen animates, puts the overlay up showing the screen as it is,
 /// before anything moves. True while the overlay is up.
-fn animate(pace: Pace, activated: Option<usize>) -> bool {
-    let Some((views, active)) = WM.with_borrow(|wm| wm.as_ref().map(|wm| (wm.views(), wm.active()))) else { return false };
+fn animate(pace: Pace, activated: &[(OutputId, usize)]) -> bool {
+    let Some(screens) = WM.with_borrow(|wm| wm.as_ref().map(Wm::screens)) else { return false };
     let at = now();
     let running = PHASE.get() != Phase::Idle;
     let allowed = ANIMATING.get() && (running || (overlay::enabled() && !fullscreen_app()));
     ANIM.with_borrow_mut(|a| {
-        let a = a.get_or_insert_with(|| Animator::new(views.clone(), active));
+        let a = a.get_or_insert_with(|| Animator::new(screens.clone()));
         if allowed {
-            a.push(views, pace, &|w| visible_frame(w).map(|(_, r)| r), at);
-            if let Some(to) = activated {
-                a.activate(to, at);
+            a.push(screens, pace, &|w| visible_frame(w).map(|(_, r)| r), at);
+            for (id, to) in activated {
+                a.activate(id, *to, at);
             }
         } else {
-            a.rest(views, active);
+            a.rest(screens);
         }
     });
     if !allowed {
@@ -484,8 +642,8 @@ fn animate(pace: Pace, activated: Option<usize>) -> bool {
         if !frame.moving {
             return false;
         }
-        draw(&frame.sprites);
-        overlay::show(screen());
+        draw(&frame);
+        overlay::show(desktop_bounds());
         let shown = now();
         ANIM.with_borrow_mut(|a| a.as_mut().map(|a| a.restart(at, shown)));
     }
@@ -505,9 +663,21 @@ fn fullscreen_app() -> bool {
     }
     let mut pid = 0;
     unsafe { GetWindowThreadProcessId(w, Some(&mut pid)) };
-    let s = screen();
+    let s = monitor_rect(w);
     pid != unsafe { GetCurrentProcessId() }
         && window_rect(w).is_some_and(|r| r.left <= s.left && r.top <= s.top && r.right >= s.right && r.bottom >= s.bottom)
+}
+
+/// The whole of the monitor `w` is on.
+fn monitor_rect(w: HWND) -> Rect {
+    let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+    let m = unsafe { MonitorFromWindow(w, MONITOR_DEFAULTTONEAREST) };
+    if unsafe { GetMonitorInfoW(m, &mut info) }.as_bool() {
+        let r = info.rcMonitor;
+        Rect { left: r.left, top: r.top, right: r.right, bottom: r.bottom }
+    } else {
+        desktop_bounds()
+    }
 }
 
 /// Every top-level window, top first.
@@ -545,36 +715,41 @@ fn settled() -> bool {
     })
 }
 
-fn frame(at: Duration) -> Frame<HWND> {
+fn frame(at: Duration) -> Scene<HWND> {
     let z = z_order();
-    let floating = |i: usize| {
-        let mut free = WM.with_borrow(|wm| wm.as_ref().map(|wm| wm.floating(i)).unwrap_or_default());
+    let floating = |id: &OutputId, i: usize| {
+        let mut free = WM.with_borrow(|wm| wm.as_ref().map(|wm| wm.floating(id, i)).unwrap_or_default());
         free.retain(|&w| on_screen(w));
         free.sort_by_key(|w| z.iter().position(|x| x == w));
         free.into_iter().filter_map(|w| Some((w, visible_frame(w)?.1))).collect()
     };
     let settled = settled();
-    ANIM.with_borrow_mut(|a| a.as_mut().map(|a| a.frame(at, settled, &floating))).unwrap_or(Frame { sprites: Vec::new(), moving: false })
+    ANIM.with_borrow_mut(|a| a.as_mut().map(|a| a.frame(at, settled, &floating))).unwrap_or(Scene { layers: Vec::new(), moving: false })
 }
 
 /// The overlay's picture: windows the shell doesn't manage (dialogs, the
-/// launcher) where they are, on top as they'd be; under them, the animation.
-fn draw(sprites: &[Sprite<HWND>]) {
+/// launcher) where they are, on top as they'd be; under them, the animation,
+/// each monitor's kept to that monitor. The overlay covers every monitor,
+/// so screen coordinates are taken back to its corner.
+fn draw(frame: &Scene<HWND>) {
     let overlay = overlay::window();
-    let mut scene: Vec<(HWND, Rect, f64)> = Vec::new();
+    let bounds = desktop_bounds();
+    let mut scene: Vec<(HWND, Rect, f64, Option<Rect>)> = Vec::new();
     for w in z_order() {
         let managed = WM.with_borrow(|wm| wm.as_ref().is_some_and(|wm| wm.manages(w)));
         if w != overlay && !managed && on_screen(w)
             && let Some((_, r)) = visible_frame(w)
         {
-            scene.push((w, r, 1.0));
+            scene.push((w, r, 1.0, None));
         }
     }
-    scene.extend(sprites.iter().map(|s| (s.window, s.rect, s.alpha)));
+    for layer in &frame.layers {
+        scene.extend(layer.sprites.iter().map(|s| (s.window, s.rect, s.alpha, Some(layer.clip))));
+    }
     let looks: Vec<(HWND, Look)> = scene
         .into_iter()
         .rev()
-        .filter_map(|(w, at, alpha)| {
+        .filter_map(|(w, at, alpha, clip)| {
             // A closed window has nothing left to draw, as in COSMIC.
             let (outer, seen) = visible_frame(w)?;
             let source = RECT {
@@ -583,10 +758,36 @@ fn draw(sprites: &[Sprite<HWND>]) {
                 right: seen.right - outer.left,
                 bottom: seen.bottom - outer.top,
             };
+            let (at, source) = match clip {
+                Some(clip) => clipped(at, source, clip)?,
+                None => (at, source),
+            };
+            let at = Rect { left: at.left - bounds.left, top: at.top - bounds.top, right: at.right - bounds.left, bottom: at.bottom - bounds.top };
             Some((w, Look { at, alpha, source }))
         })
         .collect();
     overlay::draw(&looks);
+}
+
+/// The part of a thumbnail drawn at `at` that's inside `clip`, and the
+/// part of its `source` that shows there; None if none of it is.
+fn clipped(at: Rect, source: RECT, clip: Rect) -> Option<(Rect, RECT)> {
+    let vis = Rect { left: at.left.max(clip.left), top: at.top.max(clip.top), right: at.right.min(clip.right), bottom: at.bottom.min(clip.bottom) };
+    if vis.width() <= 0 || vis.height() <= 0 || at.width() <= 0 || at.height() <= 0 {
+        return None;
+    }
+    if vis == at {
+        return Some((at, source));
+    }
+    let scale = |d: i32, src: i32, dst: i32| (i64::from(d) * i64::from(src) / i64::from(dst)) as i32;
+    let (sw, sh) = (source.right - source.left, source.bottom - source.top);
+    let src = RECT {
+        left: source.left + scale(vis.left - at.left, sw, at.width()),
+        top: source.top + scale(vis.top - at.top, sh, at.height()),
+        right: source.right - scale(at.right - vis.right, sw, at.width()),
+        bottom: source.bottom - scale(at.bottom - vis.bottom, sh, at.height()),
+    };
+    Some((vis, src))
 }
 
 /// The pacing thread's tick: one composited frame went by.
@@ -598,7 +799,7 @@ pub fn on_frame() {
     }
     let at = now();
     let frame = frame(at);
-    draw(&frame.sprites);
+    draw(&frame);
     if frame.moving {
         PHASE.set(Phase::Running);
         return;
@@ -654,10 +855,10 @@ fn finish() {
 
 /// Stops everything where it ends up, at once.
 fn cut() {
-    let state = WM.with_borrow(|wm| wm.as_ref().map(|wm| (wm.views(), wm.active())));
+    let state = WM.with_borrow(|wm| wm.as_ref().map(Wm::screens));
     ANIM.with_borrow_mut(|a| {
-        if let (Some(a), Some((views, active))) = (a, state) {
-            a.rest(views, active);
+        if let (Some(a), Some(screens)) = (a, state) {
+            a.rest(screens);
         }
     });
     if PHASE.get() != Phase::Idle {
@@ -759,7 +960,8 @@ pub fn drag(d: Drag) {
         Drag::Move(to) => match DRAGGING.get() {
             Some(Dragging::Tile { w, from, start }) => {
                 move_to(w, shifted(start, from, to));
-                let target = WM.with_borrow(|wm| wm.as_ref().and_then(|wm| wm.drop_preview(w, to, scaled(DROP_BAND))));
+                let band = scaled_at(DROP_BAND, dpi_at(to));
+                let target = WM.with_borrow(|wm| wm.as_ref().and_then(|wm| wm.drop_preview(w, to, band)));
                 preview(target);
             }
             Some(Dragging::Float { w, from, start }) => move_to(w, shifted(start, from, to)),
@@ -769,7 +971,7 @@ pub fn drag(d: Drag) {
             }
             Some(Dragging::FloatCorner { w, from, start, corner }) => {
                 let (dx, dy) = (to.x - from.x, to.y - from.y);
-                let min = scaled(100);
+                let min = scaled_at(100, dpi_at(to));
                 let mut r = start;
                 match corner[0] {
                     Direction::Left => r.left = (r.left + dx).min(r.right - min),
@@ -787,7 +989,8 @@ pub fn drag(d: Drag) {
             if let Some(Dragging::Tile { w, .. }) = DRAGGING.take() {
                 preview(None);
                 ANIM.with_borrow_mut(|a| a.as_mut().map(|a| a.forget(w)));
-                update(|wm| Some(wm.drop(w, at, scaled(DROP_BAND))));
+                let band = scaled_at(DROP_BAND, dpi_at(at));
+                update(|wm| Some(wm.drop(w, at, band)));
             }
         }
     }

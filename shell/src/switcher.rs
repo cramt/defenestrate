@@ -11,13 +11,13 @@ use std::path::Path;
 
 use windows::Win32::Foundation::{CloseHandle, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, DT_LEFT, DT_RIGHT, DeleteObject, EndPaint, FillRect, HFONT, InvalidateRect, PAINTSTRUCT,
+    BeginPaint, CreateSolidBrush, DT_LEFT, DT_RIGHT, DeleteObject, EndPaint, FillRect, InvalidateRect, PAINTSTRUCT,
     SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetClientRect, GetSystemMetrics, GetWindowTextW, GetWindowThreadProcessId, IDC_ARROW,
-    LoadCursorW, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos,
+    CreateWindowExW, DefWindowProcW, GetClientRect, GetWindowTextW, GetWindowThreadProcessId, IDC_ARROW,
+    LoadCursorW, RegisterClassW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos,
     ShowWindow, WA_INACTIVE, WM_ACTIVATE, WM_LBUTTONUP, WM_PAINT, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{Result, w};
@@ -25,7 +25,7 @@ use windows::core::{Result, w};
 use crate::cycle::Cycle;
 use crate::keys::Switch;
 use crate::launcher::{BACKGROUND, DIM, FOREGROUND, PADDING, ROW_HEIGHT, SELECTED, WIDTH, text};
-use crate::{desktop, scaled};
+use crate::{desktop, font, scaled, use_dpi};
 
 const ROWS: usize = 10;
 
@@ -38,11 +38,9 @@ struct Entry {
 thread_local! {
     static OPEN: RefCell<Option<Cycle<Entry>>> = const { RefCell::new(None) };
     static WINDOW: Cell<HWND> = const { Cell::new(HWND(std::ptr::null_mut())) };
-    static FONT: Cell<HFONT> = const { Cell::new(HFONT(std::ptr::null_mut())) };
 }
 
-pub fn create(instance: HINSTANCE, font: HFONT) -> Result<()> {
-    FONT.set(font);
+pub fn create(instance: HINSTANCE) -> Result<()> {
     let class = w!("DefenestrateSwitcher");
     unsafe {
         RegisterClassW(&WNDCLASSW {
@@ -135,10 +133,12 @@ fn show() {
     let window = WINDOW.get();
     let rows = OPEN.with_borrow(|o| o.as_ref().map_or(0, |c| c.items().len().min(ROWS))) as i32;
     unsafe {
+        // Where the launcher goes: the pointer's monitor, at its DPI.
+        let (area, dpi) = desktop::overlay_spot();
+        use_dpi(dpi);
         let (width, height) = (scaled(WIDTH), scaled(ROW_HEIGHT) * rows + scaled(PADDING) * 2);
-        // Where the launcher goes: where the eye already is.
-        let x = (GetSystemMetrics(SM_CXSCREEN) - width) / 2;
-        let y = GetSystemMetrics(SM_CYSCREEN) / 4;
+        let x = area.left + (area.width() - width) / 2;
+        let y = area.top + area.height() / 4;
         let _ = SetWindowPos(window, None, x, y, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
         let _ = ShowWindow(window, SW_SHOW);
     }
@@ -174,7 +174,7 @@ fn paint(window: HWND) {
         let background = CreateSolidBrush(BACKGROUND);
         FillRect(hdc, &client, background);
         let _ = DeleteObject(background.into());
-        SelectObject(hdc, FONT.get().into());
+        SelectObject(hdc, font().into());
         SetBkMode(hdc, TRANSPARENT);
 
         let (pad, row) = (scaled(PADDING), scaled(ROW_HEIGHT));

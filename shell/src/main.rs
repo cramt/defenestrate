@@ -29,7 +29,7 @@ fn main() {
 }
 
 #[cfg(windows)]
-use windows_main::{log, scaled};
+use windows_main::{font, log, scaled, scaled_at, use_dpi};
 
 #[cfg(windows)]
 fn main() {
@@ -54,7 +54,8 @@ mod windows_main {
 
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
     use windows::Win32::Graphics::Gdi::{
-        CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, DEFAULT_CHARSET, FF_MODERN, FIXED_PITCH, FW_NORMAL, OUT_TT_PRECIS,
+        CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, DEFAULT_CHARSET, DeleteObject, FF_MODERN, FIXED_PITCH, FW_NORMAL, HFONT,
+        OUT_TT_PRECIS,
     };
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::Shutdown::{EWX_LOGOFF, ExitWindowsEx, LockWorkStation, SHUTDOWN_REASON};
@@ -68,7 +69,7 @@ mod windows_main {
     use crate::keys::{self, Action, WM_ACTION};
     use crate::{desktop, launcher, switcher};
 
-    // In 96 DPI pixels; scaled to the real DPI at startup.
+    // In 96 DPI pixels; scaled to the DPI of the monitor it's drawn on.
     const FONT_HEIGHT: i32 = 18;
     // Installed by configs/default.nix (`fonts`). GDI quietly substitutes
     // something else if it's missing.
@@ -77,11 +78,58 @@ mod windows_main {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     thread_local! {
+        /// The DPI the launcher and switcher draw at: that of the monitor
+        /// they last opened on (Per-Monitor V2: each monitor has its own).
         static DPI: Cell<i32> = const { Cell::new(96) };
+        static FONT: Cell<Option<(i32, HFONT)>> = const { Cell::new(None) };
     }
 
     pub fn scaled(px: i32) -> i32 {
         px * DPI.get() / 96
+    }
+
+    pub fn scaled_at(px: i32, dpi: u32) -> i32 {
+        px * dpi as i32 / 96
+    }
+
+    /// The overlays are about to open on a monitor at `dpi`.
+    pub fn use_dpi(dpi: u32) {
+        DPI.set(dpi as i32);
+    }
+
+    /// The shell's font at the current DPI, made the first time it's needed
+    /// at that DPI.
+    pub fn font() -> HFONT {
+        let dpi = DPI.get();
+        if let Some((at, f)) = FONT.get()
+            && at == dpi
+        {
+            return f;
+        }
+        let f = unsafe {
+            CreateFontW(
+                -scaled(FONT_HEIGHT),
+                0,
+                0,
+                0,
+                FW_NORMAL.0 as i32,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET,
+                OUT_TT_PRECIS,
+                CLIP_DEFAULT_PRECIS,
+                CLEARTYPE_QUALITY,
+                (FIXED_PITCH.0 | FF_MODERN.0) as u32,
+                FONT_FACE,
+            )
+        };
+        if let Some((_, old)) = FONT.replace(Some((dpi, f))) {
+            unsafe {
+                let _ = DeleteObject(old.into());
+            }
+        }
+        f
     }
 
     /// Appends to %LOCALAPPDATA%\defenestrate\shell.log. There is no
@@ -106,22 +154,6 @@ mod windows_main {
                 log(&format!("becoming DPI aware failed: {e}"));
             }
             DPI.set(GetDpiForSystem() as i32);
-            let font = CreateFontW(
-                -scaled(FONT_HEIGHT),
-                0,
-                0,
-                0,
-                FW_NORMAL.0 as i32,
-                0,
-                0,
-                0,
-                DEFAULT_CHARSET,
-                OUT_TT_PRECIS,
-                CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY,
-                (FIXED_PITCH.0 | FF_MODERN.0) as u32,
-                FONT_FACE,
-            );
 
             let instance = GetModuleHandleW(None)?.into();
             let class = w!("DefenestrateShell");
@@ -138,10 +170,10 @@ mod windows_main {
                 Ok(()) => log("keyboard hook installed"),
                 Err(e) => log(&format!("installing the keyboard hook failed: {e}")),
             }
-            if let Err(e) = launcher::create(instance, font) {
+            if let Err(e) = launcher::create(instance) {
                 log(&format!("creating the launcher failed: {e}"));
             }
-            if let Err(e) = switcher::create(instance, font) {
+            if let Err(e) = switcher::create(instance) {
                 log(&format!("creating the window switcher failed: {e}"));
             }
             desktop::start(main);
@@ -198,7 +230,7 @@ mod windows_main {
                                 log(&format!("logging out failed: {e}"));
                             }
                         }
-                        Action::Wm(c) => desktop::command(c),
+                        Action::Wm(c, hold) => desktop::command(c, hold),
                         Action::Drag(d) => desktop::drag(d),
                         Action::Switcher(s) => switcher::on(s),
                     }

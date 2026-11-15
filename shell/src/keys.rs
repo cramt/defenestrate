@@ -22,6 +22,10 @@
 //! Super+right-drag into COSMIC's move and resize grabs. Like COSMIC, the
 //! grab lasts until the button comes up, even if Super goes first.
 //!
+//! Every change in which modifiers are held starts a new `Hold`, COSMIC's
+//! `last_modifier_change`: a few of its moves across monitors depend on
+//! whether Super stayed down in between.
+//!
 //! Alt+Tab and Super+Tab (Shift for backwards) are COSMIC's window
 //! switcher, swallowed here: without explorer, Windows' own Alt+Tab still
 //! switches but shows nothing, and can't reach windows on other workspaces,
@@ -31,6 +35,7 @@
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -48,7 +53,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::tree::{Direction, Point};
-use crate::wm::{Command, Step, WorkspaceId};
+use crate::wm::{Command, Hold, Step, WorkspaceId};
 
 pub const WM_ACTION: u32 = WM_APP + 2;
 
@@ -59,7 +64,7 @@ pub enum Action {
     HomeFolder,
     Lock,
     LogOut,
-    Wm(Command),
+    Wm(Command, Hold),
     Drag(Drag),
     Switcher(Switch),
 }
@@ -120,6 +125,31 @@ thread_local! {
     static NOTIFY: Cell<HWND> = const { Cell::new(HWND(std::ptr::null_mut())) };
     /// The button holding a Super+drag, until it comes up.
     static DRAGGING: Cell<Option<Button>> = const { Cell::new(None) };
+    /// Which modifier keys are down, one bit each, so autorepeat doesn't
+    /// count as a change.
+    static MODIFIERS: Cell<u32> = const { Cell::new(0) };
+}
+
+static HOLD: AtomicU64 = AtomicU64::new(0);
+
+fn hold() -> Hold {
+    Hold(HOLD.load(Ordering::Relaxed))
+}
+
+/// Starts a new hold if `key` is a modifier whose state changed.
+fn track_modifier(key: VIRTUAL_KEY, down: bool) {
+    let bit = match key.0 {
+        k @ 0xA0..=0xA5 => 1 << (k - 0xA0),
+        _ if key == VK_LWIN => 1 << 6,
+        _ if key == VK_RWIN => 1 << 7,
+        _ => return,
+    };
+    let was = MODIFIERS.get();
+    let now = if down { was | bit } else { was & !bit };
+    if now != was {
+        MODIFIERS.set(now);
+        HOLD.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 // Filled by the hook thread, drained by the GUI thread.
@@ -182,23 +212,30 @@ struct Mods {
 enum Binding {
     Do(Action),
     EnterResize { outwards: bool },
+    /// Bound in COSMIC, but does nothing: still kept from the app.
+    Nothing,
 }
 
 fn binding(key: VIRTUAL_KEY, m: Mods) -> Option<Binding> {
     use Command::*;
-    let wm = |c| Some(Binding::Do(Action::Wm(c)));
+    let wm = |c| Some(Binding::Do(Action::Wm(c, hold())));
     let act = |a| Some(Binding::Do(a));
     if let Some(dir) = direction(key) {
         let step = match dir {
             Direction::Left | Direction::Up => Step::Previous,
             Direction::Right | Direction::Down => Step::Next,
         };
+        // COSMIC's Previous/NextWorkspace bindings ignore left and right
+        // while workspaces are laid out vertically, its default.
+        let vertical = matches!(dir, Direction::Up | Direction::Down);
         return match (m.shift, m.ctrl, m.alt) {
             (false, false, false) => wm(Focus(dir)),
             (true, false, false) => wm(Move(dir)),
-            (false, true, false) => wm(SwitchStep(step)),
-            (true, true, false) => wm(SendStep(step)),
-            // Super+Alt is for other monitors, not managed yet.
+            (false, true, false) if vertical => wm(SwitchStep(step)),
+            (true, true, false) if vertical => wm(MoveStep(step)),
+            (_, true, false) => Some(Binding::Nothing),
+            (false, false, true) => wm(SwitchOutput(dir)),
+            (true, false, true) => wm(MoveToOutput(dir)),
             _ => None,
         };
     }
@@ -214,7 +251,7 @@ fn binding(key: VIRTUAL_KEY, m: Mods) -> Option<Binding> {
         _ => match (letter(key)?, m.shift) {
             (d @ '1'..='9', shift) => {
                 let ws = WorkspaceId::from_key(d.to_digit(10)?)?;
-                wm(if shift { Send(ws) } else { Switch(ws) })
+                wm(if shift { MoveTo(ws) } else { Switch(ws) })
             }
             ('Q', false) => wm(Close),
             ('O', false) => wm(ToggleOrientation),
@@ -305,7 +342,7 @@ fn on_key_down(key: VIRTUAL_KEY) -> bool {
     }
     if let Mode::Resize { outwards } = MODE.get() {
         if let Some(dir) = direction(key) {
-            queue(Action::Wm(Command::Resize { dir, outwards }));
+            queue(Action::Wm(Command::Resize { dir, outwards }, hold()));
             return true;
         }
         MODE.set(Mode::Normal);
@@ -338,7 +375,13 @@ fn on_key_down(key: VIRTUAL_KEY) -> bool {
     match binding(key, mods) {
         Some(Binding::Do(action)) => queue(action),
         Some(Binding::EnterResize { outwards }) => MODE.set(Mode::Resize { outwards }),
+        Some(Binding::Nothing) => {}
         None => return false,
+    }
+    // Super+Alt+direction: the app saw Alt go down and will see it come up
+    // with nothing in between, which opens its menu bar, as with Alt+Tab.
+    if mods.alt {
+        std::thread::spawn(mask_alt);
     }
     true
 }
@@ -360,6 +403,7 @@ unsafe extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRE
     if code == HC_ACTION as i32 {
         let key = VIRTUAL_KEY(unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) }.vkCode as u16);
         let down = matches!(wparam.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
+        track_modifier(key, down);
         if matches!(wparam.0 as u32, WM_KEYUP | WM_SYSKEYUP) {
             on_key_up(key);
         }

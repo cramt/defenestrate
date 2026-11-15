@@ -32,7 +32,7 @@ impl Rect {
     pub fn contains(self, p: Point) -> bool {
         (self.left..self.right).contains(&p.x) && (self.top..self.bottom).contains(&p.y)
     }
-    fn centre(self) -> Point {
+    pub fn centre(self) -> Point {
         Point { x: (self.left + self.right) / 2, y: (self.top + self.bottom) / 2 }
     }
 }
@@ -371,23 +371,26 @@ impl<W: Copy + Eq> Tree<W> {
     /// group running the other way gets wrapped, with `w` beside it on that
     /// side; a group we climbed into gets `w` as a new child next to where
     /// we came from; in `w`'s own group it swaps with a lone sibling, moves
-    /// into a neighbouring group, or forks with the neighbour. At the edge
-    /// of everything there is no other monitor to go to, so nothing happens.
-    pub fn r#move(&mut self, w: W, dir: Direction) {
-        let Some(node) = self.leaf(w) else { return };
+    /// into a neighbouring group, or forks with the neighbour. False at the
+    /// edge of everything (COSMIC's MoveResult::MoveFurther), where the
+    /// window goes on to another workspace or monitor instead.
+    pub fn r#move(&mut self, w: W, dir: Direction) -> bool {
+        let Some(node) = self.leaf(w) else { return true };
         let (axis, forward) = (dir.axis(), dir.forward());
         let mut child = node;
         while let Some(group) = self.node(child).parent {
             if self.axis_of(group) != Some(axis) {
                 self.detach(node);
                 self.wrap(group, node, axis, !forward);
-                break;
+                self.flatten();
+                return true;
             }
             let i = self.index_in(group, child);
             if child != node {
                 self.detach(node);
                 self.attach(group, if forward { i + 1 } else { i }, node);
-                break;
+                self.flatten();
+                return true;
             }
             let len = self.kids(group).len();
             let next = if forward { (i + 1 < len).then_some(i + 1) } else { i.checked_sub(1) };
@@ -413,11 +416,13 @@ impl<W: Copy + Eq> Tree<W> {
                         self.wrap(neighbour, node, axis, forward);
                     }
                 }
-                break;
+                self.flatten();
+                return true;
             }
             child = group;
         }
         self.flatten();
+        false
     }
 
     /// COSMIC's next_focus: climb to the nearest group running `dir`'s way
@@ -528,10 +533,9 @@ impl<W: Copy + Eq> Tree<W> {
     /// group's children (`band` wide too) add to that group, and anywhere
     /// else splits the window under `p` on the side nearest `p`. Over the
     /// dragged window itself, it goes back where it was.
-    fn zone(&self, w: W, p: Point, area: Rect, band: i32) -> Option<Zone> {
-        let own = self.leaf(w)?;
+    fn zone(&self, own: Option<Id>, p: Point, area: Rect, band: i32) -> Option<Zone> {
         let root = self.root?;
-        if root == own || !area.contains(p) {
+        if Some(root) == own || !area.contains(p) {
             return None;
         }
         if self.axis_of(root).is_some() {
@@ -549,7 +553,7 @@ impl<W: Copy + Eq> Tree<W> {
         let mut id = root;
         loop {
             match &self.node(id).kind {
-                Kind::Leaf(_) => return (id != own).then_some(Zone::Split(id, nearest_side(rects[id]?, p))),
+                Kind::Leaf(_) => return (Some(id) != own).then_some(Zone::Split(id, nearest_side(rects[id]?, p))),
                 Kind::Group { axis, kids } => {
                     for pair in kids.windows(2) {
                         let boundary = axis.span(rects[pair[1].id]?).0;
@@ -587,7 +591,7 @@ impl<W: Copy + Eq> Tree<W> {
     /// Where `w` would end up if dropped at `p`; None if it would go back
     /// where it is.
     pub fn drop_preview(&self, w: W, p: Point, area: Rect, band: i32) -> Option<Rect> {
-        let zone = self.zone(w, p, area, band)?;
+        let zone = self.zone(Some(self.leaf(w)?), p, area, band)?;
         let mut after = self.clone();
         after.drop_into(self.leaf(w)?, zone);
         after.layout(area).into_iter().find(|&(x, _)| x == w).map(|(_, r)| r)
@@ -595,8 +599,49 @@ impl<W: Copy + Eq> Tree<W> {
 
     /// Drops dragged `w` at `p`, as `drop_preview` showed.
     pub fn drop(&mut self, w: W, p: Point, area: Rect, band: i32) {
-        if let (Some(own), Some(zone)) = (self.leaf(w), self.zone(w, p, area, band)) {
+        if let Some(own) = self.leaf(w)
+            && let Some(zone) = self.zone(Some(own), p, area, band)
+        {
             self.drop_into(own, zone);
+        }
+    }
+
+    /// Where `w`, dragged here from another monitor's tiling, would land
+    /// if dropped at `p`.
+    pub fn drop_in_preview(&self, w: W, p: Point, area: Rect, band: i32) -> Option<Rect> {
+        let mut after = self.clone();
+        after.drop_in(w, p, area, band);
+        after.layout(area).into_iter().find(|&(x, _)| x == w).map(|(_, r)| r)
+    }
+
+    /// Drops `w`, dragged here from another monitor, into this tiling at `p`
+    /// by the same zones a drag within it uses: in COSMIC the grabbed window
+    /// belongs to no tree while it's held, so where it came from is moot.
+    pub fn drop_in(&mut self, w: W, p: Point, area: Rect, band: i32) {
+        if self.contains(w) {
+            return;
+        }
+        let zone = self.zone(None, p, area, band);
+        let leaf = self.alloc(Node { parent: None, kind: Kind::Leaf(w) });
+        match (self.root, zone) {
+            (None, _) => self.root = Some(leaf),
+            (Some(_), Some(zone)) => self.drop_into(leaf, zone),
+            (Some(root), None) => self.wrap(root, leaf, Axis::for_rect(area), false),
+        }
+    }
+
+    /// COSMIC's map_to_tree with a direction: a window arriving from another
+    /// monitor, moving `dir`, takes the half of the whole layout on the side
+    /// it came in from.
+    pub fn insert_from(&mut self, w: W, dir: Direction) {
+        if self.contains(w) {
+            return;
+        }
+        let leaf = self.alloc(Node { parent: None, kind: Kind::Leaf(w) });
+        match self.root {
+            None => self.root = Some(leaf),
+            // Moving left it comes in from the right: second child.
+            Some(root) => self.wrap(root, leaf, dir.axis(), dir.forward()),
         }
     }
 }
@@ -1028,5 +1073,46 @@ mod tests {
             }
         }
         assert!(t.is_empty());
+    }
+
+    #[test]
+    fn moving_past_the_edge_of_everything_says_so_and_changes_nothing() {
+        let mut t = thirds();
+        let before = t.layout(AREA);
+        assert!(!t.r#move(1, Direction::Left));
+        assert!(!t.r#move(3, Direction::Right));
+        assert_eq!(t.layout(AREA), before);
+        assert!(t.r#move(1, Direction::Right));
+        let mut lone = tree(1);
+        assert!(!lone.r#move(1, Direction::Up), "a lone window has no parent to move in");
+        // A group the other way gets wrapped: that's a move, not the edge.
+        let mut pair = tree(2);
+        assert!(pair.r#move(2, Direction::Down));
+    }
+
+    #[test]
+    fn a_window_from_another_monitor_takes_the_half_it_came_in_on() {
+        let mut t = thirds();
+        t.insert_from(9, Direction::Left);
+        assert_eq!(t.layout(AREA).last(), Some(&(9, r(800, 0, 1600, 1000))), "moving left: the right half");
+        let mut t = tree(2);
+        t.insert_from(9, Direction::Down);
+        assert_eq!(t.layout(AREA)[0], (9, r(0, 0, 1600, 500)), "moving down: the top half");
+        let mut empty = Tree::default();
+        empty.insert_from(9, Direction::Right);
+        assert_eq!(empty.layout(AREA), [(9, AREA)]);
+    }
+
+    #[test]
+    fn a_window_dragged_in_from_another_monitor_drops_by_the_same_zones() {
+        let t = tree(2);
+        assert_eq!(t.drop_in_preview(9, p(5, 500), AREA, BAND), Some(r(0, 0, 533, 1000)), "the screen's edge");
+        assert_eq!(t.drop_in_preview(9, p(1200, 900), AREA, BAND), Some(r(800, 500, 1600, 1000)), "splits 2");
+        let mut t = tree(2);
+        t.drop_in(9, p(800, 500), AREA, BAND);
+        assert_eq!(t.windows(), [1, 9, 2], "between the two");
+        let mut empty = Tree::default();
+        empty.drop_in(9, p(5, 5), AREA, BAND);
+        assert_eq!(empty.layout(AREA), [(9, AREA)]);
     }
 }
