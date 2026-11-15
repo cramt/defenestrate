@@ -35,7 +35,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowRect, GetWindowTextLengthW, GetWindowThreadProcessId, HWND_TOPMOST, IsHungAppWindow, IsIconic, IsWindow,
     IsWindowVisible, IsZoomed, KillTimer,
     LWA_ALPHA, PostMessageW, RegisterClassW, RemovePropW, SM_CXSCREEN, SM_CYSCREEN, SPI_SETWORKAREA, SW_HIDE, SW_RESTORE,
-    SW_SHOWNA, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
+    SW_SHOWNA, SW_SHOWNOACTIVATE, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
     SWP_NOZORDER, SWP_SHOWWINDOW, SetForegroundWindow, SetLayeredWindowAttributes, SetPropW, SetTimer, SetWindowLongPtrW,
     SetWindowPos, ShowWindowAsync, SystemParametersInfoW, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP, WM_CLOSE,
     WNDCLASSW, WS_CAPTION, WS_CHILD, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
@@ -873,6 +873,13 @@ fn place(w: HWND, r: Rect) {
     unsafe {
         if IsZoomed(w).as_bool() {
             let _ = ShowWindowAsync(w, SW_RESTORE);
+        }
+        // Windows minimizes the windows that were on a monitor that goes
+        // away, hidden ones included, without the shell hearing of it; the
+        // tiling still has them, and placing a minimized window only moves
+        // its stub. Not activated: focus is the Wm's to give.
+        if IsIconic(w).as_bool() {
+            let _ = ShowWindowAsync(w, SW_SHOWNOACTIVATE);
         }
         let mut outer = RECT::default();
         let mut visible = RECT::default();
