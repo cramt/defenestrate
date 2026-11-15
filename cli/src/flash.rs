@@ -12,6 +12,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::config;
 use crate::disk;
+use crate::firmware;
 use crate::image::{IMAGE_FILE, SIZE_FILE};
 use crate::tools::{self, BLKDISCARD, BLOCKDEV, EFIBOOTMGR, FINDMNT, LSBLK, NTFSRESIZE, PARTX, SFDISK, UDEVADM};
 
@@ -100,10 +101,10 @@ pub fn run(args: &Args) -> Result<()> {
     // still exists, on this disk or another, stay.
     tools::run(UDEVADM.cmd().arg("settle"))?;
     let entries = tools::output_string(EFIBOOTMGR.cmd().arg("-v"))?;
-    for (num, uuid) in windows_entries(&entries) {
-        if !Path::new("/dev/disk/by-partuuid").join(&uuid).exists() {
-            tools::run(EFIBOOTMGR.cmd().args(["--bootnum", &num, "--delete-bootnum"]))?;
-            println!("removed stale firmware entry Boot{num} (its ESP {uuid} is gone)");
+    for e in firmware::windows_entries(&entries) {
+        if !e.live() {
+            tools::run(EFIBOOTMGR.cmd().arg("--bootnum").arg(&e.num).arg("--delete-bootnum"))?;
+            println!("removed stale firmware entry Boot{} (its ESP {} is gone)", e.num, e.esp);
         }
     }
 
@@ -160,37 +161,4 @@ fn write_image(image: &Path, dev: &Path, size: u64) -> Result<()> {
         bail!("the image decompressed to {done} bytes, its size file says {size}");
     }
     Ok(())
-}
-
-/// (Boot number, ESP partition UUID) of each "Windows Boot Manager" entry
-/// in `efibootmgr -v` output.
-fn windows_entries(text: &str) -> Vec<(String, String)> {
-    text.lines()
-        .filter_map(|line| {
-            let rest = line.strip_prefix("Boot")?;
-            let (num, rest) = rest.split_at_checked(4)?;
-            if !num.bytes().all(|b| b.is_ascii_hexdigit()) {
-                return None;
-            }
-            let rest = rest.strip_prefix('*').unwrap_or(rest);
-            if !rest.starts_with(" Windows Boot Manager") {
-                return None;
-            }
-            let hd = &rest[rest.find("HD(")? + 3..];
-            let fields: Vec<&str> = hd.split(',').collect();
-            if fields.get(1) != Some(&"GPT") {
-                return None;
-            }
-            Some((num.to_owned(), fields.get(2)?.to_string()))
-        })
-        .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn finds_windows_entries() {
-        let text = "BootCurrent: 0001\nBoot0000* Windows Boot Manager\tHD(1,GPT,0fd4e1d5-aaaa-bbbb-cccc-0123456789ab,0x800,0x96000)/File(\\EFI\\Microsoft\\Boot\\bootmgfw.efi)\nBoot0001* NixOS\tHD(1,GPT,11111111-2222-3333-4444-555555555555,0x800,0x100000)/File(\\EFI\\BOOT\\BOOTX64.EFI)\n";
-        assert_eq!(super::windows_entries(text), vec![("0000".to_owned(), "0fd4e1d5-aaaa-bbbb-cccc-0123456789ab".to_owned())]);
-    }
 }

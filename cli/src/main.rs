@@ -6,9 +6,11 @@ mod cache;
 mod config;
 mod disk;
 mod fetch;
+mod firmware;
 mod flash;
 mod image;
 mod iso;
+mod reboot;
 mod registry;
 mod render;
 mod tasks;
@@ -116,6 +118,8 @@ enum Cmd {
     Vm(vm::Args),
     /// Write a built image onto a whole disk, like an SD card.
     Flash(flash::Args),
+    /// Reboot into Windows, once: the boot after that is Linux again.
+    Reboot(reboot::Args),
     /// Rewrite defenestrate's own files (the shell, the WSL payload) on an
     /// installed Windows, from Linux while Windows is shut down. No reflash.
     Update {
@@ -205,6 +209,7 @@ fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Vm(args) => vm::run(&args),
         Cmd::Flash(args) => flash::run(&args),
+        Cmd::Reboot(args) => reboot::run(&args),
         Cmd::Update { config, cache, args } => update::run(&config.load()?, &cache.open()?, &args),
     }
 }
