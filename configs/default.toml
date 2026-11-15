@@ -94,6 +94,18 @@ remove = [
 # Bing results in local search.
 'Software\Policies\Microsoft\Windows\Explorer'.DisableSearchBoxSuggestions.dword = 1
 'Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'.HideFileExt.dword = 0
+# "Enhance pointer precision" off: mouse acceleration makes the same hand
+# movement turn a different distance depending on speed, which wrecks aim.
+# Stock is "1"/"6"/"10"; zeros are what the checkbox writes when unticked.
+'Control Panel\Mouse' = { MouseSpeed.sz = "0", MouseThreshold1.sz = "0", MouseThreshold2.sz = "0" }
+# The hotkeys for Sticky, Filter and Toggle Keys pop a dialog over the game
+# (and out of exclusive fullscreen) after 5 Shift presses, or Shift or
+# NumLock held for 8/5 seconds. The features themselves stay in Settings.
+# Each Flags is the stock value (510/126/62) minus the *_HOTKEYACTIVE bit
+# (0x4): https://learn.microsoft.com/windows/win32/api/winuser/ns-winuser-stickykeys
+'Control Panel\Accessibility\StickyKeys'.Flags.sz = "506"
+'Control Panel\Accessibility\Keyboard Response'.Flags.sz = "122"
+'Control Panel\Accessibility\ToggleKeys'.Flags.sz = "58"
 # Every console window's defaults. FontFamily 0x36 is TMPF_TRUETYPE |
 # FF_MODERN; FontSize is the cell height (18) in the high word.
 Console = { FaceName.sz = "Iosevka NFM", FontFamily.dword = 54, FontWeight.dword = 400, FontSize.dword = 1179648 }
