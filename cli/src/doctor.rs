@@ -131,7 +131,7 @@ fn efivar_bool(bytes: &[u8]) -> Option<bool> {
 
 /// A NUL-terminated UTF-16LE string, as the Boot Loader Interface writes.
 fn efivar_string(bytes: &[u8]) -> Option<String> {
-    let units: Vec<u16> = bytes.get(4..)?.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&u| u != 0).collect();
+    let units: Vec<u16> = bytes.get(4..)?.as_chunks::<2>().0.iter().map(|&c| u16::from_le_bytes(c)).take_while(|&u| u != 0).collect();
     String::from_utf16(&units).ok()
 }
 

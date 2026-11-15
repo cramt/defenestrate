@@ -47,6 +47,14 @@ pub fn run(args: &Args) -> Result<()> {
 fn pick(entries: Vec<WindowsEntry>, live: impl Fn(&WindowsEntry) -> bool) -> Result<BootNum> {
     let total = entries.len();
     let mut live: Vec<WindowsEntry> = entries.into_iter().filter(|e| live(e)).collect();
+    // Windows' first boot adds its own entry for the ESP flash already has
+    // one for. Both start the same bootmgfw.efi, so that's one Windows.
+    let mut seen = Vec::new();
+    live.retain(|e| {
+        let new = !seen.contains(&e.esp);
+        seen.push(e.esp.clone());
+        new
+    });
     match (live.len(), total) {
         (1, _) => Ok(live.remove(0).num),
         (0, 0) => bail!("the firmware has no Windows Boot Manager entry; `dfnstrate flash` adds one"),
@@ -70,6 +78,12 @@ mod tests {
     fn picks_the_one_live_windows() {
         let entries = vec![entry("0000", "gone"), entry("0003", "here")];
         assert_eq!(pick(entries, |e| e.esp == "here").unwrap(), "0003".parse().unwrap());
+    }
+
+    #[test]
+    fn one_esp_is_one_windows() {
+        let entries = vec![entry("0000", "esp"), entry("0004", "esp")];
+        assert_eq!(pick(entries, |_| true).unwrap(), "0000".parse().unwrap());
     }
 
     #[test]
