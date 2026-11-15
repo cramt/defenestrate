@@ -10,6 +10,7 @@ mod doctor;
 mod fetch;
 mod firmware;
 mod flash;
+mod gpt;
 mod image;
 mod iso;
 mod reboot;
@@ -131,7 +132,8 @@ enum Cmd {
     },
     /// Boot an ISO in a throwaway QEMU VM (Secure Boot, TPM 2.0).
     Vm(vm::Args),
-    /// Write a built image onto a whole disk, like an SD card.
+    /// Write a built image onto a whole disk, like an SD card, or into a
+    /// disk's free space next to Linux.
     Flash(flash::Args),
     /// Reboot into Windows, once: the boot after that is Linux again.
     Reboot(reboot::Args),

@@ -54,6 +54,8 @@ values per hive. Every config is layered over the distro's own defaults,
 - [x] `dfnstrate doctor`: a read-only preflight run as the user, one line per check with the fix: UEFI, Secure Boot (with a fix for the bootloader it finds: lanzaboote, systemd-boot, GRUB, shim), TPM 2.0, `/dev/kvm`, every command's tools and the OVMF, scratch and cache space, whether the work dir is on a spinning disk, Windows Boot Manager entries live or stale, an RTC on local time, and disk swap Linux could hibernate to. Exits non-zero on any failure. Parsing is unit-tested; run on one NixOS machine so far
 - [x] "Reboot to Linux" in the launcher: boots the firmware's Linux entry once (BootNext, via `{fwbootmgr}` bootsequence) and reboots, through an on-demand elevated task, so no UAC prompt (`linuxBootEntry`). Seen in the VM, with Windows Boot Manager first in BootOrder and a "Linux Boot Manager" entry (a UEFI shell on the ESP) last: the shortcut started the task unelevated with no window and no prompt, the script picked the Linux entry, the next boot was the UEFI shell, and the boot after that was Windows again. First logon's registration was run by hand there, not from a fresh `build image`; the nothing-matches path and a `description` pin are untested
 - [x] Whole-disk image built in a sandboxed VM (`dfnstrate build image`, `build.image`) and flashed from Linux with no boot media (`dfnstrate flash`, `build.install`), replacing nixconf's `saturn-windows-image.sh`. Flash-and-boot verified on a disk-sized file, and booted to the shell on real hardware
+- [x] Flashing next to Linux on the same disk (`dfnstrate flash --into-free-space`): Windows' partitions go into the one free region the user made, its own ESP included, with Linux mounted and every existing partition untouched; the BCD is pointed at the disk's GUID
+  - Seen in a VM, Linux running from the 1 TB disk it flashed: Linux's partitions hashed identically before and after, and after two Windows boots; Windows booted under Secure Boot to the shell on a 921 GiB C:, and Linux booted again afterwards. Not run on real hardware. Windows' first boot moves itself first in BootOrder (both layouts), and `update` doesn't support this layout
 
 ## Usage
 
@@ -124,7 +126,7 @@ starting and names what's missing:
 | `fetch` (and `build` without `--iso`) | `chromium` (or Chrome) |
 | `build iso` | `7zip wimlib hivex libisoburn` |
 | `build image`, `vm` | the above, `qemu-desktop swtpm edk2-ovmf mtools sleuthkit util-linux`, and access to `/dev/kvm` (`build image` alone runs headless, so `qemu-base` is enough) |
-| `flash` | `util-linux ntfs-3g efibootmgr sudo` |
+| `flash` | `util-linux ntfs-3g efibootmgr mtools sudo` |
 | `update` | `util-linux ntfs-3g sudo` |
 | `reboot` | `efibootmgr systemd sudo` |
 
@@ -216,6 +218,78 @@ the shell: on a file the size of a 1 TB disk put through exactly these
 steps, booted with fresh firmware variables and a fresh TPM, that took ~2
 minutes with no setup screens. Network or not doesn't matter, OOBE already
 ran offline in the sandbox.
+
+#### Next to Linux, on the same disk
+
+One SSD already holding Linux works too, with `--into-free-space`. Make the
+room yourself first: shrink a Linux filesystem and its partition (or delete
+one) until there's one stretch of unpartitioned space of at least the
+image's size (64 GiB by default; more is better, Windows grows into all of
+it). dfnstrate never shrinks or moves anything. Then reboot once, so the
+kernel's view of the shrunk partition matches the table, and:
+
+```sh
+dfnstrate flash --image out/image --into-free-space /dev/disk/by-id/nvme-…
+```
+
+Linux can stay mounted and running: only free space is written. It refuses
+an MBR disk, a disk with other than 512-byte sectors (the image's
+filesystems are made for those), a disk that's in use as a whole (md, dm or
+LVM straight on the disk could map its free space), a kernel view of the
+partitions that differs from the table (a partition shrunk but not yet
+re-read could still reach into the space), no free region big enough, more
+than one big enough (it won't guess which is meant for Windows), and an
+image whose partitions are already on the disk. Then it prints the table as
+it will be, with every existing partition marked kept, and asks you to type
+`INSTALL`.
+
+It writes the image's ESP, MSR and Windows partitions into the start of the
+region, data first and partition table last, so an interrupted run leaves
+nothing but garbage in still-free space. Then it appends the three
+partitions to the table, tells the kernel about them, grows Windows to the
+end of the region with `ntfsresize`, and adds a firmware entry without
+touching the boot order, as above. If a run stops after the table was
+written, delete the three new partitions and run it again.
+
+Windows gets its own small ESP rather than a share of Linux's: a NixOS ESP
+fills up with kernels, Windows updates rewrite the boot files on the ESP
+they boot from (`\EFI\Boot\bootx64.efi` included, which may be Linux's
+fallback loader), and a copy of the image's ESP needs no FAT merging. UEFI
+allows any number of ESPs on a disk; each firmware entry names its own.
+
+The new partitions keep the image's partition GUIDs, since Windows'
+`MountedDevices` finds C: by its partition GUID. The disk keeps its own GUID
+(Linux's), and the image's BCD names every device by partition GUID *and*
+disk GUID, so dfnstrate rewrites the disk GUID in the BCD on the new ESP
+(a 16-byte swap in the hive, after checking it has no unreplayed log).
+
+Without that rewrite, Windows Boot Manager stops with `0xc000000d` on
+`\Windows\system32\winload.efi`.
+
+Seen on a NixOS VM booting from a file the size of a 1 TB NVMe (ESP with
+systemd-boot, ext4 root, ~920 GiB free, then a btrfs data partition at the
+very end), with dfnstrate run inside it against its own disk, root mounted:
+the refusals (not confirmed; a second run of the same image; plain `flash`
+on the mounted disk), then the real run (63 GiB written in 25–57 minutes on
+a busy HDD, Windows ending exactly where the data partition starts). The
+Linux ESP and data partition hashed identically before and after the run,
+and all three Linux partitions hashed identically again after Windows had
+booted twice. With Microsoft's keys enrolled and Secure Boot on, the
+firmware booted the new entry, Windows came up at the shell with C: on the
+image's partition GUID and 960 GB free, and the Linux ESP had no drive
+letter. Afterwards systemd-boot still booted Linux. The disk was a VM's, not
+real hardware.
+
+Windows' first boot (on either layout) adds its own "Windows Boot
+Manager" entry and puts it first in BootOrder, so from then on the firmware
+boots Windows by default. Giving dfnstrate's entry Windows' own optional
+data doesn't stop it. Later boots leave BootOrder alone: put Linux back
+first once, from Linux or the firmware setup. After that there are two
+Windows entries on the same ESP, which `dfnstrate reboot` treats as two
+Windows; pass it `--entry`.
+
+`dfnstrate update` doesn't handle this layout yet: it wants the whole disk
+unused and Windows on partition 3.
 
 ### Updating an install
 

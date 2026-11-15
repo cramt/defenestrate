@@ -25,6 +25,7 @@ pub const QEMU_IMG: Tool = Tool { names: &["qemu-img"], package: "qemu-img / qem
 pub const SWTPM: Tool = Tool { names: &["swtpm"], package: "swtpm" };
 pub const SFDISK: Tool = Tool { names: &["sfdisk"], package: "util-linux" };
 pub const MDIR: Tool = Tool { names: &["mdir"], package: "mtools" };
+pub const MCOPY: Tool = Tool { names: &["mcopy"], package: "mtools" };
 pub const IFIND: Tool = Tool { names: &["ifind"], package: "sleuthkit" };
 pub const ICAT: Tool = Tool { names: &["icat"], package: "sleuthkit" };
 pub const LSBLK: Tool = Tool { names: &["lsblk"], package: "util-linux" };

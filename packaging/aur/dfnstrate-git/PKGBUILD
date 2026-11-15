@@ -32,7 +32,7 @@ optdepends=(
   'qemu-desktop: dfnstrate vm and build image (qemu-base is enough for build image alone)'
   'swtpm: dfnstrate vm and build image'
   'edk2-ovmf: Secure Boot firmware for dfnstrate vm and build image'
-  'mtools: dfnstrate build image'
+  'mtools: dfnstrate build image, and flash --into-free-space'
   'sleuthkit: dfnstrate build image'
   'ntfs-3g: dfnstrate flash and update'
   'efibootmgr: dfnstrate flash and reboot'

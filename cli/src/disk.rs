@@ -40,22 +40,31 @@ pub fn target(given: Option<&str>, install_target: Option<ByIdPath>, usage: &str
     }
 }
 
-/// Refuses a partition, anything that isn't a whole disk, and anything in
-/// use.
-pub fn unused(target: ByIdPath) -> Result<Disk> {
+/// Refuses a partition and anything that isn't a whole disk.
+pub fn whole(target: ByIdPath) -> Result<Disk> {
     let t = target.as_str();
     if t.contains("-part") {
-        bail!("{t} is a partition; name the whole disk. Windows has all of it, its own ESP included.");
+        bail!("{t} is a partition; name the whole disk");
     }
     let meta = std::fs::metadata(t).with_context(|| t.to_owned())?;
     if !meta.file_type().is_block_device() {
         bail!("{t} is not a block device");
     }
     let dev = std::fs::canonicalize(t)?;
-    let lsblk = |args: &[&str]| tools::output_string(LSBLK.cmd().args(args).arg(&dev));
-    if lsblk(&["-dno", "TYPE"])?.trim() != "disk" {
+    if tools::output_string(LSBLK.cmd().arg("-dno").arg("TYPE").arg(&dev))?.trim() != "disk" {
         bail!("{} is not a whole disk", dev.display());
     }
+    let name = dev.file_name().context("device has no name")?.to_string_lossy().into_owned();
+    let sys = Path::new("/sys/block").join(&name);
+    Ok(Disk { target, dev, sys })
+}
+
+/// A whole disk, its partitions included, that nothing on this machine is
+/// using.
+pub fn unused(target: ByIdPath) -> Result<Disk> {
+    let disk = whole(target)?;
+    let (dev, sys) = (&disk.dev, &disk.sys);
+    let lsblk = |args: &[&str]| tools::output_string(LSBLK.cmd().args(args).arg(dev));
 
     // Mountpoints alone miss a multi-device btrfs, which shows its mount on
     // one member only, so filesystem UUIDs are matched against everything
@@ -72,9 +81,8 @@ pub fn unused(target: ByIdPath) -> Result<Disk> {
         }
     }
     let name = dev.file_name().context("device has no name")?.to_string_lossy().into_owned();
-    let sys = Path::new("/sys/block").join(&name);
     let mut holder_dirs = vec![sys.join("holders")];
-    for e in std::fs::read_dir(&sys)? {
+    for e in std::fs::read_dir(sys)? {
         let e = e?;
         if e.file_name().to_string_lossy().starts_with(&name) {
             holder_dirs.push(e.path().join("holders"));
@@ -88,7 +96,38 @@ pub fn unused(target: ByIdPath) -> Result<Disk> {
             }
         }
     }
-    Ok(Disk { target, dev, sys })
+    Ok(disk)
+}
+
+/// A whole disk that may be in use partition by partition (Linux's root on
+/// it, say), but not as a whole: a device-mapper or md device on the bare
+/// disk could map any sector, its free space included.
+pub fn partitioned(target: ByIdPath) -> Result<Disk> {
+    let disk = whole(target)?;
+    let holders: Vec<String> = std::fs::read_dir(disk.sys.join("holders"))?.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    if !holders.is_empty() {
+        bail!("all of {} is in use by {}", disk.dev.display(), holders.join(" "));
+    }
+    let mounts = tools::output_string(LSBLK.cmd().arg("-dno").arg("MOUNTPOINTS").arg(&disk.dev))?;
+    if !mounts.trim().is_empty() {
+        bail!("{} itself, not a partition of it, is mounted at {}", disk.dev.display(), mounts.trim());
+    }
+    Ok(disk)
+}
+
+/// Its partitions as the kernel sees them: (number, start, size) in
+/// 512-byte sectors, which sysfs always counts in.
+pub fn kernel_partitions(disk: &Disk) -> Result<Vec<(u32, u64, u64)>> {
+    let read = |p: &Path| -> Result<u64> { Ok(std::fs::read_to_string(p).with_context(|| p.display().to_string())?.trim().parse()?) };
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(&disk.sys)? {
+        let dir = e?.path();
+        if dir.join("partition").exists() {
+            out.push((read(&dir.join("partition"))? as u32, read(&dir.join("start"))?, read(&dir.join("size"))?));
+        }
+    }
+    out.sort();
+    Ok(out)
 }
 
 pub fn is_root() -> bool {
