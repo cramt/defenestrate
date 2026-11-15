@@ -4,6 +4,7 @@
 mod apps;
 mod cache;
 mod config;
+mod cosmic;
 mod disk;
 mod doctor;
 mod fetch;

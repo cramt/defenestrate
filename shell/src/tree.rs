@@ -37,6 +37,14 @@ impl Rect {
     }
 }
 
+/// COSMIC's theme gaps, in pixels: `outer` around the whole tiling, `inner`
+/// around each tile (see `Tree::tiles`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Gaps {
+    pub outer: i32,
+    pub inner: i32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction {
     Left,
@@ -356,6 +364,48 @@ impl<W: Copy + Eq> Tree<W> {
         out
     }
 
+    /// Where the windows go, with gaps as cosmic-comp's update_positions
+    /// leaves them: the tiling sits `outer` inside `area`, and each tile
+    /// gives up `inner` on a side at the edge of the tiling, `inner / 2`
+    /// (rounding down) on a side facing another tile. So a 1 px inner gap
+    /// is a margin at the screen's edges and none between tiles, as there.
+    pub fn tiles(&self, area: Rect, gaps: Gaps) -> Vec<(W, Rect)> {
+        let o = gaps.outer;
+        let area = Rect { left: area.left + o, top: area.top + o, right: area.right - o, bottom: area.bottom - o };
+        let leaves = self.preorder().into_iter().filter(|&id| matches!(self.node(id).kind, Kind::Leaf(_)));
+        let inset = |id, dir| if self.has_neighbour(id, dir) { gaps.inner / 2 } else { gaps.inner };
+        let ids: Vec<Id> = leaves.collect();
+        self.layout(area)
+            .into_iter()
+            .zip(ids)
+            .map(|((w, r), id)| {
+                let r = Rect {
+                    left: r.left + inset(id, Direction::Left),
+                    top: r.top + inset(id, Direction::Up),
+                    right: r.right - inset(id, Direction::Right),
+                    bottom: r.bottom - inset(id, Direction::Down),
+                };
+                (w, r)
+            })
+            .collect()
+    }
+
+    /// Whether any tile lies on that side of `id` (cosmic-comp's
+    /// has_adjacent_node): some group it's in runs that way and it isn't
+    /// that group's last child in that direction.
+    fn has_neighbour(&self, mut id: Id, dir: Direction) -> bool {
+        while let Some(parent) = self.node(id).parent {
+            if self.axis_of(parent) == Some(dir.axis()) {
+                let i = self.index_in(parent, id);
+                if if dir.forward() { i + 1 < self.kids(parent).len() } else { i > 0 } {
+                    return true;
+                }
+            }
+            id = parent;
+        }
+        false
+    }
+
     pub fn layout(&self, area: Rect) -> Vec<(W, Rect)> {
         let rects = self.rects(area);
         self.preorder()
@@ -590,11 +640,11 @@ impl<W: Copy + Eq> Tree<W> {
 
     /// Where `w` would end up if dropped at `p`; None if it would go back
     /// where it is.
-    pub fn drop_preview(&self, w: W, p: Point, area: Rect, band: i32) -> Option<Rect> {
+    pub fn drop_preview(&self, w: W, p: Point, area: Rect, band: i32, gaps: Gaps) -> Option<Rect> {
         let zone = self.zone(Some(self.leaf(w)?), p, area, band)?;
         let mut after = self.clone();
         after.drop_into(self.leaf(w)?, zone);
-        after.layout(area).into_iter().find(|&(x, _)| x == w).map(|(_, r)| r)
+        after.tiles(area, gaps).into_iter().find(|&(x, _)| x == w).map(|(_, r)| r)
     }
 
     /// Drops dragged `w` at `p`, as `drop_preview` showed.
@@ -608,10 +658,10 @@ impl<W: Copy + Eq> Tree<W> {
 
     /// Where `w`, dragged here from another monitor's tiling, would land
     /// if dropped at `p`.
-    pub fn drop_in_preview(&self, w: W, p: Point, area: Rect, band: i32) -> Option<Rect> {
+    pub fn drop_in_preview(&self, w: W, p: Point, area: Rect, band: i32, gaps: Gaps) -> Option<Rect> {
         let mut after = self.clone();
         after.drop_in(w, p, area, band);
-        after.layout(area).into_iter().find(|&(x, _)| x == w).map(|(_, r)| r)
+        after.tiles(area, gaps).into_iter().find(|&(x, _)| x == w).map(|(_, r)| r)
     }
 
     /// Drops `w`, dragged here from another monitor, into this tiling at `p`
@@ -995,7 +1045,7 @@ mod tests {
         assert_tiles(&t2);
         // The top edge runs the other way: 2 becomes the top half.
         let mut t3 = t.clone();
-        assert_eq!(t3.drop_preview(2, p(800, 5), AREA, BAND), Some(r(0, 0, 1600, 500)));
+        assert_eq!(t3.drop_preview(2, p(800, 5), AREA, BAND, Gaps::default()), Some(r(0, 0, 1600, 500)));
         t3.drop(2, p(800, 5), AREA, BAND);
         assert_eq!(rect(&t3, 2), r(0, 0, 1600, 500));
         assert_eq!(rect(&t3, 1), r(0, 500, 800, 1000));
@@ -1044,9 +1094,9 @@ mod tests {
     #[test]
     fn dropping_on_itself_or_with_nothing_else_tiled_changes_nothing() {
         let t = tree(3);
-        assert_eq!(t.drop_preview(2, p(1200, 250), AREA, BAND), None);
-        assert_eq!(tree(1).drop_preview(1, p(5, 5), AREA, BAND), None);
-        assert_eq!(t.drop_preview(2, p(2000, 250), AREA, BAND), None, "off screen");
+        assert_eq!(t.drop_preview(2, p(1200, 250), AREA, BAND, Gaps::default()), None);
+        assert_eq!(tree(1).drop_preview(1, p(5, 5), AREA, BAND, Gaps::default()), None);
+        assert_eq!(t.drop_preview(2, p(2000, 250), AREA, BAND, Gaps::default()), None, "off screen");
         let mut t2 = t.clone();
         t2.drop(2, p(1200, 250), AREA, BAND);
         assert_eq!(t2.layout(AREA), t.layout(AREA));
@@ -1106,13 +1156,40 @@ mod tests {
     #[test]
     fn a_window_dragged_in_from_another_monitor_drops_by_the_same_zones() {
         let t = tree(2);
-        assert_eq!(t.drop_in_preview(9, p(5, 500), AREA, BAND), Some(r(0, 0, 533, 1000)), "the screen's edge");
-        assert_eq!(t.drop_in_preview(9, p(1200, 900), AREA, BAND), Some(r(800, 500, 1600, 1000)), "splits 2");
+        assert_eq!(t.drop_in_preview(9, p(5, 500), AREA, BAND, Gaps::default()), Some(r(0, 0, 533, 1000)), "the screen's edge");
+        assert_eq!(t.drop_in_preview(9, p(1200, 900), AREA, BAND, Gaps::default()), Some(r(800, 500, 1600, 1000)), "splits 2");
         let mut t = tree(2);
         t.drop_in(9, p(800, 500), AREA, BAND);
         assert_eq!(t.windows(), [1, 9, 2], "between the two");
         let mut empty = Tree::default();
         empty.drop_in(9, p(5, 5), AREA, BAND);
         assert_eq!(empty.layout(AREA), [(9, AREA)]);
+    }
+
+    #[test]
+    fn gaps_are_cosmics() {
+        // 1 | (2 / 3)
+        let t = tree(3);
+        let g = |outer, inner| t.tiles(AREA, Gaps { outer, inner });
+        let none = t.layout(AREA);
+        assert_eq!(g(0, 0), none);
+        assert_eq!(
+            g(0, 1),
+            none.iter().map(|&(w, r)| {
+                let edge = |at_edge: bool| i32::from(at_edge);
+                let r = Rect {
+                    left: r.left + edge(r.left == 0),
+                    top: r.top + edge(r.top == 0),
+                    right: r.right - edge(r.right == 1600),
+                    bottom: r.bottom - edge(r.bottom == 1000),
+                };
+                (w, r)
+            }).collect::<Vec<_>>(),
+            "1 px: only at the screen's edges, half of it between tiles rounds to none"
+        );
+        let l = g(4, 8);
+        assert_eq!(l[0], (1, r(12, 12, 796, 988)));
+        assert_eq!(l[1], (2, r(804, 12, 1588, 496)));
+        assert_eq!(l[2], (3, r(804, 504, 1588, 988)));
     }
 }

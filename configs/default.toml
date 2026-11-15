@@ -81,6 +81,40 @@ remove = [
   "MicrosoftWindows.CrossDevice",
 ]
 
+# How the shell behaves, under cosmic-comp's own names so a COSMIC config
+# carries over key for key (README, "Shell settings"). These are the
+# maintainer's COSMIC settings (nixconf's cosmic.nix), not COSMIC's stock ones;
+# cosmic-comp's own defaults are noted where they differ.
+[cosmic.compositor]                  # com.system76.CosmicComp
+autotile = true                      # stock: false
+autotile_behavior = "PerWorkspace"   # stock: "Global"
+active_hint = true
+focus_follows_cursor = true          # stock: false
+focus_follows_cursor_delay = 100     # ms; stock: 250
+cursor_follows_focus = true          # stock: false
+# Windows on other workspaces don't get to pull you there by raising
+# themselves; they're marked urgent instead. Stock: "Focus".
+activation_policy = "FocusIfActiveWorkspace"
+
+[cosmic.theme]                       # com.system76.CosmicTheme.Dark
+# (outer, inner). cosmic-comp halves `inner` between tiles, rounding down, so
+# (0, 1) is a 1 px margin at the screen's edges and none between tiles.
+gaps = [0, 1]                        # stock: [0, 8]
+active_hint = 1                      # px; stock: 3
+# The maintainer's stylix base0D, #8b8683, in COSMIC's 0-1 channels.
+accent = { red = 0.5450980392, green = 0.5254901961, blue = 0.5137254902 }
+
+# COSMIC's custom shortcuts: they replace the default binding for the same
+# keys (README, "Keys"). "Disable" hands the keys to Windows and the app.
+[cosmic.shortcuts]
+"Super+y" = "Disable"                # tiling toggle
+"Super+slash" = "Disable"            # launcher (Super+d is it here)
+"Super+f" = "Disable"                # home folder
+"Super+t" = { System = "Terminal" }
+"Super+d" = { System = "Launcher" }
+"Super+Shift+space" = { System = "PlayPause" }
+"Super+Escape" = { System = "LockScreen" }
+
 [registry.system]
 # 24H2+ silently BitLockers the system drive on first sign-in and escrows
 # the recovery key to a Microsoft account. We don't have one.

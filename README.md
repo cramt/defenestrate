@@ -369,11 +369,12 @@ safe, as long as Linux was shut down rather than hibernated.
 ### Keys
 
 COSMIC's defaults (`cosmic-comp`'s `data/keybindings.ron`), where the shell
-has the feature:
+has the feature, with the distro's `cosmic.shortcuts` over them (see
+[Shell settings](#shell-settings)):
 
 | Keys | Does |
 | --- | --- |
-| Super (tap), Super+/, Super+A | Launcher: type to filter, Enter starts it, or runs the text as a command if nothing matches |
+| Super (tap), Super+D, Super+A | Launcher: type to filter, Enter starts it, or runs the text as a command if nothing matches |
 | Super+H/J/K/L or arrows | Focus left/down/up/right; past the edge of the tiling, up/down is the previous/next workspace and left/right the next monitor |
 | Super+Shift+direction | Move the window; past the edge, onto the previous/next workspace or the next monitor |
 | Super+Ctrl+Up/Down (K/J) | Previous/next workspace, wrapping around (with Shift: take the window along). Left/right do nothing, as in COSMIC with workspaces stacked vertically |
@@ -381,15 +382,20 @@ has the feature:
 | Super+Alt+direction | Focus the monitor that way; the pointer jumps to its middle |
 | Super+Shift+Alt+direction | Move the window to the monitor that way |
 | Super+O | Flip the group the window is in |
-| Super+M, Super+G, Super+Y | Maximize, float the window, tiling off for the workspace |
+| Super+M, Super+G | Maximize, float the window |
 | Super+R (Super+Shift+R) | Resize mode: directions grow (shrink) that edge, Enter/Escape leave |
 | Super+left-drag | Move the window. A tile follows the pointer and drops back into the tiling where it's let go, with a preview of where: on the screen's edge it joins the whole layout, on the line between two tiles it joins their group, on a tile it splits that tile on the nearer side. A floating window just moves |
 | Super+right-drag | Resize from the corner nearest the pointer: a tile moves the line between it and its neighbour, a floating window its corner |
 | Alt+Tab, Super+Tab (with Shift: backwards) | Window switcher: every window, most recent first, minimized ones too; letting go switches to it, Escape cancels |
 | Super+Q | Close |
 | Super+T, Super+Enter | Terminal |
-| Super+F | Home folder |
+| Super+Shift+Space | Play/pause (sends the media key) |
 | Super+Escape, Super+Shift+Escape | Lock, log out |
+
+COSMIC's Super+Y (tiling on/off for the workspace), Super+/ (launcher) and
+Super+F (home folder) are switched off by the defaults, so those keys go to
+Windows and the app; a machine config can bind them again, e.g.
+`"Super+y" = "ToggleTiling"`.
 
 Win+L would lock the session before the shell could see it, so the
 default config sets `DisableLockWorkstation`. That blocks `LockWorkStation()`
@@ -399,12 +405,54 @@ shows the same lock screen and reconnects to the same session on sign-in.
 The tiling is COSMIC's tree: a group holds any number of windows side by
 side or stacked, sharing its length. As in COSMIC, a new window splits the
 focused one in half; a window moved or dropped into a group gets an equal
-share, so three windows dragged into one row get a third each. Tiles sit
-edge to edge with no gaps, and windows lose their title bar while they're
+share, so three windows dragged into one row get a third each. Gaps are
+COSMIC's (`cosmic.theme.gaps`), and the focused window gets COSMIC's active
+hint, a border in the accent colour (`cosmic.theme.active_hint`). Windows lose their title bar while they're
 tiled, getting it back when they float or the shell exits. Apps that draw
 their own title bar (Firefox, Chromium, Electron apps like Discord) keep
 it. Super+drag needs the mouse hook, so like the keys it does nothing while
 an elevated window has focus.
+
+### Shell settings
+
+The shell's behaviour is the config's `cosmic` table, keyed by cosmic-comp's
+own setting names, so a COSMIC config carries over key for key: the
+`compositor` keys are `com.system76.CosmicComp`'s, the `theme` keys
+`com.system76.CosmicTheme.Dark`'s, and `shortcuts` are COSMIC's custom
+shortcuts. The defaults in `configs/default.toml` are the maintainer's
+COSMIC settings, not COSMIC's stock ones. Unknown keys, and actions the
+shell has no counterpart for, fail the build.
+
+| Key | Default | COSMIC stock | Does here |
+| --- | --- | --- | --- |
+| `compositor.autotile` | `true` | `false` | Whether workspaces start out tiling |
+| `compositor.autotile_behavior` | `"PerWorkspace"` | `"Global"` | What the tiling toggle (ToggleTiling) flips: the shown workspace, or all of them |
+| `compositor.active_hint` | `true` | `true` | The focus border at all |
+| `compositor.focus_follows_cursor` | `true` | `false` | Focus goes to the window under the pointer |
+| `compositor.focus_follows_cursor_delay` | `100` | `250` | ...once the pointer has stayed there this many ms |
+| `compositor.cursor_follows_focus` | `true` | `false` | The pointer jumps to the middle of a window focused from the keyboard |
+| `compositor.activation_policy` | `"FocusIfActiveWorkspace"` | `"Focus"` | A window raising itself from another workspace: `Focus` switches there, `FocusIfActiveWorkspace` and `Urgent` mark it urgent and leave you where you are |
+| `theme.gaps` | `[0, 1]` | `[0, 8]` | (outer, inner) px. Inner is halved between tiles, rounding down as cosmic-comp does, so `[0, 1]` is a 1 px margin at the screen's edges and none between tiles |
+| `theme.active_hint` | `1` | `3` | Focus border width, px |
+| `theme.accent` | #8b8683 | blue | Focus border colour, as COSMIC's `{ red, green, blue }` from 0 to 1 |
+| `shortcuts` | see [Keys](#keys) | none | `"Super+Shift+space" = { System = "PlayPause" }`: keys in COSMIC's spelling, then `"Disable"`, `{ Spawn = "command line" }`, `{ System = ... }` (`Launcher`, `AppLibrary`, `Terminal`, `HomeFolder`, `LockScreen`, `LogOut`, `PlayPause`, `PlayNext`, `PlayPrev`, `Mute`, `VolumeRaise`, `VolumeLower`), or a window action (`Close`, `Maximize`, `ToggleTiling`, `ToggleWindowFloating`, `ToggleOrientation`, `Focus`/`Move` with a direction, `Workspace`/`MoveToWorkspace` with 1-9, `NextWorkspace`, `PreviousWorkspace`, `MoveToNextWorkspace`, `MoveToPreviousWorkspace`, `SwitchOutput`/`MoveToOutput` with a direction) |
+
+Pixel sizes are scaled by the display's DPI. Keys are named as xkb keysyms
+or the character itself; punctuation other than period, comma and minus
+differs between Windows keyboard layouts, so only those and `slash` (the US
+layout's key) are accepted. `Spawn` runs the line as Windows parses a
+command line, without a shell, in the user's home.
+
+`dfnstrate` writes these to `C:\Program Files\defenestrate\shell.json`,
+which the shell reads when it starts, and `update` rewrites it. An install
+from before the file existed doesn't get it from `update` (it never creates
+files) and runs with COSMIC's stock settings until it's reflashed.
+
+COSMIC settings without a Windows meaning aren't there: `show_minimize`
+(tiles have no title bar), the panel and dock, fonts and density (no libcosmic
+UI), and the keyboard and pointer settings, which are per machine and are
+Windows' own registry values (`Control Panel\Keyboard`, `Control Panel\Mouse`
+under `registry.defaultUser`).
 
 ## How it works
 

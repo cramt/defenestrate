@@ -14,6 +14,9 @@ use crate::wsl;
 
 /// The shell's file name under C:\Program Files\defenestrate.
 pub const BUILTIN_SHELL: &str = "defenestrate-shell.exe";
+/// The shell's settings (`cosmic`), next to its exe, where only admins can
+/// change them.
+pub const SHELL_SETTINGS: &str = "shell.json";
 
 /// One .reg file: its name (without .reg) and the hive its keys are in.
 pub struct RegFile {
@@ -93,6 +96,12 @@ pub fn render(config: &Config, variant: &Variant, cache: &Cache, work: &Path, di
         Shell::Builtin => install_shell(BUILTIN_SHELL.to_owned(), builtin_shell(work)?),
         Shell::Exe(source) => install_shell(source.file_name()?, cache.materialize(source, work)?),
     };
+    // Read at each start of the shell, like the exe. Only ours reads it, but
+    // an `exe` shell is usually ours, built some other way.
+    if !matches!(config.shell, Shell::Command(_)) {
+        std::fs::write(dir.join(SHELL_SETTINGS), config.cosmic.render())?;
+        files.push(InstallFile::new(format!("Program Files/defenestrate/{SHELL_SETTINGS}"), dir.join(SHELL_SETTINGS), ReadAt::EveryLogon));
+    }
 
     let mut software = config.registry.software.clone();
     // 22H2+ OOBE stops at "connect to a network" without this. The
@@ -222,6 +231,7 @@ mod tests {
         let mut want = vec![
             ("Windows/Fonts/font.ttf".to_owned(), ReadAt::EveryLogon),
             ("Program Files/defenestrate/my-shell.exe".to_owned(), ReadAt::EveryLogon),
+            ("Program Files/defenestrate/shell.json".to_owned(), ReadAt::EveryLogon),
             (format!("{s}/wsl/rootfs.tar"), ReadAt::EveryLogon),
             (format!("{s}/wsl/wsl-logon.ps1"), ReadAt::EveryLogon),
             (format!("{s}/wsl/wsl.json"), ReadAt::EveryLogon),
@@ -252,6 +262,9 @@ mod tests {
         assert_eq!(std::fs::read(&r.files.iter().find(|f| f.dest.ends_with("wsl.msi")).unwrap().source).unwrap(), b"package");
         let shell_reg = std::fs::read_to_string(d.join("out/reg/ascii/shell.reg")).unwrap();
         assert!(shell_reg.contains(r#""Shell"="\"C:\\Program Files\\defenestrate\\my-shell.exe\"""#), "{shell_reg}");
+        // The shell parses the same file in its tests (shell/src/settings.rs).
+        let settings = std::fs::read_to_string(d.join("out").join(SHELL_SETTINGS)).unwrap();
+        assert_eq!(settings, include_str!("../../configs/shell-settings.json"), "configs/shell-settings.json is what the defaults render to");
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

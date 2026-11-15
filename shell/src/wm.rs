@@ -29,7 +29,8 @@
 //! spot in the tree; here it splits the focused window like a new one.
 
 use crate::motion::{Pace, View};
-use crate::tree::{Axis, Direction, Point, Rect, Tree};
+use crate::settings::TileBehavior;
+use crate::tree::{Axis, Direction, Gaps, Point, Rect, Tree};
 
 pub const WORKSPACES: usize = 9;
 
@@ -185,13 +186,13 @@ struct Workspace<W> {
 }
 
 impl<W: Copy + Eq> Workspace<W> {
-    fn new(output: OutputId, slot: usize) -> Self {
+    fn new(output: OutputId, slot: usize, tiling: bool) -> Self {
         Workspace {
             tiled: Tree::default(),
             floating: Vec::new(),
             focus: None,
             maximized: None,
-            tiling: true,
+            tiling,
             minimized: Vec::new(),
             homes: vec![Home { output, slot }],
         }
@@ -310,8 +311,8 @@ struct Output<W> {
 }
 
 impl<W: Copy + Eq> Output<W> {
-    fn new(id: OutputId, area: Rect) -> Self {
-        Output { spaces: std::array::from_fn(|slot| Workspace::new(id.clone(), slot)), id, area, active: 0 }
+    fn new(id: OutputId, area: Rect, autotile: bool) -> Self {
+        Output { spaces: std::array::from_fn(|slot| Workspace::new(id.clone(), slot, autotile)), id, area, active: 0 }
     }
 
     fn shown(&self) -> &Workspace<W> {
@@ -331,9 +332,9 @@ impl<W: Copy + Eq> Output<W> {
         (after..WORKSPACES).find(free).or_else(|| (0..WORKSPACES).find(free))
     }
 
-    fn arrange(&self) -> Vec<(W, Rect)> {
+    fn arrange(&self, gaps: Gaps) -> Vec<(W, Rect)> {
         let s = self.shown();
-        let mut place = if s.tiling { s.tiled.layout(self.area) } else { Vec::new() };
+        let mut place = if s.tiling { s.tiled.tiles(self.area, gaps) } else { Vec::new() };
         if let Some(m) = s.maximized {
             place.retain(|&(w, _)| w != m);
             place.push((m, self.area));
@@ -385,12 +386,33 @@ pub struct Wm<W> {
     /// toplevels by when they were last activated).
     recent: Vec<W>,
     peek: Option<Peek>,
+    tiling: Tiling,
+}
+
+/// COSMIC's tiling settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tiling {
+    pub gaps: Gaps,
+    /// cosmic-comp's `autotile`: how workspaces start out, and what
+    /// ToggleTiling flips everywhere under `TileBehavior::Global`.
+    pub autotile: bool,
+    pub behavior: TileBehavior,
+}
+
+impl Default for Tiling {
+    fn default() -> Self {
+        Tiling { gaps: Gaps::default(), autotile: true, behavior: TileBehavior::PerWorkspace }
+    }
 }
 
 impl<W: Copy + Eq> Wm<W> {
     pub fn new(screens: Screens) -> Self {
-        let outputs = screens.0.into_iter().map(|(id, area)| Output::new(id, area)).collect();
-        Wm { outputs, active: 0, keyboard: None, recent: Vec::new(), peek: None }
+        Self::with_tiling(screens, Tiling::default())
+    }
+
+    pub fn with_tiling(screens: Screens, tiling: Tiling) -> Self {
+        let outputs = screens.0.into_iter().map(|(id, area)| Output::new(id, area, tiling.autotile)).collect();
+        Wm { outputs, active: 0, keyboard: None, recent: Vec::new(), peek: None, tiling }
     }
 
     fn locate(&self, w: W) -> Option<(usize, usize)> {
@@ -483,7 +505,11 @@ impl<W: Copy + Eq> Wm<W> {
                 views: o
                     .spaces
                     .iter()
-                    .map(|s| View { tiles: if s.tiling { s.tiled.layout(o.area) } else { Vec::new() }, maximized: s.maximized, area: o.area })
+                    .map(|s| View {
+                        tiles: if s.tiling { s.tiled.tiles(o.area, self.tiling.gaps) } else { Vec::new() },
+                        maximized: s.maximized,
+                        area: o.area,
+                    })
                     .collect(),
             })
             .collect()
@@ -504,6 +530,18 @@ impl<W: Copy + Eq> Wm<W> {
     pub fn tiled(&self) -> Vec<W> {
         let minimized = |s: &Workspace<W>| s.minimized.iter().filter(|m| m.layer == Layer::Tiled).map(|m| m.w).collect::<Vec<_>>();
         self.outputs.iter().flat_map(|o| &o.spaces).filter(|s| s.tiling).flat_map(|s| [s.tiled.windows(), minimized(s)].concat()).collect()
+    }
+
+    /// Where the active hint goes: around the window with keyboard focus
+    /// if it's managed and shown and not maximized, as in COSMIC; with its
+    /// tile if it has one, None if it floats.
+    pub fn hinted(&self) -> Option<(W, Option<Rect>)> {
+        let w = self.keyboard?;
+        let o = self.shown_at(w)?;
+        if self.outputs[o].shown().maximized == Some(w) {
+            return None;
+        }
+        Some((w, self.outputs[o].arrange(self.tiling.gaps).into_iter().find(|&(x, _)| x == w).map(|(_, r)| r)))
     }
 
     /// Super+drag picked up `w`; it gets focus, and a maximized one goes
@@ -530,9 +568,9 @@ impl<W: Copy + Eq> Wm<W> {
         let out = &self.outputs[to];
         let s = out.shown();
         if to == from {
-            s.tiled.drop_preview(w, p, out.area, band)
+            s.tiled.drop_preview(w, p, out.area, band, self.tiling.gaps)
         } else if s.tiling {
-            s.tiled.drop_in_preview(w, p, out.area, band)
+            s.tiled.drop_in_preview(w, p, out.area, band, self.tiling.gaps)
         } else {
             None
         }
@@ -578,7 +616,7 @@ impl<W: Copy + Eq> Wm<W> {
     }
 
     fn arrange(&self) -> Vec<(W, Rect)> {
-        self.outputs.iter().flat_map(Output::arrange).collect()
+        self.outputs.iter().flat_map(|o| o.arrange(self.tiling.gaps)).collect()
     }
 
     /// Fills in what every change needs: every shown window placed, and
@@ -733,12 +771,13 @@ impl<W: Copy + Eq> Wm<W> {
     }
 
     fn add_output(&mut self, id: OutputId, area: Rect) {
-        let mut new = Output::new(id.clone(), area);
+        let autotile = self.tiling.autotile;
+        let mut new = Output::new(id.clone(), area, autotile);
         let mut first: Option<usize> = None;
         for other in &mut self.outputs {
             for i in 0..WORKSPACES {
                 let Some(slot) = other.spaces[i].prefers(&id) else { continue };
-                let mut ws = std::mem::replace(&mut other.spaces[i], Workspace::new(other.id.clone(), i));
+                let mut ws = std::mem::replace(&mut other.spaces[i], Workspace::new(other.id.clone(), i, autotile));
                 let slot = if new.spaces[slot].is_empty() { Some(slot) } else { new.free_slot() };
                 match slot {
                     Some(slot) => {
@@ -1023,10 +1062,20 @@ impl<W: Copy + Eq> Wm<W> {
                 s.tiled.toggle_orientation(f);
                 self.effects(before, Effects::default())
             }
+            // As cosmic-comp's ToggleTiling: under Global it flips `autotile`
+            // and brings every workspace in line with it.
             Command::ToggleTiling => {
-                let o = self.active;
-                let s = self.outputs[o].shown_mut();
-                s.tiling = !s.tiling;
+                match self.tiling.behavior {
+                    TileBehavior::PerWorkspace => {
+                        let s = self.outputs[self.active].shown_mut();
+                        s.tiling = !s.tiling;
+                    }
+                    TileBehavior::Global => {
+                        self.tiling.autotile = !self.tiling.autotile;
+                        let on = self.tiling.autotile;
+                        self.outputs.iter_mut().flat_map(|o| &mut o.spaces).for_each(|s| s.tiling = on);
+                    }
+                }
                 self.effects(before, Effects::default())
             }
             Command::ToggleFloating => {
@@ -1849,5 +1898,45 @@ mod tests {
             let count = wm.outputs.iter().flat_map(|o| &o.spaces).filter(|s| s.holds(w)).count();
             assert_eq!(count, 1, "window {w}");
         }
+    }
+
+    #[test]
+    fn autotile_and_its_behaviour() {
+        let per = Tiling { autotile: false, ..Tiling::default() };
+        let mut wm = Wm::with_tiling(one(), per);
+        assert!(wm.add(1).place.is_empty(), "autotile off: new windows float");
+        cmd(&mut wm, Command::ToggleTiling);
+        assert!(cmd(&mut wm, Command::Switch(ws(2))).place.is_empty(), "the others still don't tile");
+        let global = Tiling { behavior: TileBehavior::Global, ..Tiling::default() };
+        let mut wm = Wm::with_tiling(two(), global);
+        wm.add(1);
+        cmd(&mut wm, Command::ToggleTiling);
+        wm.pointer(Point { x: 2000, y: 500 });
+        assert!(wm.add(2).place.is_empty(), "Global: tiling went off on the other monitor too");
+        cmd(&mut wm, Command::ToggleTiling);
+        assert_eq!(rect(&wm.placement(), 1), Some(AREA));
+    }
+
+    #[test]
+    fn tiles_keep_their_gaps_and_maximized_ones_dont() {
+        let gaps = Tiling { gaps: Gaps { outer: 0, inner: 1 }, ..Tiling::default() };
+        let mut wm = Wm::with_tiling(one(), gaps);
+        let fx = wm.add(1);
+        assert_eq!(rect(&fx, 1), Some(Rect { left: 1, top: 1, right: 1599, bottom: 999 }));
+        let fx = cmd(&mut wm, Command::Maximize);
+        assert_eq!(rect(&fx, 1), Some(AREA), "maximized fills the screen, as COSMIC's does");
+    }
+
+    #[test]
+    fn the_hint_goes_on_the_focused_window_unless_maximized() {
+        let mut wm = wm_with(2);
+        assert_eq!(wm.hinted(), Some((2, Some(right_half(AREA)))));
+        cmd(&mut wm, Command::ToggleFloating);
+        assert_eq!(wm.hinted(), Some((2, None)), "floating: wherever it is");
+        wm.focused(1);
+        cmd(&mut wm, Command::Maximize);
+        assert_eq!(wm.hinted(), None);
+        wm.focused(42);
+        assert_eq!(wm.hinted(), None, "not managed");
     }
 }

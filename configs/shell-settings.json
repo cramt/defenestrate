@@ -1,0 +1,101 @@
+{
+  "autotile": true,
+  "autotile_behavior": "PerWorkspace",
+  "focus_follows_cursor": {
+    "delay_ms": 100
+  },
+  "cursor_follows_focus": true,
+  "activation_policy": "FocusIfActiveWorkspace",
+  "gaps": {
+    "outer": 0,
+    "inner": 1
+  },
+  "active_hint": {
+    "thickness": 1,
+    "colour": [
+      139,
+      134,
+      131
+    ]
+  },
+  "shortcuts": [
+    {
+      "keys": {
+        "super": true,
+        "ctrl": false,
+        "alt": false,
+        "shift": false,
+        "vk": 27
+      },
+      "action": {
+        "System": "LockScreen"
+      }
+    },
+    {
+      "keys": {
+        "super": true,
+        "ctrl": false,
+        "alt": false,
+        "shift": false,
+        "vk": 68
+      },
+      "action": {
+        "System": "Launcher"
+      }
+    },
+    {
+      "keys": {
+        "super": true,
+        "ctrl": false,
+        "alt": false,
+        "shift": false,
+        "vk": 70
+      },
+      "action": "Disable"
+    },
+    {
+      "keys": {
+        "super": true,
+        "ctrl": false,
+        "alt": false,
+        "shift": false,
+        "vk": 84
+      },
+      "action": {
+        "System": "Terminal"
+      }
+    },
+    {
+      "keys": {
+        "super": true,
+        "ctrl": false,
+        "alt": false,
+        "shift": false,
+        "vk": 89
+      },
+      "action": "Disable"
+    },
+    {
+      "keys": {
+        "super": true,
+        "ctrl": false,
+        "alt": false,
+        "shift": false,
+        "vk": 191
+      },
+      "action": "Disable"
+    },
+    {
+      "keys": {
+        "super": true,
+        "ctrl": false,
+        "alt": false,
+        "shift": true,
+        "vk": 32
+      },
+      "action": {
+        "System": "PlayPause"
+      }
+    }
+  ]
+}

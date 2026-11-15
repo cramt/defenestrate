@@ -9,11 +9,14 @@
 mod cycle;
 mod fuzzy;
 mod motion;
+mod settings;
 mod tree;
 mod wm;
 
 #[cfg(windows)]
 mod desktop;
+#[cfg(windows)]
+mod hint;
 #[cfg(windows)]
 mod keys;
 #[cfg(windows)]
@@ -49,10 +52,13 @@ fn main() {
 #[cfg(windows)]
 mod windows_main {
     use std::cell::Cell;
+    use std::os::windows::ffi::OsStrExt;
     use std::os::windows::process::CommandExt;
     use std::process::Command;
 
-    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::System::Threading::{CreateProcessW, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTUPINFOW};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY};
     use windows::Win32::Graphics::Gdi::{
         CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, DEFAULT_CHARSET, DeleteObject, FF_MODERN, FIXED_PITCH, FW_NORMAL, HFONT,
         OUT_TT_PRECIS,
@@ -64,10 +70,10 @@ mod windows_main {
         CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, MSG, PostQuitMessage, RegisterClassW, TranslateMessage,
         WM_DESTROY, WM_DISPLAYCHANGE, WM_ENDSESSION, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW, WS_POPUP,
     };
-    use windows::core::{Result, w};
+    use windows::core::{PCWSTR, PWSTR, Result, w};
 
     use crate::keys::{self, Action, WM_ACTION};
-    use crate::{desktop, launcher, switcher};
+    use crate::{desktop, launcher, settings, switcher};
 
     // In 96 DPI pixels; scaled to the DPI of the monitor it's drawn on.
     const FONT_HEIGHT: i32 = 18;
@@ -155,6 +161,12 @@ mod windows_main {
             }
             DPI.set(GetDpiForSystem() as i32);
 
+            // Before the hook thread, which reads the shortcuts.
+            let json = std::env::current_exe().ok().and_then(|exe| std::fs::read_to_string(exe.with_file_name(settings::FILE)).ok());
+            if let Err(e) = settings::init(json.as_deref()) {
+                log(&e);
+            }
+
             let instance = GetModuleHandleW(None)?.into();
             let class = w!("DefenestrateShell");
             RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(wndproc), hInstance: instance, lpszClassName: class, ..Default::default() });
@@ -200,6 +212,34 @@ mod windows_main {
         }
     }
 
+    /// A configured Spawn: the command line as Windows parses one, program
+    /// first, like a shortcut's target, rather than split by a shell.
+    fn spawn_line(line: &str) {
+        let mut wide: Vec<u16> = line.encode_utf16().chain([0]).collect();
+        let home: Option<Vec<u16>> = std::env::var_os("USERPROFILE").map(|h| h.encode_wide().chain([0]).collect());
+        let startup = STARTUPINFOW { cb: size_of::<STARTUPINFOW>() as u32, ..Default::default() };
+        let mut info = PROCESS_INFORMATION::default();
+        let dir = home.as_ref().map_or(PCWSTR::null(), |h| PCWSTR(h.as_ptr()));
+        let started = unsafe {
+            CreateProcessW(None, Some(PWSTR(wide.as_mut_ptr())), None, None, false, PROCESS_CREATION_FLAGS(0), None, dir, &startup, &mut info)
+        };
+        match started {
+            Ok(()) => unsafe {
+                let _ = CloseHandle(info.hThread);
+                let _ = CloseHandle(info.hProcess);
+            },
+            Err(e) => log(&format!("starting {line:?} failed: {e}")),
+        }
+    }
+
+    /// Media and volume keys do whatever Windows does with the real key.
+    fn press(key: VIRTUAL_KEY) {
+        let input = |flags| INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: key, dwFlags: flags, ..Default::default() } } };
+        unsafe {
+            SendInput(&[input(Default::default()), input(KEYEVENTF_KEYUP)], size_of::<INPUT>() as i32);
+        }
+    }
+
     unsafe extern "system" fn wndproc(window: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         match msg {
             desktop::WM_WINEVENT => {
@@ -213,6 +253,8 @@ mod windows_main {
                         Action::Terminal => spawn("cmd.exe", &[], CREATE_NEW_CONSOLE),
                         // Explorer isn't the shell, but it still opens folder windows.
                         Action::HomeFolder => spawn("explorer.exe", &["."], 0),
+                        Action::Spawn(line) => spawn_line(line),
+                        Action::Media(key) => press(key),
                         // DisableLockWorkstation (configs/default.nix, for Super+L)
                         // blocks LockWorkStation too. Disconnecting the console
                         // session lands on the same lock screen, and signing in

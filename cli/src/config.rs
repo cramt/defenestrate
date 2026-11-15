@@ -40,6 +40,9 @@ pub struct Config {
     #[serde(default = "defaults::yes")]
     pub boot_prompt: bool,
     pub shell: Shell,
+    /// How the built-in shell behaves, under cosmic-comp's own setting names
+    /// (cosmic.rs).
+    pub cosmic: crate::cosmic::Cosmic,
     /// TrueType/OpenType files installed for everyone into C:\Windows\Fonts.
     /// File names must be new there: an existing file can't be replaced
     /// safely (see the README on ACLs).

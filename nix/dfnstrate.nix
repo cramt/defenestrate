@@ -9,7 +9,7 @@ let
   craneLib = crane.mkLib pkgs;
   src = lib.fileset.toSource {
     root = ../.;
-    fileset = lib.fileset.unions [ ../Cargo.toml ../Cargo.lock ../cli ../configs/default.toml ];
+    fileset = lib.fileset.unions [ ../Cargo.toml ../Cargo.lock ../cli ../configs/default.toml ../configs/shell-settings.json ];
   };
   common = {
     inherit src;

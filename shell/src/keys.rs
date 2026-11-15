@@ -26,6 +26,11 @@
 //! `last_modifier_change`: a few of its moves across monitors depend on
 //! whether Super stayed down in between.
 //!
+//! The config's `cosmic.shortcuts` (settings.rs) go first, as COSMIC's
+//! custom shortcuts replace its defaults: a combination bound there does
+//! what it says, and one set to Disable reaches Windows and the app as if
+//! the shell had no binding for it.
+//!
 //! Alt+Tab and Super+Tab (Shift for backwards) are COSMIC's window
 //! switcher, swallowed here: without explorer, Windows' own Alt+Tab still
 //! switches but shows nothing, and can't reach windows on other workspaces,
@@ -44,7 +49,8 @@ use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THR
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY, VK_CONTROL,
     VK_DOWN, VK_ESCAPE, VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LWIN, VK_MENU, VK_OEM_2, VK_RCONTROL, VK_RETURN, VK_RIGHT,
-    VK_RMENU, VK_RWIN, VK_SHIFT, VK_TAB, VK_UP,
+    VK_MEDIA_NEXT_TRACK, VK_MEDIA_PLAY_PAUSE, VK_MEDIA_PREV_TRACK, VK_RMENU, VK_RWIN, VK_SHIFT, VK_TAB, VK_UP,
+    VK_VOLUME_DOWN, VK_VOLUME_MUTE, VK_VOLUME_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, HC_ACTION, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, PostMessageW,
@@ -52,6 +58,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
+use crate::settings::{self, Keys, System};
 use crate::tree::{Direction, Point};
 use crate::wm::{Command, Hold, Step, WorkspaceId};
 
@@ -64,6 +71,10 @@ pub enum Action {
     HomeFolder,
     Lock,
     LogOut,
+    /// A configured command line (the settings live for the whole run).
+    Spawn(&'static str),
+    /// A media or volume key, sent on to whatever handles it.
+    Media(VIRTUAL_KEY),
     Wm(Command, Hold),
     Drag(Drag),
     Switcher(Switch),
@@ -268,6 +279,53 @@ fn binding(key: VIRTUAL_KEY, m: Mods) -> Option<Binding> {
     }
 }
 
+/// What a configured shortcut does; None for Disable, or a workspace that
+/// doesn't exist (settings.rs refuses those).
+fn configured(action: &'static settings::Action) -> Option<Action> {
+    use Command::*;
+    use settings::Action as A;
+    let dir = |d| match d {
+        settings::Direction::Left => Direction::Left,
+        settings::Direction::Right => Direction::Right,
+        settings::Direction::Up => Direction::Up,
+        settings::Direction::Down => Direction::Down,
+    };
+    let ws = |n: u8| WorkspaceId::from_key(n.into());
+    let wm = |c| Some(Action::Wm(c, hold()));
+    match *action {
+        A::Disable => None,
+        A::Spawn(ref line) => Some(Action::Spawn(line)),
+        A::System(s) => Some(match s {
+            System::Launcher | System::AppLibrary => Action::Launcher,
+            System::Terminal => Action::Terminal,
+            System::HomeFolder => Action::HomeFolder,
+            System::LockScreen => Action::Lock,
+            System::LogOut => Action::LogOut,
+            System::Mute => Action::Media(VK_VOLUME_MUTE),
+            System::VolumeLower => Action::Media(VK_VOLUME_DOWN),
+            System::VolumeRaise => Action::Media(VK_VOLUME_UP),
+            System::PlayPause => Action::Media(VK_MEDIA_PLAY_PAUSE),
+            System::PlayNext => Action::Media(VK_MEDIA_NEXT_TRACK),
+            System::PlayPrev => Action::Media(VK_MEDIA_PREV_TRACK),
+        }),
+        A::Close => wm(Close),
+        A::Maximize => wm(Maximize),
+        A::ToggleTiling => wm(ToggleTiling),
+        A::ToggleWindowFloating => wm(ToggleFloating),
+        A::ToggleOrientation => wm(ToggleOrientation),
+        A::Focus(d) => wm(Focus(dir(d))),
+        A::Move(d) => wm(Move(dir(d))),
+        A::Workspace(n) => wm(Switch(ws(n)?)),
+        A::MoveToWorkspace(n) => wm(MoveTo(ws(n)?)),
+        A::NextWorkspace => wm(SwitchStep(Step::Next)),
+        A::PreviousWorkspace => wm(SwitchStep(Step::Previous)),
+        A::MoveToNextWorkspace => wm(MoveStep(Step::Next)),
+        A::MoveToPreviousWorkspace => wm(MoveStep(Step::Previous)),
+        A::SwitchOutput(d) => wm(SwitchOutput(dir(d))),
+        A::MoveToOutput(d) => wm(MoveToOutput(dir(d))),
+    }
+}
+
 fn held(key: VIRTUAL_KEY) -> bool {
     // The high bit is "down right now".
     unsafe { GetAsyncKeyState(key.0.into()) < 0 }
@@ -354,6 +412,20 @@ fn on_key_down(key: VIRTUAL_KEY) -> bool {
     }
     let super_down = SUPER.get() != Super::Up;
     let alt = held(VK_MENU);
+    // Virtual-key codes all fit a byte.
+    let keys = Keys { logo: super_down, ctrl: held(VK_CONTROL), alt, shift: held(VK_SHIFT), vk: key.0 as u8 };
+    if let Some(action) = settings::get().shortcut(keys) {
+        if super_down {
+            SUPER.set(Super::Down { chorded: true });
+        }
+        return match configured(action) {
+            Some(action) => {
+                queue(action);
+                true
+            }
+            None => false,
+        };
+    }
     // COSMIC binds exactly Alt+Tab and Super+Tab, each with or without Shift.
     if key == VK_TAB && !held(VK_CONTROL) && (alt != super_down) {
         if super_down {

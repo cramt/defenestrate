@@ -29,7 +29,8 @@ use windows::Win32::UI::Shell::{QUNS_RUNNING_D3D_FULL_SCREEN, SHQueryUserNotific
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, EDD_GET_DEVICE_INTERFACE_NAME, EVENT_OBJECT_CLOAKED, GetCursorPos, MONITORINFOF_PRIMARY,
     SetCursorPos, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_SHOW,
-    EVENT_OBJECT_UNCLOAKED, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, EnumWindows, GA_ROOT,
+    EVENT_OBJECT_UNCLOAKED, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MOVESIZEEND,
+    EVENT_SYSTEM_MOVESIZESTART, EnumWindows, GA_ROOT,
     GetForegroundWindow, HWND_BOTTOM,
     GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClientRect, GetPropW, GetSystemMetrics, GetWindow, GetWindowLongPtrW,
     GetWindowRect, GetWindowTextLengthW, GetWindowThreadProcessId, HWND_TOPMOST, IsHungAppWindow, IsIconic, IsWindow,
@@ -45,9 +46,11 @@ use windows::core::{BOOL, PCWSTR, w};
 
 use crate::keys::{Button, Drag};
 use crate::motion::{Animator, Pace, Scene};
+use crate::hint;
 use crate::overlay::{self, Look};
-use crate::tree::{Axis, Direction, Point, Rect};
-use crate::wm::{Command, Effects, Grab, Hold, OutputId, Screens, Wm};
+use crate::settings;
+use crate::tree::{Axis, Direction, Gaps, Point, Rect};
+use crate::wm::{Command, Effects, Grab, Hold, OutputId, Screens, Tiling, Wm};
 use crate::{log, scaled_at};
 
 /// Posted to the shell's window for every WinEvent: wparam the event,
@@ -119,6 +122,8 @@ thread_local! {
     static PREVIEW: Cell<HWND> = const { Cell::new(HWND(std::ptr::null_mut())) };
     /// Windows the shell took the title bar from.
     static STRIPPED: RefCell<Vec<HWND>> = const { RefCell::new(Vec::new()) };
+    /// A window is being moved or sized by its own title bar or borders.
+    static MOVING: Cell<bool> = const { Cell::new(false) };
     static MONITORS: RefCell<Vec<Monitor>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -242,6 +247,28 @@ fn update(f: impl FnOnce(&mut Wm<HWND>) -> Option<Effects<HWND>>) {
         apply(fx);
         sync_captions();
     }
+    sync_hint();
+}
+
+/// The active hint goes around the focused window, if it's managed, shown,
+/// not maximized (as in COSMIC) and really has the keyboard. It's hidden
+/// while anything moves: animations (the overlay draws then), drags, or a
+/// game covering the screen.
+fn sync_hint() {
+    if settings::get().active_hint.is_none() {
+        return;
+    }
+    let at = || {
+        if PHASE.get() != Phase::Idle || DRAGGING.get().is_some() || MOVING.get() {
+            return None;
+        }
+        let (w, tile) = WM.with_borrow(|wm| wm.as_ref().and_then(Wm::hinted))?;
+        if unsafe { GetForegroundWindow() } != w || fullscreen_app() {
+            return None;
+        }
+        tile.or_else(|| visible_frame(w).map(|(_, r)| r))
+    };
+    hint::show(at());
 }
 
 pub fn start(events_to: HWND) {
@@ -250,7 +277,17 @@ pub fn start(events_to: HWND) {
     let found = monitors();
     log(&format!("monitors: {}", describe(&found)));
     reset_work_area(&found);
-    WM.set(Some(Wm::new(screens(&found))));
+    // One size for every monitor: the primary's, which is first.
+    let dpi = found.first().map_or(96, |m| m.dpi);
+    let config = settings::get();
+    let gaps = Gaps { outer: scaled_at(config.gaps.outer.into(), dpi), inner: scaled_at(config.gaps.inner.into(), dpi) };
+    let tiling = Tiling { gaps, autotile: config.autotile, behavior: config.autotile_behavior };
+    WM.set(Some(Wm::with_tiling(screens(&found), tiling)));
+    if let Some(h) = config.active_hint
+        && let Err(e) = hint::create(h, scaled_at(h.thickness.into(), dpi))
+    {
+        log(&format!("creating the active hint failed: {e}"));
+    }
     MONITORS.set(found);
     EPOCH.set(Some(Instant::now()));
     if let Err(e) = create_preview() {
@@ -291,6 +328,7 @@ pub fn start(events_to: HWND) {
     // every cursor move (EVENT_OBJECT_LOCATIONCHANGE).
     for (min, max) in [
         (EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND),
+        (EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZEEND),
         (EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND),
         (EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE),
         (EVENT_OBJECT_CLOAKED, EVENT_OBJECT_UNCLOAKED),
@@ -319,6 +357,11 @@ unsafe extern "system" fn on_winevent(_: HWINEVENTHOOK, event: u32, w: HWND, obj
 }
 
 pub fn on_event(event: u32, w: HWND) {
+    match event {
+        EVENT_SYSTEM_MOVESIZESTART => MOVING.set(true),
+        EVENT_SYSTEM_MOVESIZEEND => MOVING.set(false),
+        _ => {}
+    }
     update(|wm| match event {
         EVENT_OBJECT_DESTROY => Some(wm.remove(w)),
         EVENT_OBJECT_SHOW | EVENT_OBJECT_UNCLOAKED | EVENT_SYSTEM_MINIMIZEEND => {
@@ -851,6 +894,7 @@ fn finish() {
     PHASE.set(Phase::Idle);
     DEFERRED.take();
     overlay::hide();
+    sync_hint();
 }
 
 /// Stops everything where it ends up, at once.
@@ -963,6 +1007,7 @@ pub fn drag(d: Drag) {
                 (Button::Right, Grab::Free) => Some(Dragging::FloatCorner { w, from: at, start, corner }),
             };
             DRAGGING.set(dragging);
+            sync_hint();
         }
         Drag::Move(to) => match DRAGGING.get() {
             Some(Dragging::Tile { w, from, start }) => {
@@ -999,6 +1044,7 @@ pub fn drag(d: Drag) {
                 let band = scaled_at(DROP_BAND, dpi_at(at));
                 update(|wm| Some(wm.drop(w, at, band)));
             }
+            sync_hint();
         }
     }
 }
