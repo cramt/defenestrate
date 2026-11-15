@@ -16,6 +16,8 @@ use crate::firmware;
 use crate::image::{IMAGE_FILE, SIZE_FILE};
 use crate::tools::{self, BLKDISCARD, BLOCKDEV, EFIBOOTMGR, FINDMNT, LSBLK, NTFSRESIZE, PARTX, SFDISK, UDEVADM};
 
+pub const TOOLS: &[tools::Tool] = &[LSBLK, FINDMNT, BLKDISCARD, SFDISK, PARTX, BLOCKDEV, UDEVADM, NTFSRESIZE, EFIBOOTMGR];
+
 #[derive(clap::Args)]
 pub struct Args {
     /// A `build image` output directory.
@@ -29,7 +31,7 @@ pub struct Args {
 }
 
 pub fn run(args: &Args) -> Result<()> {
-    tools::require(&[LSBLK, FINDMNT, BLKDISCARD, SFDISK, PARTX, BLOCKDEV, UDEVADM, NTFSRESIZE, EFIBOOTMGR])?;
+    tools::require(TOOLS)?;
     const USAGE: &str = "dfnstrate flash --image DIR /dev/disk/by-id/<whole disk>  (erases it; a config's installTarget sets a default)";
     let install_target = if args.configs.is_empty() { None } else { config::load(&args.configs, true)?.install_target };
     let disk = disk::unused(disk::target(args.target.as_deref(), install_target, USAGE)?)?;

@@ -34,6 +34,14 @@ const OVMF: &[(&str, &str)] = &[
 ];
 
 impl Firmware {
+    /// What clap would fill in with no flags given, for `doctor`.
+    pub fn from_env() -> Self {
+        Firmware {
+            ovmf_code: std::env::var_os("DFNSTRATE_OVMF_CODE").map(PathBuf::from),
+            ovmf_vars: std::env::var_os("DFNSTRATE_OVMF_VARS").map(PathBuf::from),
+        }
+    }
+
     pub fn resolve(&self) -> Result<(PathBuf, PathBuf)> {
         match (&self.ovmf_code, &self.ovmf_vars) {
             (Some(c), Some(v)) => {

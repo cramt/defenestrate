@@ -5,6 +5,7 @@ mod apps;
 mod cache;
 mod config;
 mod disk;
+mod doctor;
 mod fetch;
 mod firmware;
 mod flash;
@@ -89,6 +90,18 @@ struct BuildArgs {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Check this machine is ready (UEFI, Secure Boot, TPM 2.0, KVM, tools,
+    /// disk space) and say what to fix. Run this first; changes nothing.
+    Doctor {
+        #[command(flatten)]
+        config: ConfigArgs,
+        /// Download cache to check [default: $XDG_CACHE_HOME/dfnstrate]
+        #[arg(long, env = "DFNSTRATE_CACHE", value_name = "DIR")]
+        cache: Option<PathBuf>,
+        /// Where builds will put their scratch [default: the current directory]
+        #[arg(long, value_name = "DIR", default_value = ".")]
+        work_dir: PathBuf,
+    },
     /// Download the stock ISO the config pins into the cache.
     Fetch {
         #[command(flatten)]
@@ -166,6 +179,10 @@ fn main() {
 
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
+        Cmd::Doctor { config, cache, work_dir } => {
+            let pin = config::load_iso(&config.configs, !config.no_defaults)?;
+            doctor::run(&pin, &Cache::new(cache, false)?, &work_dir)
+        }
         Cmd::Fetch { config, cache, args } => {
             let pin = config::load_iso(&config.configs, !config.no_defaults)?;
             fetch::run(&pin, &cache.open()?, &args)

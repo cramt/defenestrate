@@ -19,6 +19,9 @@ use crate::config::Config;
 use crate::tools::{self, ICAT, IFIND, MDIR, QEMU, SFDISK, SWTPM};
 use crate::vm::{self, Firmware, Tpm};
 
+/// What `build image` drives, past `build iso`'s tools.
+pub const TOOLS: &[tools::Tool] = &[QEMU, SWTPM, SFDISK, MDIR, IFIND, ICAT];
+
 pub const IMAGE_FILE: &str = "windows.img.zst";
 pub const SIZE_FILE: &str = "size";
 
@@ -48,7 +51,7 @@ pub struct Ready {
 }
 
 pub fn preflight(args: &Args) -> Result<Ready> {
-    tools::require(&[QEMU, SWTPM, SFDISK, MDIR, IFIND, ICAT])?;
+    tools::require(TOOLS)?;
     File::options().read(true).write(true).open("/dev/kvm").context("/dev/kvm: the install runs in a KVM VM")?;
     let (code, vars_template) = args.firmware.resolve()?;
     Ok(Ready { code, vars_template })

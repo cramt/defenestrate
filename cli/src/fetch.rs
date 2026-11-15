@@ -125,10 +125,7 @@ fn served_name(url: &str) -> String {
 fn link(language: &str, args: &BrowserArgs) -> Result<String> {
     let path = match &args.browser {
         Some(p) => p.clone(),
-        None => ["chromium", "chromium-browser", "google-chrome-stable", "google-chrome"]
-            .iter()
-            .find_map(tools::which)
-            .context("no Chromium or Chrome on PATH; install chromium or pass --browser")?,
+        None => tools::CHROMIUM.path().context("no Chromium or Chrome on PATH; install chromium or pass --browser")?,
     };
     eprintln!("asking {PAGE} for a link, with {}", path.display());
     let browser = Browser::new(

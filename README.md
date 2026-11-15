@@ -48,9 +48,16 @@ values per hive. Every config is layered over the distro's own defaults,
 - [x] Updating an install from Linux without a reflash (`dfnstrate update`, `build.update`): the shell, fonts and WSL payload are rewritten in place on the shut-down Windows partition, each keeping its NTFS security descriptor, and the logon task re-imports the distro when `rootfs.tar` changed
   - Seen on a `build image` output booted in the VM: `update` rewrote `rootfs.tar` and `wsl-logon.ps1` with their descriptors unchanged; at the next logon the distro was re-imported with the new `dfn` and mounted the test install, which the image's older distro had failed to; the logon after that didn't re-import. The partition was reached through ntfs-3g in a user namespace, so the by-id disk route has only been run as far as its refusals (a mounted disk, a partition, a non-by-id path), not onto a real disk
 - [x] `dfnstrate reboot`: into Windows once, by the firmware's BootNext, so the boot after it is Linux again. Picks the Windows Boot Manager entry whose ESP is on a disk that's attached, refuses to guess between two (`--entry`), `--no-reboot` only sets it. Unit-tested; not yet run on real hardware
+- [x] `dfnstrate doctor`: a read-only preflight run as the user, one line per check with the fix: UEFI, Secure Boot (with a fix for the bootloader it finds: lanzaboote, systemd-boot, GRUB, shim), TPM 2.0, `/dev/kvm`, every command's tools and the OVMF, scratch and cache space, whether the work dir is on a spinning disk, Windows Boot Manager entries live or stale, an RTC on local time, and disk swap Linux could hibernate to. Exits non-zero on any failure. Parsing is unit-tested; run on one NixOS machine so far
 - [x] Whole-disk image built in a sandboxed VM (`dfnstrate build image`, `build.image`) and flashed from Linux with no boot media (`dfnstrate flash`, `build.install`), replacing nixconf's `saturn-windows-image.sh`. Flash-and-boot verified on a disk-sized file, and booted to the shell on real hardware
 
 ## Usage
+
+Run `dfnstrate doctor` first (or `nix run github:cramt/defenestrate -- doctor`).
+It changes nothing and needs no sudo, and tells you what to fix before a
+build: Vanguard won't start without Secure Boot and TPM 2.0, `build image`
+needs KVM, and so on. Pass `--work-dir` if you'll build somewhere other
+than the current directory.
 
 A machine config, e.g. `my-machine.toml`:
 
