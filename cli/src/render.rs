@@ -315,9 +315,12 @@ mod tests {
             (format!("{s}/apps/install-apps.ps1"), ReadAt::EveryLogon),
             (format!("{s}/apps/task.xml"), ReadAt::Setup),
             (format!("{s}/reboot/reboot.json"), ReadAt::EveryLogon),
+            (format!("{s}/reboot/linux-entry.ps1"), ReadAt::EveryLogon),
             (format!("{s}/reboot/reboot-to-linux.ps1"), ReadAt::EveryLogon),
+            (format!("{s}/reboot/linux-first.ps1"), ReadAt::EveryLogon),
             (format!("{s}/reboot/register.ps1"), ReadAt::Setup),
             (format!("{s}/reboot/task.xml"), ReadAt::Setup),
+            (format!("{s}/reboot/linux-first.xml"), ReadAt::Setup),
         ];
         want.sort();
         assert_eq!(got, want.iter().map(|(p, r)| (p.as_str(), *r)).collect::<Vec<_>>());

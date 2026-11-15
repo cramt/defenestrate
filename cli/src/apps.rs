@@ -12,7 +12,7 @@ use serde::Serialize;
 
 use crate::config::{AppId, Config};
 use crate::render::{InstallFile, ReadAt};
-use crate::tasks::{self, Logon, Task, Trigger};
+use crate::tasks::{self, AsUser, Logon, Task, Trigger};
 
 pub const DIR: &str = "Windows/Setup/defenestrate/apps";
 pub const TASK: &str = "defenestrate-apps";
@@ -72,14 +72,12 @@ pub fn render(config: &Config, dir: &Path) -> Result<Vec<InstallFile>> {
         "task.xml",
         &tasks::xml(&Task {
             description: "Installs the configured winget apps and GPU drivers, then deletes itself. Log: %LOCALAPPDATA%\\defenestrate\\apps.log",
-            user,
             // The user's own session, elevated: machine-wide installers then
             // run without a UAC prompt each, and per-user ones still land in
             // the user's profile, which they wouldn't as SYSTEM (winget
             // doesn't run as SYSTEM anyway). The cost: while an installer
             // window is focused, the shell's keyboard hook gets no keys.
-            trigger: Trigger::Logon,
-            logon: Logon::Interactive,
+            trigger: Trigger::Logon(AsUser { user, logon: Logon::Interactive }),
             command: "powershell.exe",
             arguments: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\\Windows\\Setup\\defenestrate\\apps\\install-apps.ps1".into(),
         })?,

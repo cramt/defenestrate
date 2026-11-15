@@ -146,6 +146,10 @@ pub fn render(config: &Config, v: &Variant) -> Result<String> {
             format!("cmd.exe /c \"powershell.exe -NoProfile -ExecutionPolicy Bypass -File {SETUP_DIR}\\reboot\\register.ps1 -Task {} >> {SETUP_DIR}\\firstlogon.log 2>&1\"", crate::reboot_to_linux::TASK),
             "Register Reboot to Linux",
         ));
+        commands.push((
+            format!("cmd.exe /c \"schtasks /create /tn {} /xml {SETUP_DIR}\\reboot\\linux-first.xml >> {SETUP_DIR}\\firstlogon.log 2>&1\"", crate::reboot_to_linux::LINUX_FIRST_TASK),
+            "Keep Linux first in the boot order",
+        ));
     }
     commands.push(match v.first_logon_end {
         FirstLogonEnd::Reboot => ("shutdown.exe /r /t 0".into(), "Log in again under the new shell"),

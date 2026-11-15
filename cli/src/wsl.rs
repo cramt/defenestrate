@@ -17,7 +17,7 @@ use anyhow::Result;
 use crate::cache::Cache;
 use crate::config::{Config, FileSource, Linux};
 use crate::render::{InstallFile, ReadAt};
-use crate::tasks::{self, Logon, Task, Trigger};
+use crate::tasks::{self, AsUser, Logon, Task, Trigger};
 
 /// Relative to C:.
 pub const DIR: &str = "Windows/Setup/defenestrate/wsl";
@@ -50,7 +50,6 @@ pub fn render(config: &Config, cache: &Cache, work: &Path, dir: &Path) -> Result
         "task.xml",
         &tasks::xml(&Task {
             description: "Attaches and mounts the Linux install in WSL, and lists its apps in the Start Menu. Log: %LOCALAPPDATA%\\defenestrate\\wsl.log",
-            user,
             // Elevated, for `wsl --mount`, and S4U: in session 0, so no window
             // of it (elevated windows starve the shell's keyboard hook) and no
             // stored password.
@@ -61,8 +60,7 @@ pub fn render(config: &Config, cache: &Cache, work: &Path, dir: &Path) -> Result
             // hand, but failed at logon with 0x80070003. GUI apps are blocked
             // anyway under this shell (README), so this stays until both are
             // solved.
-            trigger: Trigger::Logon,
-            logon: Logon::Session0,
+            trigger: Trigger::Logon(AsUser { user, logon: Logon::Session0 }),
             command: "powershell.exe",
             arguments: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\\Windows\\Setup\\defenestrate\\wsl\\wsl-logon.ps1".into(),
         })?,

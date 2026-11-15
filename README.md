@@ -53,9 +53,10 @@ values per hive. Every config is layered over the distro's own defaults,
 - [x] `dfnstrate reboot`: into Windows once, by the firmware's BootNext, so the boot after it is Linux again. Picks the Windows Boot Manager entry whose ESP is on a disk that's attached, refuses to guess between two Windows (`--entry`); entries sharing an ESP count as one, `--no-reboot` only sets it. Unit-tested; not yet run on real hardware
 - [x] `dfnstrate doctor`: a read-only preflight run as the user, one line per check with the fix: UEFI, Secure Boot (with a fix for the bootloader it finds: lanzaboote, systemd-boot, GRUB, shim), TPM 2.0, `/dev/kvm`, every command's tools and the OVMF, scratch and cache space, whether the work dir is on a spinning disk, Windows Boot Manager entries live or stale, an RTC on local time, and disk swap Linux could hibernate to. Exits non-zero on any failure. Parsing is unit-tested; run on one NixOS machine so far
 - [x] "Reboot to Linux" in the launcher: boots the firmware's Linux entry once (BootNext, via `{fwbootmgr}` bootsequence) and reboots, through an on-demand elevated task, so no UAC prompt (`linuxBootEntry`). Seen in the VM, with Windows Boot Manager first in BootOrder and a "Linux Boot Manager" entry (a UEFI shell on the ESP) last: the shortcut started the task unelevated with no window and no prompt, the script picked the Linux entry, the next boot was the UEFI shell, and the boot after that was Windows again. First logon's registration was run by hand there, not from a fresh `build image`; the nothing-matches path and a `description` pin are untested
+- [x] Linux stays the firmware's default: a task at every Windows startup puts the `linuxBootEntry` entry back first in BootOrder, since Windows' first boot puts a Windows Boot Manager entry of its own first (and boot manager updates can again). Refuses when two entries could be Linux; `linuxBootEntry = "none"` turns it off. Seen in the VM on a `flash --into-free-space` disk with a "Linux Boot Manager" entry: Windows' first boot put a new Windows entry first; the task put Linux back, and did again with no logon after BootOrder was set Windows-first offline; the next plain boot was systemd-boot. The task was registered by hand there (the disk's image predates it), not from a fresh `build image`; the refusal and pinning paths ran only against mocked entries. Installs from before it need a reflash: `update` can't register tasks
 - [x] Whole-disk image built in a sandboxed VM (`dfnstrate build image`, `build.image`) and flashed from Linux with no boot media (`dfnstrate flash`, `build.install`), replacing nixconf's `saturn-windows-image.sh`. Flash-and-boot verified on a disk-sized file, and booted to the shell on real hardware
 - [x] Flashing next to Linux on the same disk (`dfnstrate flash --into-free-space`): Windows' partitions go into the one free region the user made, its own ESP included, with Linux mounted and every existing partition untouched; the BCD is pointed at the disk's GUID
-  - Seen in a VM, Linux running from the 1 TB disk it flashed: Linux's partitions hashed identically before and after, and after two Windows boots; Windows booted under Secure Boot to the shell on a 921 GiB C:, and Linux booted again afterwards. Not run on real hardware. Windows' first boot moves itself first in BootOrder (both layouts), and `update` doesn't support this layout
+  - Seen in a VM, Linux running from the 1 TB disk it flashed: Linux's partitions hashed identically before and after, and after two Windows boots; Windows booted under Secure Boot to the shell on a 921 GiB C:, and Linux booted again afterwards. Not run on real hardware. Windows' first boot moves itself first in BootOrder (both layouts), which the startup task above undoes, and `update` doesn't support this layout
 
 ## Usage
 
@@ -287,10 +288,12 @@ letter. Afterwards systemd-boot still booted Linux. The disk was a VM's, not
 real hardware.
 
 Windows' first boot (on either layout) adds its own "Windows Boot
-Manager" entry and puts it first in BootOrder, so from then on the firmware
-boots Windows by default. Giving dfnstrate's entry Windows' own optional
-data doesn't stop it. Later boots leave BootOrder alone: put Linux back
-first once, from Linux or the firmware setup. That leaves two Windows
+Manager" entry and puts it first in BootOrder; giving dfnstrate's entry
+Windows' own optional data doesn't stop it. The startup task in
+[Updating an install](#updating-an-install) puts Linux back first at
+startup. Whether it lands after the takeover in that very first boot
+hasn't been seen (the test disk's image predates the task), so at worst
+one more Windows boot goes by first. That leaves two Windows
 entries on the same ESP; `dfnstrate reboot` knows they're one Windows.
 
 `dfnstrate update` doesn't handle this layout yet: it wants the whole disk
@@ -337,15 +340,24 @@ written, and the previous build's comes out after.
 
 ### Switching between Linux and Windows
 
-`flash` leaves the firmware's boot order on Linux, so a plain reboot from
-either side normally lands in Linux. Each side has a one-shot switch that
-sets the firmware's BootNext, which lasts exactly one boot:
+Linux is the firmware's default and Windows boots only when asked to.
+`flash` leaves the boot order on Linux, and Windows keeps it there: Windows
+itself puts Windows Boot Manager first at its first boot, and boot manager
+updates can do it again, so the task `defenestrate-linux-first` runs as
+SYSTEM at every Windows startup and puts the Linux entry (below) back
+first with `bcdedit /set {fwbootmgr} displayorder <id> /addfirst`. When
+Linux is already first it does nothing. Each run adds a line to
+`%ProgramData%\defenestrate\linux-first.log`; a change also logs the order
+it found. This relies on Fast Startup being off (`default.toml`): a Fast
+Startup boot is a resume, and startup tasks don't run on one.
+
+Each side also has a one-shot switch that sets the firmware's BootNext,
+which lasts exactly one boot:
 
 - From Linux, `dfnstrate reboot` boots Windows once (`--no-reboot` only
   sets it, `--entry XXXX` picks the Boot#### entry).
-- From Windows, "Reboot to Linux" in the launcher boots Linux once. It
-  doesn't trust the boot order, since Windows, major updates especially,
-  sometimes puts Windows Boot Manager back in front of it.
+- From Windows, "Reboot to Linux" in the launcher boots Linux once, which
+  works even when the startup task left the boot order alone.
 
 "Reboot to Linux" needs admin to set BootNext and the shell isn't elevated,
 so first logon registers the task `defenestrate-reboot-to-linux`: no
@@ -357,7 +369,7 @@ console flashes up) with no UAC prompt. Which entry is Linux comes from
 ```toml
 linuxBootEntry = "auto"                                  # the default
 linuxBootEntry = { description = "Linux Boot Manager" }  # as efibootmgr lists it
-linuxBootEntry = "none"                                  # Windows-only machine: no shortcut
+linuxBootEntry = "none"                                  # Windows-only machine: neither task
 ```
 
 `auto` takes the first entry in the firmware's boot order that boots an
@@ -371,6 +383,17 @@ nothing happens: no reboot, and the reason goes to
 entry seen. Entries are read through the BCD WMI provider rather than
 parsed out of `bcdedit /enum`, whose labels are translated on non-English
 Windows.
+
+The startup task is stricter, because a wrong pick there changes every
+boot after it, not just the next one: it acts only when exactly one entry
+matches. With two candidates under `auto` (two distros, an OEM tool's
+`.efi` on the ESP) or two entries with the pinned description, it leaves
+the boot order alone and logs them; pin one, or remove the duplicate.
+Under `auto`, a Windows-only machine whose ESP has one such OEM tool would
+get that tool put first, which is what `none` is for. Installs from before
+the task have neither its files nor its registration, and `update` can't
+register a task, so they need a reflash (or `efibootmgr -o` from Linux
+after each time Windows takes over).
 
 `update` can rewrite the script and `reboot.json` on an install that
 already has them, but it can't add the feature to an older install: the
