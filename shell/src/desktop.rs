@@ -20,7 +20,7 @@ use windows::Win32::Graphics::Gdi::{
     MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW, MonitorFromWindow,
 };
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
-use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
+use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_INFORMATION_CLASS, TOKEN_QUERY, TokenElevation, TokenUIAccess};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION};
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
@@ -97,6 +97,18 @@ enum Dragging {
     FloatCorner { w: HWND, from: Point, start: RECT, corner: [Direction; 2] },
 }
 
+/// Which windows Windows lets the shell move. UIPI keeps a process from
+/// moving, sending input to or hooking the input of windows above its
+/// integrity level, i.e. elevated ones.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Reach {
+    /// Elevated, or with uiAccess, which bypasses UIPI without elevation:
+    /// https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/user-account-control-only-elevate-uiaccess-applications-that-are-installed-in-secure-locations
+    Every,
+    /// Medium integrity without uiAccess, e.g. the signature check failed.
+    SameLevel,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Phase {
     Idle,
@@ -121,7 +133,7 @@ thread_local! {
     /// they're going.
     static PENDING: RefCell<Vec<(HWND, RECT, RECT)>> = const { RefCell::new(Vec::new()) };
     static EVENTS_TO: Cell<HWND> = const { Cell::new(HWND(std::ptr::null_mut())) };
-    static ELEVATED: Cell<bool> = const { Cell::new(false) };
+    static REACH: Cell<Reach> = const { Cell::new(Reach::SameLevel) };
     static DRAGGING: Cell<Option<Dragging>> = const { Cell::new(None) };
     static PREVIEW: Cell<HWND> = const { Cell::new(HWND(std::ptr::null_mut())) };
     /// Windows the shell took the title bar from.
@@ -278,7 +290,14 @@ fn sync_hint() {
 
 pub fn start(events_to: HWND) {
     EVENTS_TO.set(events_to);
-    ELEVATED.set(is_elevated(unsafe { GetCurrentProcess() }));
+    let me = unsafe { GetCurrentProcess() };
+    let (elevated, ui_access) = (is_elevated(me), token_flag(me, TokenUIAccess));
+    let reach = if elevated || ui_access { Reach::Every } else { Reach::SameLevel };
+    log(&format!("TokenElevation={} TokenUIAccess={}: managing {reach:?} windows", elevated as u8, ui_access as u8));
+    if crate::handoff::BUILD == crate::handoff::Build::UiAccess && !ui_access {
+        log("Windows started the uiAccess build without uiAccess: is its certificate (CN=defenestrate shell) in the machine's Trusted Root store?");
+    }
+    REACH.set(reach);
     let found = monitors();
     log(&format!("monitors: {}", describe(&found)));
     reset_work_area(&found);
@@ -412,8 +431,9 @@ pub fn on_event(event: u32, w: HWND) {
 /// What the window switcher lists, most recently focused first: COSMIC
 /// lists every toplevel, so besides the managed windows (minimized, or on
 /// other workspaces) that's every window Windows' own Alt+Tab would show,
-/// such as a full-screen game or an elevated app, which the shell doesn't
-/// tile. Ones never focused go last, topmost first.
+/// such as a full-screen game, or an elevated app when the shell runs
+/// without uiAccess, which the shell doesn't tile. Ones never focused go
+/// last, topmost first.
 pub fn switchable() -> Vec<HWND> {
     let z = z_order();
     WM.with_borrow(|wm| {
@@ -617,9 +637,8 @@ fn manageable(w: HWND) -> bool {
         if pid == 0 || pid == GetCurrentProcessId() {
             return false;
         }
-        // Windows won't let a normal process move an elevated one's
-        // windows (UIPI), so those would sit on top of the tiles.
-        if !ELEVATED.get() {
+        // A window the shell can't move would sit on top of the tiles.
+        if REACH.get() == Reach::SameLevel {
             let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return false };
             let elevated = is_elevated(process);
             let _ = CloseHandle(process);
@@ -632,22 +651,23 @@ fn manageable(w: HWND) -> bool {
 }
 
 fn is_elevated(process: HANDLE) -> bool {
+    token_flag(process, TokenElevation)
+}
+
+/// A token information class whose answer is a single DWORD flag
+/// (TOKEN_ELEVATION is a struct of just one).
+fn token_flag(process: HANDLE, class: TOKEN_INFORMATION_CLASS) -> bool {
+    const { assert!(size_of::<TOKEN_ELEVATION>() == size_of::<u32>()) };
     unsafe {
         let mut token = HANDLE::default();
         if OpenProcessToken(process, TOKEN_QUERY, &mut token).is_err() {
             return false;
         }
-        let mut elevation = TOKEN_ELEVATION::default();
+        let mut flag = 0u32;
         let mut len = 0;
-        let ok = GetTokenInformation(
-            token,
-            TokenElevation,
-            Some((&raw mut elevation).cast::<c_void>()),
-            size_of::<TOKEN_ELEVATION>() as u32,
-            &mut len,
-        );
+        let ok = GetTokenInformation(token, class, Some((&raw mut flag).cast::<c_void>()), size_of::<u32>() as u32, &mut len);
         let _ = CloseHandle(token);
-        ok.is_ok() && elevation.TokenIsElevated != 0
+        ok.is_ok() && flag != 0
     }
 }
 

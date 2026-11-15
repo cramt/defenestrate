@@ -26,7 +26,9 @@ depends=(
 # rustup, not Arch's rust: the shell is a Windows binary and the rust
 # package ships no x86_64-pc-windows-gnu std (only rust-musl, rust-wasm and
 # the aarch64 ones are split out).
-makedepends=('git' 'rustup' 'mingw-w64-gcc')
+# openssl and osslsigncode: shell/sign.sh signs the shell's uiAccess binary.
+# osslsigncode is itself in the AUR, so plain makepkg needs it installed first.
+makedepends=('git' 'rustup' 'mingw-w64-gcc' 'openssl' 'osslsigncode')
 optdepends=(
   'chromium: dfnstrate fetch, and build without --iso (or google-chrome, or --browser)'
   'qemu-desktop: dfnstrate vm and build image (qemu-base is enough for build image alone)'
@@ -83,7 +85,10 @@ build() {
   env -u CFLAGS -u CXXFLAGS -u LDFLAGS -u RUSTFLAGS \
     cargo build --frozen --release --manifest-path shell/Cargo.toml --target "$_shell_target"
 
-  DEFENESTRATE_SHELL_EXE="$PWD/target/$_shell_target/release/defenestrate-shell.exe" \
+  # A certificate made for this build signs it and its key is deleted, so
+  # each build of the package trusts its own shell and nothing else.
+  bash shell/sign.sh "target/$_shell_target/release" target/shell
+  DEFENESTRATE_SHELL_DIR="$PWD/target/shell" \
     cargo build --frozen --release -p dfnstrate
 }
 

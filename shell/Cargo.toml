@@ -8,6 +8,18 @@ edition = "2024"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# One source, two binaries, so the copy that runs without uiAccess can't
+# drift from the one that has it: build.rs gives only the second the
+# uiAccess manifest, and src/handoff.rs says why both exist. Cargo warns
+# that main.rs is in two targets; that's the point.
+[[bin]]
+name = "defenestrate-shell"
+path = "src/main.rs"
+
+[[bin]]
+name = "defenestrate-shell-uiaccess"
+path = "src/main.rs"
+
 # Only Windows gets the bindings; on the build machine the crate compiles
 # just the pure modules, so their tests run there.
 [target.'cfg(windows)'.dependencies]
@@ -16,6 +28,8 @@ windows = { version = "0.62", features = [
   "Win32_Graphics_Dwm",
   "Win32_Graphics_Gdi",
   "Win32_Security",
+  "Win32_System_Com",
+  "Win32_System_Registry",
   "Win32_System_LibraryLoader",
   "Win32_System_Shutdown",
   "Win32_System_SystemInformation",
@@ -30,3 +44,6 @@ windows = { version = "0.62", features = [
 [profile.release]
 panic = "abort"
 lto = true
+
+[build-dependencies]
+embed-manifest = "1.5.1"

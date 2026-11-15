@@ -136,6 +136,21 @@ accent = { red = 0.5450980392, green = 0.5254901961, blue = 0.5137254902 }
 # Recall.
 'Policies\Microsoft\Windows\WindowsAI'.DisableAIDataAnalysis.dword = 1
 'Policies\Microsoft\Windows\WindowsUpdate\AU'.NoAutoRebootWithLoggedOnUsers.dword = 1
+# The shell has uiAccess (shell/build.rs): it can send input to and read the
+# input of any window on the user's desktop, elevated ones included. UAC's
+# prompts stay out of its reach only because they're drawn on the secure
+# desktop; with that off, the shell, or anything that subverted it, could
+# click "Yes" on them. These are Windows' defaults, pinned so no later layer
+# turns them off by accident:
+# https://learn.microsoft.com/en-us/windows/security/application-security/application-control/user-account-control/settings-and-configuration
+# - "Switch to the secure desktop when prompting for elevation"
+'Microsoft\Windows\CurrentVersion\Policies\System'.PromptOnSecureDesktop.dword = 1
+# - "Allow UIAccess applications to prompt for elevation without using the
+#   secure desktop": no
+'Microsoft\Windows\CurrentVersion\Policies\System'.EnableUIADesktopToggle.dword = 0
+# - "Only elevate UIAccess applications that are installed in secure
+#   locations" (Program Files, System32), where the user can't swap the exe
+'Microsoft\Windows\CurrentVersion\Policies\System'.EnableSecureUIAPaths.dword = 1
 
 [registry.defaultUser]
 # The Default profile ships with this Run entry, so every new account

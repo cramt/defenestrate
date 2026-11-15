@@ -17,6 +17,8 @@ mod wm;
 #[cfg(windows)]
 mod desktop;
 #[cfg(windows)]
+mod handoff;
+#[cfg(windows)]
 mod hint;
 #[cfg(windows)]
 mod keys;
@@ -40,7 +42,19 @@ fn main() {
     // panic = "abort" skips unwinding, but the hook still runs first, so
     // a panic leaves a line in the log instead of a silently missing shell.
     std::panic::set_hook(Box::new(|info| log(&format!("panic: {info}"))));
-    log(&format!("started, pid {}", std::process::id()));
+    log(&format!("started, pid {}, {:?} build", std::process::id(), handoff::BUILD));
+    if handoff::BUILD == handoff::Build::Launcher {
+        // Winlogon doesn't restart a Shell process that dies (killed, exit
+        // code 1, in the VM), so stepping aside loses no restart a crashed
+        // shell would otherwise have got.
+        match handoff::hand_over() {
+            handoff::Handover::Started { pid } => return log(&format!("handed over to {}, pid {pid}", handoff::UIACCESS_EXE)),
+            handoff::Handover::Failed(why) => log(&format!("{why}; running here, without uiAccess")),
+        }
+    }
+    if !handoff::claim_session() {
+        return log("another shell already runs in this session; leaving it be");
+    }
     match windows_main::run() {
         Ok(()) => log("message loop ended"),
         Err(e) => {

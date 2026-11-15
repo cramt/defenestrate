@@ -4,16 +4,21 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 
 use crate::cache::Cache;
+use crate::cert::ShellCert;
 use crate::config::{Config, Hive, RegValue, Shell};
 use crate::registry::{self, Root};
 use crate::unattend::{self, Variant};
 use crate::wsl;
 
-/// The shell's file name under C:\Program Files\defenestrate.
+/// The builtin shell's two files under C:\Program Files\defenestrate: the
+/// launcher Winlogon starts, and the signed uiAccess binary it starts in
+/// turn (shell/src/handoff.rs).
 pub const BUILTIN_SHELL: &str = "defenestrate-shell.exe";
+pub const BUILTIN_SHELL_UIACCESS: &str = "defenestrate-shell-uiaccess.exe";
+const SHELL_DIR: &str = "Program Files/defenestrate";
 /// The shell's settings (`cosmic`), next to its exe, where only admins can
 /// change them.
 pub const SHELL_SETTINGS: &str = "shell.json";
@@ -43,6 +48,9 @@ pub struct Rendered {
     /// `update` rewrites them on an installed one, so the two can't disagree
     /// about what lives where.
     pub files: Vec<InstallFile>,
+    /// What the builtin shell's uiAccess binary is signed with, trusted in
+    /// the Root store so it gets uiAccess (cert.rs). None for any other shell.
+    pub shell_cert: Option<ShellCert>,
 }
 
 /// A file the build puts on C:.
@@ -52,6 +60,18 @@ pub struct InstallFile {
     pub dest: String,
     pub source: PathBuf,
     pub read: ReadAt,
+    pub if_missing: IfMissing,
+}
+
+/// What `update` does about a file the install doesn't have yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IfMissing {
+    /// Nothing: only setup can add it, since it needs registering too (a
+    /// font, a task, the Shell value).
+    Reflash,
+    /// Create it, with the NTFS security descriptor the file at this dest
+    /// has, which setup made: for a file that needs nothing but to exist.
+    CreateLike(String),
 }
 
 /// When Windows reads a file of ours, which decides whether replacing it on
@@ -66,7 +86,45 @@ pub enum ReadAt {
 
 impl InstallFile {
     pub fn new(dest: impl Into<String>, source: impl Into<PathBuf>, read: ReadAt) -> Self {
-        Self { dest: dest.into(), source: source.into(), read }
+        Self { dest: dest.into(), source: source.into(), read, if_missing: IfMissing::Reflash }
+    }
+}
+
+/// The builtin shell as dfnstrate carries it: the launcher and the uiAccess
+/// binary, which only work together, the latter signed by one of our
+/// certificates (shell/sign.sh).
+pub struct BuiltinShell {
+    launcher: PathBuf,
+    uiaccess: PathBuf,
+    cert: ShellCert,
+}
+
+impl BuiltinShell {
+    pub fn new(launcher: PathBuf, uiaccess: PathBuf) -> Result<Self> {
+        let exe = std::fs::read(&uiaccess)?;
+        let Some(cert) = ShellCert::from_exe(&exe).with_context(|| uiaccess.display().to_string())? else {
+            bail!(
+                "{} isn't signed by shell/sign.sh, so Windows would never give it uiAccess; build the shell through sign.sh (README)",
+                uiaccess.display()
+            );
+        };
+        Ok(Self { launcher, uiaccess, cert })
+    }
+
+    /// Its install files and the Shell value that starts it. Winlogon starts
+    /// the shell at each logon, so newer exes take effect; Program Files is
+    /// also one of the locations uiAccess requires.
+    fn install(self, files: &mut Vec<InstallFile>) -> (String, ShellCert) {
+        let launcher = format!("{SHELL_DIR}/{BUILTIN_SHELL}");
+        files.push(InstallFile::new(&launcher, self.launcher, ReadAt::EveryLogon));
+        // An install from before the uiAccess binary existed has the launcher
+        // (then the whole shell) but not this; `update` can add it because
+        // nothing needs registering, only the descriptor setup gives files
+        // here, which it copies from the launcher's.
+        let mut uiaccess = InstallFile::new(format!("{SHELL_DIR}/{BUILTIN_SHELL_UIACCESS}"), self.uiaccess, ReadAt::EveryLogon);
+        uiaccess.if_missing = IfMissing::CreateLike(launcher);
+        files.push(uiaccess);
+        (program_files(BUILTIN_SHELL), self.cert)
     }
 }
 
@@ -86,21 +144,24 @@ pub fn render(config: &Config, variant: &Variant, cache: &Cache, work: &Path, di
         fonts.push(name);
     }
 
-    // Winlogon starts the shell at each logon, so a newer exe takes effect.
-    let mut install_shell = |name: String, path: PathBuf| {
-        files.push(InstallFile::new(format!("Program Files/defenestrate/{name}"), path, ReadAt::EveryLogon));
-        program_files(&name)
-    };
-    let shell_command = match &config.shell {
-        Shell::Command(c) => c.clone(),
-        Shell::Builtin => install_shell(BUILTIN_SHELL.to_owned(), builtin_shell(work)?),
-        Shell::Exe(source) => install_shell(source.file_name()?, cache.materialize(source, work)?),
+    let (shell_command, shell_cert) = match &config.shell {
+        Shell::Command(c) => (c.clone(), None),
+        Shell::Builtin => {
+            let (command, cert) = builtin_shell(work)?.install(&mut files);
+            (command, Some(cert))
+        }
+        // Someone else's shell, or ours as a single exe: no uiAccess.
+        Shell::Exe(source) => {
+            let name = source.file_name()?;
+            files.push(InstallFile::new(format!("{SHELL_DIR}/{name}"), cache.materialize(source, work)?, ReadAt::EveryLogon));
+            (program_files(&name), None)
+        }
     };
     // Read at each start of the shell, like the exe. Only ours reads it, but
     // an `exe` shell is usually ours, built some other way.
     if !matches!(config.shell, Shell::Command(_)) {
         std::fs::write(dir.join(SHELL_SETTINGS), config.cosmic.render())?;
-        files.push(InstallFile::new(format!("Program Files/defenestrate/{SHELL_SETTINGS}"), dir.join(SHELL_SETTINGS), ReadAt::EveryLogon));
+        files.push(InstallFile::new(format!("{SHELL_DIR}/{SHELL_SETTINGS}"), dir.join(SHELL_SETTINGS), ReadAt::EveryLogon));
     }
 
     let mut software = config.registry.software.clone();
@@ -113,6 +174,9 @@ pub fn render(config: &Config, variant: &Variant, cache: &Cache, work: &Path, di
     for name in &fonts {
         let label = name.strip_suffix(".ttf").or_else(|| name.strip_suffix(".otf")).unwrap_or(name);
         set(&mut software, "Microsoft\\Windows NT\\CurrentVersion\\Fonts", &format!("{label} (TrueType)"), RegValue::Sz(name.clone()));
+    }
+    if let Some(cert) = &shell_cert {
+        set(&mut software, &cert.root_key(), "Blob", RegValue::Binary(cert.blob()));
     }
     let mut shell = Hive::new();
     set(&mut shell, "Microsoft\\Windows NT\\CurrentVersion\\Winlogon", "Shell", RegValue::Sz(shell_command));
@@ -147,7 +211,7 @@ pub fn render(config: &Config, variant: &Variant, cache: &Cache, work: &Path, di
     files.extend(crate::reboot_to_linux::render(config, dir)?);
     std::fs::write(dir.join("autounattend.xml"), unattend::render(config, variant)?)?;
 
-    Ok(Rendered { dir: dir.to_path_buf(), files })
+    Ok(Rendered { dir: dir.to_path_buf(), files, shell_cert })
 }
 
 /// cmd.exe misparses scripts with bare LF line endings.
@@ -164,21 +228,22 @@ fn set(hive: &mut Hive, key: &str, name: &str, value: RegValue) {
     hive.entry(key.to_owned()).or_default().insert(name.to_owned(), value);
 }
 
-/// The shell exe compiled into this binary (see build.rs).
-fn builtin_shell(work: &Path) -> Result<PathBuf> {
+/// The shell compiled into this binary (see build.rs).
+fn builtin_shell(work: &Path) -> Result<BuiltinShell> {
     #[cfg(dfnstrate_builtin_shell)]
     {
-        static EXE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/defenestrate-shell.exe"));
-        let path = work.join(BUILTIN_SHELL);
-        std::fs::write(&path, EXE)?;
-        Ok(path)
+        static LAUNCHER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/defenestrate-shell.exe"));
+        static UIACCESS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/defenestrate-shell-uiaccess.exe"));
+        let (launcher, uiaccess) = (work.join(BUILTIN_SHELL), work.join(BUILTIN_SHELL_UIACCESS));
+        std::fs::write(&launcher, LAUNCHER)?;
+        std::fs::write(&uiaccess, UIACCESS)?;
+        BuiltinShell::new(launcher, uiaccess).context("the shell compiled into dfnstrate")
     }
     #[cfg(not(dfnstrate_builtin_shell))]
     {
-        use anyhow::Context;
         let _ = work;
         Err(anyhow::anyhow!(
-            "this dfnstrate was built without the shell (set DEFENESTRATE_SHELL_EXE when building it, or use the Nix package). \
+            "this dfnstrate was built without the shell (set DEFENESTRATE_SHELL_DIR when building it, or use the Nix package). \
              Point the config at one instead: shell = {{ exe = {{ path = \"defenestrate-shell.exe\" }} }}"
         ))
         .context("shell = \"builtin\"")
@@ -265,6 +330,42 @@ mod tests {
         // The shell parses the same file in its tests (shell/src/settings.rs).
         let settings = std::fs::read_to_string(d.join("out").join(SHELL_SETTINGS)).unwrap();
         assert_eq!(settings, include_str!("../../configs/shell-settings.json"), "configs/shell-settings.json is what the defaults render to");
+        // Only the builtin shell's uiAccess binary gets a certificate trusted.
+        assert!(r.shell_cert.is_none());
+        let software = std::fs::read_to_string(d.join("out/reg/ascii/software.reg")).unwrap();
+        assert!(!software.contains("SystemCertificates"), "{software}");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// The launcher and the signed uiAccess binary go in as a pair, and
+    /// `update` may add the latter to an install that only has the former.
+    #[test]
+    fn builtin_shell_pair() {
+        let d = std::env::temp_dir().join(format!("dfnstrate-test-builtin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let (launcher, uiaccess, unsigned) = (d.join("l.exe"), d.join("u.exe"), d.join("unsigned.exe"));
+        std::fs::write(&launcher, "launcher").unwrap();
+        std::fs::write(&uiaccess, include_bytes!("../tests/fixtures/signed-headers.exe")).unwrap();
+        std::fs::write(&unsigned, b"MZ not even a PE").unwrap();
+
+        let err = BuiltinShell::new(launcher.clone(), launcher.clone()).err().expect("took an unsigned uiAccess binary");
+        assert!(format!("{err:#}").contains("not a PE file"), "{err:#}");
+        assert!(BuiltinShell::new(launcher.clone(), unsigned).is_err());
+
+        let mut files = Vec::new();
+        let (command, cert) = BuiltinShell::new(launcher.clone(), uiaccess.clone()).unwrap().install(&mut files);
+        assert_eq!(command, r#""C:\Program Files\defenestrate\defenestrate-shell.exe""#);
+        assert_eq!(cert.thumbprint(), include_str!("../tests/fixtures/signed-headers.thumbprint").trim());
+        let got: Vec<_> = files.iter().map(|f| (f.dest.as_str(), f.source.as_path(), f.read, &f.if_missing)).collect();
+        let like = IfMissing::CreateLike("Program Files/defenestrate/defenestrate-shell.exe".into());
+        assert_eq!(
+            got,
+            [
+                ("Program Files/defenestrate/defenestrate-shell.exe", launcher.as_path(), ReadAt::EveryLogon, &IfMissing::Reflash),
+                ("Program Files/defenestrate/defenestrate-shell-uiaccess.exe", uiaccess.as_path(), ReadAt::EveryLogon, &like),
+            ]
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

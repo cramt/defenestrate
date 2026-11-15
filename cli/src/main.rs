@@ -3,6 +3,7 @@
 
 mod apps;
 mod cache;
+mod cert;
 mod config;
 mod cosmic;
 mod disk;

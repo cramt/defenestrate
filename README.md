@@ -33,10 +33,10 @@ values per hive. Every config is layered over the distro's own defaults,
   - Fully hands-off offline (`restrict=on`): a headless run went from the ISO to our shell in ~47 minutes with no input. Online, OOBE's zero-day-patch check fails in the VM and waits for a "Skip" click. On real hardware: install offline, or hit "Try again".
 - [x] Rust shell, cross-compiled in the flake (`nix build .#shell`): a tiling window manager with COSMIC's tiling tree, keybindings and Super+drag, gapless and without title bars on tiles, a Super-tap launcher over the Start Menu's shortcuts, and COSMIC's Alt+Tab window switcher. Seen in the VM: tiling, focusing, moving into thirds by keyboard and by Super+drag (with the drop preview), Super+right-drag resizing, floating and re-tiling (title bar back and gone again), a killed and restarted shell picking its tiles back up, and launching; resize mode, workspaces and maximize are unit-tested only so far
   - COSMIC's window animations (`shell/src/motion.rs`): tiling changes ease over 200 ms and queue behind a running one, new tiles fade in, ones leaving fade out, maximize grows out of the tile, unmaximize shrinks a fading copy over 320 ms, workspaces slide vertically. Drawn by a click-through overlay of DWM thumbnails while the real windows already sit in place; nothing when "Animation effects" is off or a fullscreen app has focus, and no timer or thread awake when nothing moves. Seen in the VM: open, swap, maximize, unmaximize, send to another workspace and both directions of a workspace switch, frame by frame, and 0–47 ms of shell CPU over 1–2 idle minutes. The VM composites in software at about 5–8 frames per animation, so smoothness on real hardware isn't seen yet; the fullscreen and "Animation effects" checks are untested
-  - Window switcher (Alt+Tab, Super+Tab), as cosmic-launcher's alt-tab view: every window on every workspace, minimized ones included, most recently focused first; letting go of the modifiers goes to the selection's workspace, restores and focuses it. Without explorer, Windows' own Alt+Tab still switches but shows nothing and can't reach other workspaces, so the shell takes the keys. Seen in the VM: switching among three windows (five times running), Shift going backwards, Escape cancelling, and bringing back a window minimized on another workspace, onto its workspace and back into the tiling. Windows the shell doesn't tile (games in exclusive fullscreen, elevated apps) are listed too, untested. A restored tile splits the focused window instead of going back to its old spot, as COSMIC's would
+  - Window switcher (Alt+Tab, Super+Tab), as cosmic-launcher's alt-tab view: every window on every workspace, minimized ones included, most recently focused first; letting go of the modifiers goes to the selection's workspace, restores and focuses it. Without explorer, Windows' own Alt+Tab still switches but shows nothing and can't reach other workspaces, so the shell takes the keys. Seen in the VM: switching among three windows (five times running), Shift going backwards, Escape cancelling, and bringing back a window minimized on another workspace, onto its workspace and back into the tiling. Windows the shell doesn't tile (games in exclusive fullscreen, and elevated apps when it runs without uiAccess) are listed too, untested. A restored tile splits the focused window instead of going back to its old spot, as COSMIC's would
   - Multiple monitors, as COSMIC's default "workspaces per display": each monitor has its own nine workspaces and switches them by itself; new windows, Super+1–9, the launcher and the switcher go by the monitor the pointer is on, moving windows by the one with focus. Focus past the left or right edge of a monitor's tiling goes to the next monitor (the pointer goes along), and a window moved past it goes there too, taking the half of the layout it came in on; past the top or bottom, the previous or next workspace. A tile Super+dragged onto another monitor drops into that one's tiling. An unplugged monitor's workspaces go to the first monitor, into free slots, and back to their own slots when it's plugged in again. Overlays and Super+drag sizes follow each monitor's DPI. Seen in the VM with two monitors (std VGA plus virtio-gpu with virtio-win's viogpudo, since Windows' inbox driver drives only one): tiling on each in its own area, Super+Alt+Right moving the pointer and new windows to the second, focus coming back with Super+Left, Super+1/2 switching one monitor's workspace with the other left alone, Super+Shift+Right carrying a window across onto the near half and Super+Shift+Alt+Left bringing it back, the launcher opening on the pointer's monitor, and a monitor switched off and on again (`DisplaySwitch /internal`, `/extend`), its workspace landing in a free slot on the other and going home after. Unit-tested only: Super+drag between monitors, mixed DPI (the VM's two are the same), floating windows keeping their place across, and unplugging real hardware
   - COSMIC's settings from the config, under cosmic-comp's names ([Shell settings](#shell-settings)): gaps, the active hint (a 1 px accent border just outside the focused window, a click-through window of the shell's own, moved only when focus or a tile changes), focus following the pointer after a delay, the pointer following keyboard focus, windows on other workspaces raising themselves left there, autotile, and custom shortcuts over COSMIC's defaults. Seen in the VM: the hint around the focused tile in the 1 px edge gap and on the seam between two tiles, which have no gap between them; Super+T and Super+D running the terminal and the launcher; Super+Y and Super+F doing nothing in the shell (the letter reaches the focused app, as any unbound Super+letter does without explorer); focus following the pointer, with a pass over a tile shorter than the delay changing nothing (the hint moved 260–300 ms after the pointer against 100–140 ms after a key, in a loaded VM drawing 5–8 frames a second); the pointer jumping to a new window and to one focused with Super+L. Windows' own Win+V (clipboard history) and Win+. (emoji panel) don't open without explorer. The activation policy and media keys are unit-tested or untested only,; gaps and the hint are sized by the primary monitor's DPI on every monitor
-  - A minimized window leaves the tiling but stays on its workspace; where no tile covers it, Windows still draws its stub of title bar in the bottom-left corner. Elevated windows and dialogs float, and while an elevated window has focus the shell's keys don't work (Windows doesn't give a non-elevated keyboard hook their input). A crashing shell leaves windows on other workspaces hidden
+  - A minimized window leaves the tiling but stays on its workspace; where no tile covers it, Windows still draws its stub of title bar in the bottom-left corner. Dialogs float. Elevated windows tile and take the shell's keys and Super+drag like any other, through uiAccess ([Elevated windows](#elevated-windows)); if Windows won't grant it, they float and the keys don't reach them, as before. A crashing shell leaves windows on other workspaces hidden
 - [x] Iosevka Nerd Font Mono installed system-wide (`fonts`, fetched from the Nerd Fonts release) and used by the shell and every console. Windows 11 hands consoles to Windows Terminal once it's registered, which ignores console fonts, so the default terminal is pinned to conhost
 - [x] libcosmic builds for Windows from Linux (`nix build .#cosmic-bar-prototype`); not run on Windows yet
 - [ ] Shell: system tray, notifications, COSMIC's stacking and swap mode
@@ -113,10 +113,16 @@ Windows binary, so it needs the MinGW cross toolchain once:
 ```sh
 # Arch / CachyOS: sudo pacman -S rustup mingw-w64-gcc
 rustup target add x86_64-pc-windows-gnu
+# openssl, and osslsigncode (Arch: from the AUR)
 cargo build --release --manifest-path shell/Cargo.toml --target x86_64-pc-windows-gnu
-DEFENESTRATE_SHELL_EXE=$PWD/shell/target/x86_64-pc-windows-gnu/release/defenestrate-shell.exe \
-  cargo install --path cli
+shell/sign.sh shell/target/x86_64-pc-windows-gnu/release shell-signed
+DEFENESTRATE_SHELL_DIR=$PWD/shell-signed cargo install --path cli
 ```
+
+The shell crate builds two binaries, a launcher and the uiAccess shell it
+starts. `sign.sh` copies both to `shell-signed/` and signs the second with a
+certificate made just for that build, then deletes the private key; see
+[Elevated windows](#elevated-windows).
 
 The programs it drives, by command. Each command checks for its own before
 starting and names what's missing:
@@ -127,7 +133,7 @@ starting and names what's missing:
 | `build iso` | `7zip wimlib hivex libisoburn` |
 | `build image`, `vm` | the above, `qemu-desktop swtpm edk2-ovmf mtools sleuthkit util-linux`, and access to `/dev/kvm` (`build image` alone runs headless, so `qemu-base` is enough) |
 | `flash` | `util-linux ntfs-3g efibootmgr mtools sudo` |
-| `update` | `util-linux ntfs-3g sudo` |
+| `update` | `util-linux ntfs-3g hivex sudo` |
 | `reboot` | `efibootmgr systemd sudo` |
 
 Then:
@@ -325,6 +331,11 @@ In place means truncated and rewritten, not replaced: the file stays the same
 NTFS file with its own security descriptor (see the ACL note at the end).
 Changes take effect at the next logon.
 
+A new shell build comes with a new signing certificate, so `update` also
+edits the SOFTWARE hive (with hivex, in place like the files): the new
+certificate goes into the machine's Root store before the new shell is
+written, and the previous build's comes out after.
+
 ### Switching between Linux and Windows
 
 `flash` leaves the firmware's boot order on Linux, so a plain reboot from
@@ -382,9 +393,10 @@ profile, and installs each ID with `winget install --exact --silent`. winget
 needs the network and its own per-user registration, so it retries for up to
 an hour. Each ID that's in is recorded in
 `%LOCALAPPDATA%\defenestrate\apps-done.txt`, a failed run tries again at the
-next logon, and once everything is in the task deletes itself. While an
-installer's window has focus the shell's keys don't work, since an elevated
-window starves its keyboard hook. Log: `%LOCALAPPDATA%\defenestrate\apps.log`.
+next logon, and once everything is in the task deletes itself. The
+installers' elevated windows tile and the shell's keys keep working while
+they have focus (see [Elevated windows](#elevated-windows)). Log:
+`%LOCALAPPDATA%\defenestrate\apps.log`.
 
 #### GPU drivers
 
@@ -485,8 +497,72 @@ COSMIC's (`cosmic.theme.gaps`), and the focused window gets COSMIC's active
 hint, a border in the accent colour (`cosmic.theme.active_hint`). Windows lose their title bar while they're
 tiled, getting it back when they float or the shell exits. Apps that draw
 their own title bar (Firefox, Chromium, Electron apps like Discord) keep
-it. Super+drag needs the mouse hook, so like the keys it does nothing while
-an elevated window has focus.
+it. Keys and Super+drag work on elevated windows too, as long as the shell
+has uiAccess (next section).
+
+### Elevated windows
+
+Windows keeps the user's ordinary processes away from elevated windows
+(installers, Task Manager, an admin terminal): UIPI drops their input
+before a non-elevated keyboard or mouse hook sees it, and refuses moving
+them. The shell gets past that the way accessibility tools do, with
+[uiAccess](https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/user-account-control-only-elevate-uiaccess-applications-that-are-installed-in-secure-locations),
+without being elevated itself:
+
+- The shell crate builds the same code twice. `defenestrate-shell-uiaccess.exe`
+  has a manifest asking for uiAccess at the user's own level (`asInvoker`);
+  `defenestrate-shell.exe` has none and is what Winlogon starts. Windows
+  only grants uiAccess through ShellExecute, which has the AppInfo service
+  check the binary. A plain CreateProcess, which is all userinit does, fails
+  with "The requested operation requires elevation", so with the uiAccess
+  binary as the Shell value a logon gets no shell at all. The launcher
+  ShellExecutes it and exits. When that fails, the launcher is the shell
+  itself, without uiAccess, and `shell.log` says why. The shell then works
+  as it did before uiAccess: elevated windows float, and the shell's keys
+  don't reach an elevated window that has focus.
+- Windows gives uiAccess only to a binary signed by a certificate in the
+  machine's Trusted Root store, installed under Program Files. Each build of
+  the shell makes its own self-signed certificate (`CN=defenestrate shell`,
+  not a CA, code signing only), signs the uiAccess binary with it and deletes
+  the private key (`shell/sign.sh`; under Nix all inside one derivation, so
+  the key never reaches the store). Nothing exists afterwards that could
+  sign anything else this Windows trusts. dfnstrate reads the certificate
+  back out of the signature and puts it into Root: setup imports it with
+  the rest of `software.reg`, and `update` adds a new build's certificate
+  and removes the previous build's (see [Updating an install](#updating-an-install)).
+- On an install from before this, `update` also creates the uiAccess
+  binary next to the launcher, with the launcher's NTFS security descriptor.
+- UAC's prompts stay on the secure desktop, out of the shell's reach: with
+  that off, a uiAccess process could click "Yes" on them. The defaults pin
+  `PromptOnSecureDesktop`, `EnableUIADesktopToggle` and
+  `EnableSecureUIAPaths` to Windows' own values.
+- Programs the shell starts don't inherit uiAccess. The user's ordinary
+  processes can't end or inspect the uiAccess shell (`taskkill` gets
+  "Access is denied").
+
+Seen in the VM (the shell signed by `nix build .#shell` and installed onto a
+`build image` output by `dfnstrate update`):
+
+- A real logon: the launcher handed over and the uiAccess binary logged
+  `TokenUIAccess=1`. A UAC-elevated PowerShell (High Mandatory Level)
+  tiled, and Super+drag moved it to the other side of the screen with the
+  drop preview. In an earlier run (the uiAccess binary started by hand),
+  Super+Enter with an elevated window focused opened a terminal tiled
+  beside it, and programs the shell started had `TokenUIAccess=0`.
+- With the certificate deleted from Root, the next logon's hand-over failed
+  with "A referral was returned from the server", the log said so, and the
+  launcher ran the shell itself without uiAccess.
+- `update` added a new build's certificate and removed the old one, twice.
+  The first run also created the uiAccess binary on an install that only
+  had the shell, with the launcher's security descriptor. SOFTWARE kept its
+  inode and its own descriptor. A self-signed `CA:FALSE` leaf is enough:
+  `Get-AuthenticodeSignature` calls the signature Valid.
+- Winlogon doesn't restart a Shell process that dies (killed, exit code 1),
+  so the launcher exiting after the hand-over loses nothing.
+
+Not seen yet: a fresh `build image` (where setup imports the certificate
+from `software.reg` rather than `update` adding it), real hardware, and
+the AUR package's signing step.
 
 ### Shell settings
 

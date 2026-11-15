@@ -25,7 +25,8 @@ let
     inherit cargoArtifacts;
     # Tests run as their own check (passthru.tests), not on every build.
     doCheck = false;
-    DEFENESTRATE_SHELL_EXE = "${shell}/bin/${shell.meta.mainProgram}";
+    # The launcher and the signed uiAccess binary, side by side (nix/sign.nix).
+    DEFENESTRATE_SHELL_DIR = "${shell}/bin";
   });
 
   runtime = [ _7zz wimlib hivex xorriso qemu_kvm swtpm util-linux mtools sleuthkit ntfs3g efibootmgr systemd ];

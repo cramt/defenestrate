@@ -20,7 +20,7 @@
       inherit (pkgs) lib;
 
       windowsExe = src: mainProgram: import ./nix/shell.nix { inherit pkgs crane src mainProgram; };
-      shell = windowsExe ./shell "defenestrate-shell.exe";
+      shell = pkgs.callPackage ./nix/sign.nix { unsigned = windowsExe ./shell "defenestrate-shell.exe"; };
 
       # The Linux-side tool everything goes through, Nix builds included.
       dfnstrate = pkgs.callPackage ./nix/dfnstrate.nix { inherit crane shell; };
@@ -64,7 +64,7 @@
       devShells.${system}.default = pkgs.mkShell (dfnstrate.passthru.env // {
         inputsFrom = [ dfnstrate.passthru.unwrapped ];
         packages = [ pkgs.clippy pkgs.rustfmt ] ++ dfnstrate.passthru.runtime;
-        DEFENESTRATE_SHELL_EXE = "${shell}/bin/defenestrate-shell.exe";
+        DEFENESTRATE_SHELL_DIR = "${shell}/bin";
       });
     };
 }
