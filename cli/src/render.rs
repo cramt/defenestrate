@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::cache::Cache;
 use crate::config::{Config, Hive, RegValue, Shell};
@@ -165,6 +165,7 @@ fn builtin_shell(work: &Path) -> Result<PathBuf> {
     }
     #[cfg(not(dfnstrate_builtin_shell))]
     {
+        use anyhow::Context;
         let _ = work;
         Err(anyhow::anyhow!(
             "this dfnstrate was built without the shell (set DEFENESTRATE_SHELL_EXE when building it, or use the Nix package). \
