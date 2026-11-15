@@ -7,6 +7,7 @@
 #![cfg_attr(not(windows), allow(dead_code))]
 
 mod cycle;
+mod follow;
 mod fuzzy;
 mod motion;
 mod settings;
@@ -274,6 +275,7 @@ mod windows_main {
                         }
                         Action::Wm(c, hold) => desktop::command(c, hold),
                         Action::Drag(d) => desktop::drag(d),
+                        Action::Pointer(p) => desktop::pointer_moved(p),
                         Action::Switcher(s) => switcher::on(s),
                     }
                 }

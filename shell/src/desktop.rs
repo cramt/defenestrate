@@ -24,7 +24,7 @@ use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION};
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
-use windows::Win32::UI::Input::KeyboardAndMouse::{INPUT, INPUT_MOUSE, SendInput};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, INPUT, INPUT_MOUSE, SendInput, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON};
 use windows::Win32::UI::Shell::{QUNS_RUNNING_D3D_FULL_SCREEN, SHQueryUserNotificationState};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, EDD_GET_DEVICE_INTERFACE_NAME, EVENT_OBJECT_CLOAKED, GetCursorPos, MONITORINFOF_PRIMARY,
@@ -46,6 +46,7 @@ use windows::core::{BOOL, PCWSTR, w};
 
 use crate::keys::{Button, Drag};
 use crate::motion::{Animator, Pace, Scene};
+use crate::follow::{Follow, Timer};
 use crate::hint;
 use crate::overlay::{self, Look};
 use crate::settings;
@@ -60,6 +61,9 @@ pub const WM_WINEVENT: u32 = WM_APP + 1;
 /// The shell's window gets this WM_TIMER id when the windows whose title
 /// bars came or went should be placed again (see `sync_captions`).
 pub const REPLACE_TIMER: usize = 0xdf1;
+/// The shell's window gets this WM_TIMER id when focus_follows_cursor's
+/// delay runs out.
+pub const FOLLOW_TIMER: usize = 0xdf2;
 pub use crate::overlay::WM_FRAME;
 
 /// How long, once nothing moves, the overlay waits for the windows that
@@ -124,6 +128,7 @@ thread_local! {
     static STRIPPED: RefCell<Vec<HWND>> = const { RefCell::new(Vec::new()) };
     /// A window is being moved or sized by its own title bar or borders.
     static MOVING: Cell<bool> = const { Cell::new(false) };
+    static FOLLOW: RefCell<Follow<HWND>> = RefCell::new(Follow::new());
     static MONITORS: RefCell<Vec<Monitor>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -281,7 +286,13 @@ pub fn start(events_to: HWND) {
     let dpi = found.first().map_or(96, |m| m.dpi);
     let config = settings::get();
     let gaps = Gaps { outer: scaled_at(config.gaps.outer.into(), dpi), inner: scaled_at(config.gaps.inner.into(), dpi) };
-    let tiling = Tiling { gaps, autotile: config.autotile, behavior: config.autotile_behavior };
+    let tiling = Tiling {
+        gaps,
+        autotile: config.autotile,
+        behavior: config.autotile_behavior,
+        cursor_follows_focus: config.cursor_follows_focus,
+        activation_policy: config.activation_policy,
+    };
     WM.set(Some(Wm::with_tiling(screens(&found), tiling)));
     if let Some(h) = config.active_hint
         && let Err(e) = hint::create(h, scaled_at(h.thickness.into(), dpi))
@@ -367,8 +378,11 @@ pub fn on_event(event: u32, w: HWND) {
         EVENT_OBJECT_SHOW | EVENT_OBJECT_UNCLOAKED | EVENT_SYSTEM_MINIMIZEEND => {
             if wm.is_minimized(w) {
                 on_screen(w).then(|| wm.restored(w))
+            } else if wm.manages(w) {
+                // Ours to show is shown already; this one showed itself.
+                if on_screen(w) { wm.raised(w) } else { None }
             } else {
-                (!wm.manages(w) && manageable(w) && on_screen(w)).then(|| wm.add(w))
+                (manageable(w) && on_screen(w)).then(|| wm.add_new(w))
             }
         }
         // Managed windows on other workspaces are hidden by us; only a
@@ -383,10 +397,10 @@ pub fn on_event(event: u32, w: HWND) {
                 (wm.is_shown(w) && unsafe { IsIconic(w) }.as_bool()).then(|| wm.minimize(w))
             }
         }
-        EVENT_SYSTEM_FOREGROUND => {
+        EVENT_SYSTEM_FOREGROUND => wm.raised(w).or_else(|| {
             wm.focused(w);
             None
-        }
+        }),
         _ => None,
     });
     // A game going fullscreen mid-animation gets the screen to itself at once.
@@ -489,7 +503,57 @@ pub fn release() {
     }
 }
 
+/// The managed window on screen under `p`, if any.
+fn window_under(p: Point) -> Option<HWND> {
+    let w = unsafe { GetAncestor(WindowFromPoint(POINT { x: p.x, y: p.y }), GA_ROOT) };
+    WM.with_borrow(|wm| wm.as_ref().is_some_and(|wm| wm.is_shown(w))).then_some(w)
+}
+
+/// focus_follows_cursor: the pointer moved (keys.rs only says so while
+/// it's on). As COSMIC skips it while the pointer is grabbed, nothing
+/// happens during a drag or with a button held.
+pub fn pointer_moved(p: Point) {
+    let Some(ffc) = settings::get().focus_follows_cursor else { return };
+    let held = [VK_LBUTTON, VK_RBUTTON, VK_MBUTTON].iter().any(|&b| unsafe { GetAsyncKeyState(b.0.into()) } < 0);
+    if DRAGGING.get().is_some() || MOVING.get() || held {
+        return;
+    }
+    let under = window_under(p);
+    let timer = FOLLOW.with_borrow_mut(|f| f.moved(under));
+    unsafe {
+        match timer {
+            Timer::Restart => {
+                SetTimer(Some(EVENTS_TO.get()), FOLLOW_TIMER, ffc.delay_ms.try_into().unwrap_or(u32::MAX), None);
+            }
+            Timer::Cancel => {
+                let _ = KillTimer(Some(EVENTS_TO.get()), FOLLOW_TIMER);
+            }
+            Timer::Leave => {}
+        }
+    }
+}
+
+/// focus_follows_cursor's delay ran out. The launcher and the switcher keep
+/// the keyboard while they're up, as COSMIC's keyboard-exclusive layers do.
+fn follow_focus() {
+    let Some(w) = FOLLOW.with_borrow_mut(Follow::fire) else { return };
+    let foreground = unsafe { GetForegroundWindow() };
+    let mut pid = 0;
+    unsafe { GetWindowThreadProcessId(foreground, Some(&mut pid)) };
+    if foreground == w || pid == unsafe { GetCurrentProcessId() } {
+        return;
+    }
+    update(|wm| wm.is_shown(w).then(|| Effects { focus: Some(w), ..Effects::default() }));
+}
+
 pub fn on_timer(id: usize) {
+    if id == FOLLOW_TIMER {
+        unsafe {
+            let _ = KillTimer(Some(EVENTS_TO.get()), id);
+        }
+        follow_focus();
+        return;
+    }
     if id == REPLACE_TIMER {
         unsafe {
             let _ = KillTimer(Some(EVENTS_TO.get()), id);
@@ -616,8 +680,15 @@ fn apply(fx: Effects<HWND>) {
         if crossed {
             SetTimer(Some(EVENTS_TO.get()), REPLACE_TIMER, 250, None);
         }
-        if let Some(p) = fx.pointer {
+        let follow = fx.follow.and_then(|w| {
+            let tile = fx.place.iter().find(|&&(x, _)| x == w).map(|&(_, r)| r);
+            Some(tile.or_else(|| visible_frame(w).map(|(_, r)| r))?.centre())
+        });
+        if let Some(p) = fx.pointer.or(follow) {
             let _ = SetCursorPos(p.x, p.y);
+            // Not the user pointing at something: focus mustn't follow it.
+            let under = window_under(p);
+            FOLLOW.with_borrow_mut(|f| f.warped(under));
         }
         if animating {
             // Kept on screen for the overlay to draw, but under everything,

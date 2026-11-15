@@ -29,7 +29,7 @@
 //! spot in the tree; here it splits the focused window like a new one.
 
 use crate::motion::{Pace, View};
-use crate::settings::TileBehavior;
+use crate::settings::{ActivationPolicy, TileBehavior};
 use crate::tree::{Axis, Direction, Gaps, Point, Rect, Tree};
 
 pub const WORKSPACES: usize = 9;
@@ -131,6 +131,9 @@ pub struct Effects<W> {
     pub carry: Vec<(W, Rect, Rect)>,
     /// Where the pointer jumps to, as COSMIC's output moves move it.
     pub pointer: Option<Point>,
+    /// cursor_follows_focus: the pointer jumps to the middle of this
+    /// window, wherever it ends up (a floating one's place isn't known here).
+    pub follow: Option<W>,
 }
 
 impl<W> Default for Effects<W> {
@@ -146,6 +149,7 @@ impl<W> Default for Effects<W> {
             restore: Vec::new(),
             carry: Vec::new(),
             pointer: None,
+            follow: None,
         }
     }
 }
@@ -387,6 +391,10 @@ pub struct Wm<W> {
     recent: Vec<W>,
     peek: Option<Peek>,
     tiling: Tiling,
+    /// Windows that raised themselves on a workspace not shown and were
+    /// left there (`activation_policy`), until they get focus: COSMIC's
+    /// urgent workspace state. Nothing shows it yet.
+    urgent: Vec<W>,
 }
 
 /// COSMIC's tiling settings.
@@ -397,22 +405,31 @@ pub struct Tiling {
     /// ToggleTiling flips everywhere under `TileBehavior::Global`.
     pub autotile: bool,
     pub behavior: TileBehavior,
+    pub cursor_follows_focus: bool,
+    pub activation_policy: ActivationPolicy,
 }
 
 impl Default for Tiling {
     fn default() -> Self {
-        Tiling { gaps: Gaps::default(), autotile: true, behavior: TileBehavior::PerWorkspace }
+        Tiling {
+            gaps: Gaps::default(),
+            autotile: true,
+            behavior: TileBehavior::PerWorkspace,
+            cursor_follows_focus: false,
+            activation_policy: ActivationPolicy::Focus,
+        }
     }
 }
 
 impl<W: Copy + Eq> Wm<W> {
+    #[cfg(test)]
     pub fn new(screens: Screens) -> Self {
         Self::with_tiling(screens, Tiling::default())
     }
 
     pub fn with_tiling(screens: Screens, tiling: Tiling) -> Self {
         let outputs = screens.0.into_iter().map(|(id, area)| Output::new(id, area, tiling.autotile)).collect();
-        Wm { outputs, active: 0, keyboard: None, recent: Vec::new(), peek: None, tiling }
+        Wm { outputs, active: 0, keyboard: None, recent: Vec::new(), peek: None, tiling, urgent: Vec::new() }
     }
 
     fn locate(&self, w: W) -> Option<(usize, usize)> {
@@ -662,6 +679,41 @@ impl<W: Copy + Eq> Wm<W> {
         self.effects(before, Effects { focus: Some(w), ..Effects::default() })
     }
 
+    /// A new window: COSMIC maps it with the pointer following, if
+    /// cursor_follows_focus is on.
+    pub fn add_new(&mut self, w: W) -> Effects<W> {
+        let fx = self.add(w);
+        let follow = (self.tiling.cursor_follows_focus && fx.focus == Some(w)).then_some(w);
+        Effects { follow, ..fx }
+    }
+
+    /// Managed `w`, on a workspace that isn't shown, showed itself or took
+    /// the foreground: what COSMIC does with an xdg-activation request,
+    /// by `activation_policy`. None if it's shown or not managed, where
+    /// there's nothing to decide. Windows doesn't say whether a window on
+    /// screen raised itself or was clicked, so the policy only governs
+    /// windows elsewhere.
+    pub fn raised(&mut self, w: W) -> Option<Effects<W>> {
+        if !self.manages(w) || self.is_shown(w) || self.is_minimized(w) {
+            return None;
+        }
+        Some(match self.tiling.activation_policy {
+            ActivationPolicy::Focus => self.activate(w),
+            ActivationPolicy::FocusIfActiveWorkspace | ActivationPolicy::Urgent => {
+                if !self.urgent.contains(&w) {
+                    self.urgent.push(w);
+                }
+                Effects { hide: vec![w], focus: self.focused_window(), pace: Pace::Instant, ..Effects::default() }
+            }
+        })
+    }
+
+    // For a workspace indicator, which the shell doesn't have yet.
+    #[cfg(test)]
+    pub fn is_urgent(&self, w: W) -> bool {
+        self.urgent.contains(&w)
+    }
+
     /// A window that was already minimized when the shell started.
     pub fn add_minimized(&mut self, w: W) {
         if self.manages(w) {
@@ -691,6 +743,7 @@ impl<W: Copy + Eq> Wm<W> {
     /// raising itself). It needn't be managed: the switcher lists dialogs
     /// and full-screen games too, as COSMIC lists every toplevel.
     pub fn focused(&mut self, w: W) {
+        self.urgent.retain(|&x| x != w);
         self.touch(w);
         self.keyboard = Some(w);
         if let Some(o) = self.shown_at(w) {
@@ -994,7 +1047,29 @@ impl<W: Copy + Eq> Wm<W> {
         }
     }
 
+    /// Runs `c`, and with cursor_follows_focus on, has the pointer follow
+    /// where COSMIC's would (`set_focus` with `update_cursor`): to a window
+    /// the focus moved to within the tiling, and to a window moved to
+    /// another workspace or monitor. Not on a workspace switch, a move within
+    /// the tiling, or where the command moves the pointer itself.
     pub fn command(&mut self, c: Command, hold: Hold) -> Effects<W> {
+        let focused = self.keyboard;
+        let was_at = focused.and_then(|w| self.locate(w));
+        let fx = self.run(c, hold);
+        if !self.tiling.cursor_follows_focus || fx.pointer.is_some() {
+            return fx;
+        }
+        let now = self.keyboard;
+        let follow = match c {
+            Command::Focus(_) => now.filter(|_| now != focused && fx.activated.is_empty()),
+            Command::Move(_) => now.filter(|&w| now == focused && self.locate(w) != was_at),
+            Command::MoveTo(_) | Command::MoveStep(_) | Command::MoveToOutput(_) => now.filter(|_| now == focused),
+            _ => None,
+        };
+        Effects { follow, ..fx }
+    }
+
+    fn run(&mut self, c: Command, hold: Hold) -> Effects<W> {
         let before = self.before();
         match c {
             Command::Focus(dir) => {
@@ -1938,5 +2013,45 @@ mod tests {
         assert_eq!(wm.hinted(), None);
         wm.focused(42);
         assert_eq!(wm.hinted(), None, "not managed");
+    }
+
+    #[test]
+    fn the_pointer_follows_focus_where_cosmics_would() {
+        let on = Tiling { cursor_follows_focus: true, ..Tiling::default() };
+        let mut wm = Wm::with_tiling(one(), on);
+        wm.add(1);
+        assert_eq!(wm.add_new(2).follow, Some(2), "a new window");
+        assert_eq!(cmd(&mut wm, Command::Focus(Direction::Left)).follow, Some(1));
+        assert_eq!(cmd(&mut wm, Command::Focus(Direction::Left)).follow, None, "nothing that way");
+        assert_eq!(cmd(&mut wm, Command::Move(Direction::Right)).follow, None, "a move within the tiling");
+        let fx = cmd(&mut wm, Command::MoveTo(ws(3)));
+        assert_eq!(fx.follow, Some(1), "taken to another workspace");
+        assert_eq!(cmd(&mut wm, Command::Switch(ws(1))).follow, None);
+        let mut off = wm_with(2);
+        assert_eq!(cmd(&mut off, Command::Focus(Direction::Left)).follow, None, "off by default");
+        assert_eq!(off.add_new(3).follow, None);
+    }
+
+    #[test]
+    fn windows_raising_themselves_elsewhere_follow_the_policy() {
+        let policy = |activation_policy| Tiling { activation_policy, ..Tiling::default() };
+        let mut wm = Wm::with_tiling(one(), policy(ActivationPolicy::FocusIfActiveWorkspace));
+        wm.add(1);
+        cmd(&mut wm, Command::Switch(ws(2)));
+        wm.add(2);
+        assert_eq!(wm.raised(2), None, "shown: nothing to decide");
+        let fx = wm.raised(1).unwrap();
+        assert_eq!((fx.hide, fx.focus, fx.activated.len()), (vec![1], Some(2), 0), "stays hidden, focus stays");
+        assert!(wm.is_urgent(1) && !wm.is_shown(1));
+        wm.activate(1);
+        wm.focused(1);
+        assert!(!wm.is_urgent(1), "focusing it clears it");
+        let mut wm = Wm::with_tiling(one(), policy(ActivationPolicy::Focus));
+        wm.add(1);
+        cmd(&mut wm, Command::Switch(ws(2)));
+        let fx = wm.raised(1).unwrap();
+        assert_eq!((fx.focus, fx.show), (Some(1), vec![1]), "COSMIC's stock policy: you go there");
+        assert!(wm.is_shown(1));
+        assert_eq!(wm.raised(42), None, "not managed");
     }
 }

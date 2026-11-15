@@ -75,6 +75,8 @@ pub enum Action {
     Spawn(&'static str),
     /// A media or volume key, sent on to whatever handles it.
     Media(VIRTUAL_KEY),
+    /// The pointer moved, outside a drag: for focus_follows_cursor.
+    Pointer(Point),
     Wm(Command, Hold),
     Drag(Drag),
     Switcher(Switch),
@@ -335,11 +337,12 @@ fn queue(action: Action) {
     let Ok(mut q) = QUEUE.lock() else { return };
     // Only where the pointer is now matters, and a mouse sends a lot of
     // moves; the GUI thread mustn't fall behind on them.
-    if let Action::Drag(Drag::Move(at)) = action
-        && let Some(Action::Drag(Drag::Move(last))) = q.back_mut()
-    {
-        *last = at;
-        return;
+    match (action, q.back_mut()) {
+        (Action::Drag(Drag::Move(at)), Some(Action::Drag(Drag::Move(last)))) | (Action::Pointer(at), Some(Action::Pointer(last))) => {
+            *last = at;
+            return;
+        }
+        _ => {}
     }
     // One WM_ACTION drains the whole queue, so one is enough until then.
     let idle = q.is_empty();
@@ -514,6 +517,9 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 return LRESULT(1);
             }
             (WM_MOUSEMOVE, Some(_)) => queue(Action::Drag(Drag::Move(at))),
+            // Only when something wants it: otherwise every move would wake
+            // the GUI thread.
+            (WM_MOUSEMOVE, None) if settings::get().focus_follows_cursor.is_some() => queue(Action::Pointer(at)),
             (WM_LBUTTONUP, Some(Button::Left)) | (WM_RBUTTONUP, Some(Button::Right)) => {
                 DRAGGING.set(None);
                 queue(Action::Drag(Drag::End(at)));
