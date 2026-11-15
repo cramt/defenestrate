@@ -135,7 +135,7 @@ pub fn render(config: &Config, v: &Variant) -> Result<String> {
         (format!("cmd.exe /c \"reg import {SETUP_DIR}\\shell.reg > {SETUP_DIR}\\firstlogon.log 2>&1\""), "Replace explorer.exe as the shell"),
         (format!("cmd.exe /c \"{SETUP_DIR}\\wsl\\wsl-install.cmd >> {SETUP_DIR}\\firstlogon.log 2>&1\""), "Install WSL"),
     ];
-    if !config.apps.is_empty() {
+    if crate::apps::needed(config) {
         commands.push((
             format!("cmd.exe /c \"schtasks /create /tn {} /xml {SETUP_DIR}\\apps\\task.xml >> {SETUP_DIR}\\firstlogon.log 2>&1\"", crate::apps::TASK),
             "Install the apps at the next logon",

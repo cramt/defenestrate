@@ -233,6 +233,10 @@ mod tests {
             (format!("{s}/appx-remove.txt"), ReadAt::Setup),
             (format!("{s}/specialize.cmd"), ReadAt::Setup),
             (format!("{s}/remove-appx.ps1"), ReadAt::Setup),
+            // No apps, but the defaults' Windows Update pass for GPU drivers.
+            (format!("{s}/apps/apps.json"), ReadAt::EveryLogon),
+            (format!("{s}/apps/install-apps.ps1"), ReadAt::EveryLogon),
+            (format!("{s}/apps/task.xml"), ReadAt::Setup),
         ];
         want.sort();
         assert_eq!(got, want.iter().map(|(p, r)| (p.as_str(), *r)).collect::<Vec<_>>());

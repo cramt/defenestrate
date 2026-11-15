@@ -50,6 +50,7 @@ pub struct Config {
     /// themselves anyway.
     #[serde(default)]
     pub apps: Vec<AppId>,
+    pub gpu: Gpu,
     #[serde(default)]
     pub appx: Appx,
     pub wsl: Wsl,
@@ -287,6 +288,55 @@ pub struct Appx {
     pub remove: Vec<AppxName>,
 }
 
+/// GPU drivers, installed by the apps task at the first real boot: the
+/// image is built on a VM's virtual GPU, so only then is the real one known.
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Gpu {
+    /// Have Windows Update install its display drivers at first boot rather
+    /// than whenever it gets round to it. The only route that installs an
+    /// actual driver without a click (see default.toml).
+    pub windows_update: bool,
+    /// winget IDs installed only when the machine has a GPU from that
+    /// vendor (all that apply, so a hybrid laptop gets both).
+    #[serde(default)]
+    pub nvidia: Vec<AppId>,
+    #[serde(default)]
+    pub amd: Vec<AppId>,
+    #[serde(default)]
+    pub intel: Vec<AppId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuVendor {
+    Nvidia,
+    Amd,
+    Intel,
+}
+
+impl GpuVendor {
+    /// The PCI vendor ID, as it appears in a device's `PCI\VEN_xxxx` ID.
+    /// 1002 is ATI's, which AMD's GPUs still carry (AMD's own, 1022, is on
+    /// its CPUs and chipsets).
+    pub fn pci_id(self) -> &'static str {
+        match self {
+            Self::Nvidia => "10DE",
+            Self::Amd => "1002",
+            Self::Intel => "8086",
+        }
+    }
+}
+
+impl Gpu {
+    pub fn installs_anything(&self) -> bool {
+        self.windows_update || self.vendor_apps().iter().any(|(_, ids)| !ids.is_empty())
+    }
+
+    pub fn vendor_apps(&self) -> [(GpuVendor, &[AppId]); 3] {
+        [(GpuVendor::Nvidia, &self.nvidia), (GpuVendor::Amd, &self.amd), (GpuVendor::Intel, &self.intel)]
+    }
+}
+
 /// key path (backslash separated, relative to the hive root) -> value name
 /// ("" is the default value) -> value.
 pub type Hive = BTreeMap<String, BTreeMap<String, RegValue>>;
@@ -321,8 +371,8 @@ pub enum RegValue {
 
 macro_rules! checked_string {
     ($name:ident, $what:literal, $check:expr) => {
-        #[derive(Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-        #[serde(try_from = "String")]
+        #[derive(Deserialize, serde::Serialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        #[serde(try_from = "String", into = "String")]
         pub struct $name(String);
 
         impl TryFrom<String> for $name {
@@ -337,6 +387,12 @@ macro_rules! checked_string {
         impl $name {
             pub fn as_str(&self) -> &str {
                 &self.0
+            }
+        }
+
+        impl From<$name> for String {
+            fn from(v: $name) -> String {
+                v.0
             }
         }
 
@@ -573,6 +629,28 @@ mod tests {
         let config: Config = toml::Value::Table(t).try_into().unwrap();
         assert!(matches!(config.shell, Shell::Builtin));
         assert_eq!(config.edition, Edition::Pro);
+        assert!(config.gpu.windows_update);
+    }
+
+    #[test]
+    fn gpu_lists_append_per_vendor_and_reject_bad_ids() {
+        let mut t: toml::Table = toml::from_str(DEFAULTS).unwrap();
+        merge(&mut t, toml::from_str("[user]\nname = \"x\"\n[gpu]\nnvidia = [\"Some.App\"]\nwindowsUpdate = false").unwrap());
+        let config: Config = toml::Value::Table(t).try_into().unwrap();
+        assert!(!config.gpu.windows_update);
+        let [(nv, ids), (amd, none), _] = config.gpu.vendor_apps();
+        assert_eq!((nv.pci_id(), amd.pci_id()), ("10DE", "1002"));
+        assert_eq!(ids.last().map(|a| a.as_str()), Some("Some.App"));
+        assert!(none.is_empty());
+        assert!(config.gpu.installs_anything());
+
+        // A vendor that isn't one, or a list of something other than IDs.
+        for bad in ["[gpu]\nwindowsUpdate = true\nmatrox = []", "[gpu]\nwindowsUpdate = true\nnvidia = [\"has space\"]"] {
+            let mut t: toml::Table = toml::from_str(DEFAULTS).unwrap();
+            t.remove("gpu");
+            merge(&mut t, toml::from_str(&format!("[user]\nname = \"x\"\n{bad}")).unwrap());
+            assert!(toml::Value::Table(t).try_into::<Config>().is_err(), "{bad}");
+        }
     }
 
     #[test]

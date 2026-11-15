@@ -40,6 +40,7 @@ values per hive. Every config is layered over the distro's own defaults,
 - [x] Provisioned AppX removal (`appx.remove`): deprovisioned during specialize, names checked against the image at build time. All 17 in the defaults removed in a `build image` run (from `specialize.log` on the image)
 - [ ] Gaming defaults for the new user: mouse acceleration ("Enhance pointer precision") off, and the Sticky/Filter/Toggle Keys hotkeys that pop a dialog over the game off. Stock values checked in the Default profile's hive; not yet seen applied in a booted VM
 - [x] Windows apps (`apps`): winget IDs, unpinned, installed by winget at the first real boot from a logon task first logon registers. Seen in the VM under our shell, online: the script installed Firefox elevated, and an equivalent logon task fired at the next logon, installed 7-Zip and deleted itself. Not yet seen from a fresh `build image`
+  - GPU drivers (`gpu`): a Windows Update pass for display drivers at first boot, plus per-vendor winget lists picked by PCI vendor ID. Unit-tested; not yet seen on real GPU hardware
 - [ ] WSL installed offline, and the machine's Linux install run through it (`wsl.linux`): its disks attached and mounted, its apps in the Start Menu, run chrooted as its user
   - Seen in a VM (Windows nested in KVM, a saturn-shaped btrfs test install as a second disk, `nix build .#test-linux-disk`): WSL installs from the image, the logon task imports the distro, attaches the disk by GPT GUID, mounts it and puts its Firefox in the Start Menu; the launcher starts it, and Firefox runs from the install as its user, with its profile in the install's home. dfn's half is also a flake check (`checks.x86_64-linux.dfn`)
   - Linux GUI windows are a non-goal. WSLg's viewer (msrdc) only connects while a real explorer runs as the shell: a dump of it under our shell shows its connection thread never starting, and faking explorer's documented surface (Shell_TrayWnd and its appbar/tray messages, the shell window, the shell-ready events, TaskbarCreated) doesn't change that. Running explorer hidden underneath works, but this Windows exists to be a console for kernel-anticheat games, so explorer stays out. The experiment is on branch `t3/wslg-windows-under-shell`
@@ -246,6 +247,28 @@ an hour. Each ID that's in is recorded in
 next logon, and once everything is in the task deletes itself. While an
 installer's window has focus the shell's keys don't work, since an elevated
 window starves its keyboard hook. Log: `%LOCALAPPDATA%\defenestrate\apps.log`.
+
+#### GPU drivers
+
+The image is built on a VM's virtual GPU, so the real one is only known at
+first boot, and the same task handles it, first in line. `gpu.windowsUpdate`
+(on by default) has it ask Windows Update for display drivers and install
+the ones Windows Update would install by itself sooner or later, now rather
+than whenever it gets round to it. Windows Update isn't turned off here
+(only its automatic reboots are), so it keeps updating them afterwards.
+
+`gpu.nvidia`, `gpu.amd` and `gpu.intel` are winget IDs installed only when
+the machine has a display controller (PCI class 03) from that vendor (PCI
+vendor 10DE, 1002, 8086), driver or not, so a hybrid laptop gets both its
+lists. The vendor is checked when the task runs, so a GPU added after the
+task has finished isn't picked up. They're empty by default because no
+winget package installs a GPU driver silently: winget's repo turns GPU
+drivers down, since its validation sandbox has no GPU (the NVIDIA app was
+refused, microsoft/winget-pkgs#348600, and GeForce Experience was removed),
+AMD's only package there is a driver for Azure VMs, and Intel's Driver &
+Support Assistant installs silently but then wants clicks in a browser to
+fetch anything. NVIDIA's Windows Update driver trails its own by a few
+weeks, so that's still the gap for NVIDIA machines.
 
 ### Linux apps, through WSL
 
