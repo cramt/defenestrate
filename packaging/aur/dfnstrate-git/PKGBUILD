@@ -1,0 +1,104 @@
+# Maintainer: cramt <https://github.com/cramt>
+#
+# VCS package: there are no tagged releases yet. See packaging/aur/README.md
+# for what a tagged `dfnstrate` package would change.
+
+pkgname=dfnstrate-git
+_pkgname=dfnstrate
+pkgver=0.1.0.r31.gdd0a396
+pkgrel=1
+pkgdesc='Builds a declarative Windows install from Microsoft'"'"'s stock ISO, and flashes it'
+arch=('x86_64')
+url='https://github.com/cramt/defenestrate'
+license=('MIT')
+# The rest of what it drives are optdepends: each subcommand checks for its
+# own tools before starting and names the package that's missing.
+depends=(
+  'libgcc'
+  'glibc'
+  # build iso, and the first half of build image
+  '7zip'
+  'wimlib'
+  'hivex'
+  'libisoburn'
+  'util-linux'
+)
+# rustup, not Arch's rust: the shell is a Windows binary and the rust
+# package ships no x86_64-pc-windows-gnu std (only rust-musl, rust-wasm and
+# the aarch64 ones are split out).
+makedepends=('git' 'rustup' 'mingw-w64-gcc')
+optdepends=(
+  'chromium: dfnstrate fetch, and build without --iso (or google-chrome, or --browser)'
+  'qemu-desktop: dfnstrate vm and build image (qemu-base is enough for build image alone)'
+  'swtpm: dfnstrate vm and build image'
+  'edk2-ovmf: Secure Boot firmware for dfnstrate vm and build image'
+  'mtools: dfnstrate build image'
+  'sleuthkit: dfnstrate build image'
+  'ntfs-3g: dfnstrate flash and update'
+  'efibootmgr: dfnstrate flash and reboot'
+  'sudo: dfnstrate flash, update and reboot'
+)
+provides=("$_pkgname")
+conflicts=("$_pkgname")
+# LTO is already set in Cargo.toml's release profile; makepkg's -flto
+# CFLAGS would also hit the C deps (xz, zstd) and mingw's crt for nothing.
+options=('!lto')
+source=("$_pkgname::git+$url.git")
+sha256sums=('SKIP')
+
+# Not $CARCH (as namcap suggests): the shell is a Windows exe whatever
+# the build machine is.
+_shell_target=x86_64-pc-windows-gnu
+
+pkgver() {
+  cd "$_pkgname"
+  # Cargo's version in front, so once v0.1.0-style tags exist the
+  # r<count> part keeps sorting after the plain release.
+  local ver
+  ver=$(sed -n 's/^version = "\(.*\)"/\1/p' cli/Cargo.toml | head -n1)
+  printf '%s.r%s.g%s' "$ver" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
+prepare() {
+  cd "$_pkgname"
+  # Overrides shell/rust-toolchain.toml, which would also pull rustfmt and
+  # clippy; the Windows target is added explicitly instead.
+  export RUSTUP_TOOLCHAIN=stable
+  rustup toolchain install stable --profile minimal --target "$_shell_target"
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+  cargo fetch --locked --manifest-path shell/Cargo.toml --target "$_shell_target"
+}
+
+build() {
+  cd "$_pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  # headless_chrome's build script runs rustfmt over its generated code,
+  # purely cosmetically, and fails without one (the minimal profile has none).
+  export DO_NOT_FORMAT=1
+
+  # makepkg's CFLAGS/LDFLAGS are for the host gcc; mingw rejects some of
+  # them (-fstack-clash-protection, -z flags), so the Windows build runs
+  # without them.
+  env -u CFLAGS -u CXXFLAGS -u LDFLAGS -u RUSTFLAGS \
+    cargo build --frozen --release --manifest-path shell/Cargo.toml --target "$_shell_target"
+
+  DEFENESTRATE_SHELL_EXE="$PWD/target/$_shell_target/release/defenestrate-shell.exe" \
+    cargo build --frozen --release -p dfnstrate
+}
+
+check() {
+  cd "$_pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  export DO_NOT_FORMAT=1
+  cargo test --frozen --release -p dfnstrate
+}
+
+package() {
+  cd "$_pkgname"
+  install -Dm755 target/release/dfnstrate "$pkgdir/usr/bin/dfnstrate"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$_pkgname/README.md"
+  # Example configs, for `dfnstrate render -c` and as templates.
+  install -Dm644 -t "$pkgdir/usr/share/doc/$_pkgname/configs" configs/*.toml
+}

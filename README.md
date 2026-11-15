@@ -84,7 +84,17 @@ stick; `installTarget` is only for `flash`.
 
 ### Without Nix
 
-Build dfnstrate (stable Rust) with the shell compiled in. The shell is a
+On Arch / CachyOS, from the AUR (pending publication, not there yet; the
+PKGBUILD is in [`packaging/aur`](packaging/aur)):
+
+```sh
+paru -S dfnstrate-git   # or yay, or makepkg -si in packaging/aur/dfnstrate-git
+```
+
+It pulls in what `build iso` needs; the rest are optional dependencies,
+per the table below.
+
+Elsewhere, build dfnstrate (stable Rust) with the shell compiled in. The shell is a
 Windows binary, so it needs the MinGW cross toolchain once:
 
 ```sh
@@ -102,9 +112,10 @@ starting and names what's missing:
 | --- | --- |
 | `fetch` (and `build` without `--iso`) | `chromium` (or Chrome) |
 | `build iso` | `7zip wimlib hivex libisoburn` |
-| `build image`, `vm` | the above, `qemu-full swtpm edk2-ovmf mtools sleuthkit util-linux`, and access to `/dev/kvm` |
+| `build image`, `vm` | the above, `qemu-desktop swtpm edk2-ovmf mtools sleuthkit util-linux`, and access to `/dev/kvm` (`build image` alone runs headless, so `qemu-base` is enough) |
 | `flash` | `util-linux ntfs-3g efibootmgr sudo` |
 | `update` | `util-linux ntfs-3g sudo` |
+| `reboot` | `efibootmgr systemd sudo` |
 
 Then:
 
