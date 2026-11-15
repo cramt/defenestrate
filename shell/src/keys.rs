@@ -21,6 +21,12 @@
 //! A low-level mouse hook on the same thread turns Super+left-drag and
 //! Super+right-drag into COSMIC's move and resize grabs. Like COSMIC, the
 //! grab lasts until the button comes up, even if Super goes first.
+//!
+//! Alt+Tab and Super+Tab (Shift for backwards) are COSMIC's window
+//! switcher, swallowed here: without explorer, Windows' own Alt+Tab still
+//! switches but shows nothing, and can't reach windows on other workspaces,
+//! which the shell has hidden. As in cosmic-launcher, the switch happens
+//! once none of Alt, Super and Ctrl is held any more, and Escape cancels.
 
 use std::cell::Cell;
 use std::collections::VecDeque;
@@ -31,13 +37,14 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_LWIN, VK_MENU, VK_OEM_2, VK_RETURN, VK_RIGHT,
-    VK_RWIN, VK_SHIFT, VK_UP,
+    GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY, VK_CONTROL,
+    VK_DOWN, VK_ESCAPE, VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LWIN, VK_MENU, VK_OEM_2, VK_RCONTROL, VK_RETURN, VK_RIGHT,
+    VK_RMENU, VK_RWIN, VK_SHIFT, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, HC_ACTION, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, PostMessageW,
-    SetWindowsHookExW, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
+    SetWindowsHookExW, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
 use crate::tree::{Direction, Point};
@@ -54,6 +61,16 @@ pub enum Action {
     LogOut,
     Wm(Command),
     Drag(Drag),
+    Switcher(Switch),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Switch {
+    /// Opens the switcher if it isn't, then moves the selection.
+    Step(Step),
+    /// The held modifiers came up: switch to the selection.
+    Done,
+    Cancel,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,13 +97,21 @@ enum Super {
     Down { chorded: bool },
 }
 
-/// COSMIC's Super+R: until Enter or Escape, the direction keys alone move
-/// the focused window's edges.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Normal,
+    /// COSMIC's Super+R: until Enter or Escape, the direction keys alone
+    /// move the focused window's edges.
     Resize { outwards: bool },
+    /// The window switcher is up until the modifiers that opened it are
+    /// let go.
+    Switching,
 }
+
+/// What keeps the switcher open.
+const SWITCH_MODIFIERS: [VIRTUAL_KEY; 6] = [VK_LMENU, VK_RMENU, VK_LWIN, VK_RWIN, VK_LCONTROL, VK_RCONTROL];
+/// Unassigned, so no app does anything with it (AutoHotkey's menu mask key).
+const MASK_KEY: VIRTUAL_KEY = VIRTUAL_KEY(0xE8);
 
 // Hook thread only.
 thread_local! {
@@ -232,12 +257,51 @@ fn queue(action: Action) {
     }
 }
 
+/// The app under an Alt+Tab saw Alt go down and will see it come up; with
+/// nothing in between, that's a tap, and a tap of Alt opens its menu bar.
+/// Windows' own Alt+Tab doesn't have that problem; ours sends a key that
+/// means nothing in between.
+fn mask_alt() {
+    let key = |flags| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: MASK_KEY, dwFlags: flags, ..Default::default() } },
+    };
+    unsafe {
+        SendInput(&[key(Default::default()), key(KEYEVENTF_KEYUP)], size_of::<INPUT>() as i32);
+    }
+}
+
+fn on_switching_key(key: VIRTUAL_KEY) -> bool {
+    let step = match key {
+        VK_TAB if held(VK_SHIFT) => Step::Previous,
+        VK_TAB | VK_DOWN => Step::Next,
+        VK_UP => Step::Previous,
+        VK_ESCAPE => {
+            MODE.set(Mode::Normal);
+            queue(Action::Switcher(Switch::Cancel));
+            return true;
+        }
+        _ => return false,
+    };
+    queue(Action::Switcher(Switch::Step(step)));
+    true
+}
+
 /// True if the key was handled and must not reach the focused app.
 fn on_key_down(key: VIRTUAL_KEY) -> bool {
     // Low-level hooks see the left/right variants (VK_LSHIFT...), never
     // VK_SHIFT. Modifiers going down neither end a mode nor chord Super.
     if (0xA0..=0xA5).contains(&key.0) {
         return false;
+    }
+    if MODE.get() == Mode::Switching {
+        if SWITCH_MODIFIERS.iter().any(|&m| held(m)) {
+            return on_switching_key(key);
+        }
+        // Their release went somewhere the hook can't see (an elevated
+        // window took focus); a plain Tab mustn't stay swallowed.
+        MODE.set(Mode::Normal);
+        queue(Action::Switcher(Switch::Cancel));
     }
     if let Mode::Resize { outwards } = MODE.get() {
         if let Some(dir) = direction(key) {
@@ -251,7 +315,22 @@ fn on_key_down(key: VIRTUAL_KEY) -> bool {
             return true;
         }
     }
-    if SUPER.get() == Super::Up {
+    let super_down = SUPER.get() != Super::Up;
+    let alt = held(VK_MENU);
+    // COSMIC binds exactly Alt+Tab and Super+Tab, each with or without Shift.
+    if key == VK_TAB && !held(VK_CONTROL) && (alt != super_down) {
+        if super_down {
+            SUPER.set(Super::Down { chorded: true });
+        } else {
+            // Not from inside the hook: input sent from here goes through the
+            // hook again, and a hook that's slow to return gets bypassed, which
+            // let the Tab through to Windows' own (invisible) Alt+Tab.
+            std::thread::spawn(mask_alt);
+        }
+        MODE.set(Mode::Switching);
+        return on_switching_key(key);
+    }
+    if !super_down {
         return false;
     }
     SUPER.set(Super::Down { chorded: true });
@@ -264,10 +343,26 @@ fn on_key_down(key: VIRTUAL_KEY) -> bool {
     true
 }
 
+/// While switching, the last of Alt, Super and Ctrl coming up switches. The
+/// key coming up still reads as held: the hook runs before Windows updates
+/// the key state.
+fn on_key_up(key: VIRTUAL_KEY) {
+    if MODE.get() == Mode::Switching
+        && SWITCH_MODIFIERS.contains(&key)
+        && !SWITCH_MODIFIERS.iter().any(|&m| m != key && held(m))
+    {
+        MODE.set(Mode::Normal);
+        queue(Action::Switcher(Switch::Done));
+    }
+}
+
 unsafe extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 {
         let key = VIRTUAL_KEY(unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) }.vkCode as u16);
         let down = matches!(wparam.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
+        if matches!(wparam.0 as u32, WM_KEYUP | WM_SYSKEYUP) {
+            on_key_up(key);
+        }
         if key == VK_LWIN || key == VK_RWIN {
             match (down, SUPER.get()) {
                 // Autorepeat sends more downs; they mustn't reset `chorded`.

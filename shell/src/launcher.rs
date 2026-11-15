@@ -25,18 +25,18 @@ use windows::core::{Result, w};
 use crate::{desktop, fuzzy, log, scaled};
 
 const ROWS: usize = 10;
-const WIDTH: i32 = 640;
-const ROW_HEIGHT: i32 = 28;
-const PADDING: i32 = 12;
+pub const WIDTH: i32 = 640;
+pub const ROW_HEIGHT: i32 = 28;
+pub const PADDING: i32 = 12;
 const CLOCK_TIMER: usize = 1;
 // CREATE_NO_WINDOW: `cmd /c start` is only a launcher, no console wanted.
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 // COLORREF is 0x00BBGGRR.
-const BACKGROUND: COLORREF = COLORREF(0x0020_1818);
-const SELECTED: COLORREF = COLORREF(0x0040_3030);
-const FOREGROUND: COLORREF = COLORREF(0x00E0_E0E0);
-const DIM: COLORREF = COLORREF(0x0080_8080);
+pub const BACKGROUND: COLORREF = COLORREF(0x0020_1818);
+pub const SELECTED: COLORREF = COLORREF(0x0040_3030);
+pub const FOREGROUND: COLORREF = COLORREF(0x00E0_E0E0);
+pub const DIM: COLORREF = COLORREF(0x0080_8080);
 
 struct App {
     name: String,
@@ -261,7 +261,7 @@ fn clock_text() -> String {
     )
 }
 
-fn text(hdc: windows::Win32::Graphics::Gdi::HDC, s: &str, rect: &mut RECT, align: windows::Win32::Graphics::Gdi::DRAW_TEXT_FORMAT) {
+pub fn text(hdc: windows::Win32::Graphics::Gdi::HDC, s: &str, rect: &mut RECT, align: windows::Win32::Graphics::Gdi::DRAW_TEXT_FORMAT) {
     let mut wide: Vec<u16> = s.encode_utf16().collect();
     unsafe {
         DrawTextW(hdc, &mut wide, rect, align | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);

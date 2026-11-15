@@ -1,10 +1,12 @@
 //! The shell Winlogon starts instead of explorer.exe: a tiling window
-//! manager (wm.rs, desktop.rs), a Super-tap launcher (launcher.rs), and
-//! Super+Enter for a terminal. Keys are in keys.rs.
+//! manager (wm.rs, desktop.rs), a Super-tap launcher (launcher.rs), an
+//! Alt+Tab window switcher (switcher.rs), and Super+Enter for a terminal.
+//! Keys are in keys.rs.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 #![cfg_attr(not(windows), allow(dead_code))]
 
+mod cycle;
 mod fuzzy;
 mod motion;
 mod tree;
@@ -18,6 +20,8 @@ mod keys;
 mod launcher;
 #[cfg(windows)]
 mod overlay;
+#[cfg(windows)]
+mod switcher;
 
 #[cfg(not(windows))]
 fn main() {
@@ -62,7 +66,7 @@ mod windows_main {
     use windows::core::{Result, w};
 
     use crate::keys::{self, Action, WM_ACTION};
-    use crate::{desktop, launcher};
+    use crate::{desktop, launcher, switcher};
 
     // In 96 DPI pixels; scaled to the real DPI at startup.
     const FONT_HEIGHT: i32 = 18;
@@ -137,6 +141,9 @@ mod windows_main {
             if let Err(e) = launcher::create(instance, font) {
                 log(&format!("creating the launcher failed: {e}"));
             }
+            if let Err(e) = switcher::create(instance, font) {
+                log(&format!("creating the window switcher failed: {e}"));
+            }
             desktop::start(main);
             log("managing windows");
 
@@ -193,6 +200,7 @@ mod windows_main {
                         }
                         Action::Wm(c) => desktop::command(c),
                         Action::Drag(d) => desktop::drag(d),
+                        Action::Switcher(s) => switcher::on(s),
                     }
                 }
                 LRESULT(0)

@@ -1,7 +1,8 @@
 //! The window manager's hands and eyes: WinEvent hooks feed `Wm` the
 //! windows that come and go, and `apply` makes the screen match the
-//! `Effects` it returns. Super+drags (keys.rs) are carried out here too.
-//! Runs entirely on the shell's one GUI thread.
+//! `Effects` it returns. Super+drags (keys.rs) and the window switcher's
+//! choice (switcher.rs) are carried out here too. Runs entirely on the
+//! shell's one GUI thread.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -21,7 +22,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     EVENT_OBJECT_UNCLOAKED, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, EnumWindows, GA_ROOT,
     GetForegroundWindow, HWND_BOTTOM,
     GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClientRect, GetPropW, GetSystemMetrics, GetWindow, GetWindowLongPtrW,
-    GetWindowRect, GetWindowThreadProcessId, HWND_TOPMOST, IsHungAppWindow, IsIconic, IsWindowVisible, IsZoomed, KillTimer,
+    GetWindowRect, GetWindowTextLengthW, GetWindowThreadProcessId, HWND_TOPMOST, IsHungAppWindow, IsIconic, IsWindow,
+    IsWindowVisible, IsZoomed, KillTimer,
     LWA_ALPHA, PostMessageW, RegisterClassW, RemovePropW, SM_CXSCREEN, SM_CYSCREEN, SPI_SETWORKAREA, SW_HIDE, SW_RESTORE,
     SW_SHOWNA, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
     SWP_NOZORDER, SWP_SHOWWINDOW, SetForegroundWindow, SetLayeredWindowAttributes, SetPropW, SetTimer, SetWindowLongPtrW,
@@ -113,7 +115,16 @@ thread_local! {
 /// longer borrowed: moving, showing and focusing windows pumps messages,
 /// and those can land back here.
 fn update(f: impl FnOnce(&mut Wm<HWND>) -> Option<Effects<HWND>>) {
-    let fx = WM.with_borrow_mut(|wm| wm.as_mut().and_then(f));
+    let fx = WM.with_borrow_mut(|wm| {
+        let wm = wm.as_mut()?;
+        let fx = f(wm)?;
+        // Our own focusing may not come back as a foreground event, and the
+        // switcher's order mustn't depend on it.
+        if let Some(w) = fx.focus {
+            wm.focused(w);
+        }
+        Some(fx)
+    });
     if let Some(fx) = fx {
         apply(fx);
         sync_captions();
@@ -156,7 +167,11 @@ pub fn start(events_to: HWND) {
     // the topmost window focused, as it was.
     for w in existing.into_iter().rev() {
         if manageable(w) {
-            update(|wm| Some(wm.add(w)));
+            if unsafe { IsIconic(w) }.as_bool() {
+                WM.with_borrow_mut(|wm| wm.as_mut().map(|wm| wm.add_minimized(w)));
+            } else {
+                update(|wm| Some(wm.add(w)));
+            }
         }
     }
     ANIMATING.set(true);
@@ -197,14 +212,23 @@ pub fn on_event(event: u32, w: HWND) {
     update(|wm| match event {
         EVENT_OBJECT_DESTROY => Some(wm.remove(w)),
         EVENT_OBJECT_SHOW | EVENT_OBJECT_UNCLOAKED | EVENT_SYSTEM_MINIMIZEEND => {
-            (!wm.manages(w) && manageable(w)).then(|| wm.add(w))
+            if wm.is_minimized(w) {
+                on_screen(w).then(|| wm.restored(w))
+            } else {
+                (!wm.manages(w) && manageable(w) && on_screen(w)).then(|| wm.add(w))
+            }
         }
         // Managed windows on other workspaces are hidden by us; only a
-        // window on screen going invisible has really gone. Checked now
-        // rather than trusted from the event: by the time it arrives, a
-        // quick switch back may have shown the window again.
+        // window on screen going invisible has really gone, or a minimized
+        // one (to a tray icon, say). Checked now rather than trusted from
+        // the event: by the time it arrives, a quick switch back may have
+        // shown the window again, or the app restored it.
         EVENT_OBJECT_HIDE | EVENT_OBJECT_CLOAKED | EVENT_SYSTEM_MINIMIZESTART => {
-            (wm.is_shown(w) && !on_screen(w)).then(|| wm.remove(w))
+            if (wm.is_shown(w) || wm.is_minimized(w)) && !visible(w) {
+                Some(wm.remove(w))
+            } else {
+                (wm.is_shown(w) && unsafe { IsIconic(w) }.as_bool()).then(|| wm.minimize(w))
+            }
         }
         EVENT_SYSTEM_FOREGROUND => {
             wm.focused(w);
@@ -220,6 +244,47 @@ pub fn on_event(event: u32, w: HWND) {
 
 pub fn command(c: Command) {
     update(|wm| Some(wm.command(c)));
+}
+
+/// What the window switcher lists, most recently focused first: COSMIC
+/// lists every toplevel, so besides the managed windows (minimized, or on
+/// other workspaces) that's every window Windows' own Alt+Tab would show,
+/// such as a full-screen game or an elevated app, which the shell doesn't
+/// tile. Ones never focused go last, topmost first.
+pub fn switchable() -> Vec<HWND> {
+    let z = z_order();
+    WM.with_borrow(|wm| {
+        let Some(wm) = wm else { return Vec::new() };
+        let ok = |w: HWND| wm.manages(w) || app_window(w);
+        let mut list: Vec<HWND> = wm.recent().iter().copied().filter(|&w| ok(w)).collect();
+        for w in z {
+            if ok(w) && !list.contains(&w) {
+                list.push(w);
+            }
+        }
+        list
+    })
+}
+
+/// The switcher picked `w`. A managed window gets COSMIC's activate (its
+/// workspace, restored, focused); anything else is restored and focused.
+pub fn activate(w: HWND) {
+    if !unsafe { IsWindow(Some(w)) }.as_bool() {
+        refocus();
+        return;
+    }
+    let managed = WM.with_borrow(|wm| wm.as_ref().is_some_and(|wm| wm.manages(w)));
+    if managed {
+        update(|wm| Some(wm.activate(w)));
+        return;
+    }
+    unsafe {
+        if IsIconic(w).as_bool() {
+            let _ = ShowWindowAsync(w, SW_RESTORE);
+        }
+    }
+    focus(w);
+    WM.with_borrow_mut(|wm| wm.as_mut().map(|wm| wm.focused(w)));
 }
 
 pub fn screen_changed() {
@@ -268,16 +333,40 @@ fn cloaked(w: HWND) -> bool {
     ok.is_ok() && cloak != 0
 }
 
-fn on_screen(w: HWND) -> bool {
-    let shown = unsafe { IsWindowVisible(w).as_bool() && !IsIconic(w).as_bool() };
-    shown && !cloaked(w)
+/// Shown, possibly minimized.
+fn visible(w: HWND) -> bool {
+    unsafe { IsWindowVisible(w) }.as_bool() && !cloaked(w)
 }
 
-/// Windows that tile: real, resizable, unowned app windows. Dialogs,
-/// popups and tool windows float where they open.
+fn on_screen(w: HWND) -> bool {
+    visible(w) && !unsafe { IsIconic(w) }.as_bool()
+}
+
+/// What Windows' Alt+Tab lists: visible, unowned top-level windows with a
+/// title that aren't tool windows, here not the shell's own.
+fn app_window(w: HWND) -> bool {
+    unsafe {
+        if !visible(w) || GetAncestor(w, GA_ROOT) != w || GetWindowTextLengthW(w) == 0 {
+            return false;
+        }
+        if GetWindow(w, GW_OWNER).is_ok_and(|owner| !owner.is_invalid()) {
+            return false;
+        }
+        let ex = GetWindowLongPtrW(w, GWL_EXSTYLE) as u32;
+        if ex & (WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) != 0 {
+            return false;
+        }
+        let mut pid = 0;
+        GetWindowThreadProcessId(w, Some(&mut pid));
+        pid != GetCurrentProcessId()
+    }
+}
+
+/// Windows that tile: real, resizable, unowned app windows, possibly
+/// minimized. Dialogs, popups and tool windows float where they open.
 fn manageable(w: HWND) -> bool {
     unsafe {
-        if !on_screen(w) || GetAncestor(w, GA_ROOT) != w {
+        if !visible(w) || GetAncestor(w, GA_ROOT) != w {
             return false;
         }
         if GetWindow(w, GW_OWNER).is_ok_and(|owner| !owner.is_invalid()) {
@@ -333,6 +422,11 @@ fn apply(fx: Effects<HWND>) {
         // Async throughout: a hung app must not hang the shell.
         for &w in &fx.show {
             let _ = ShowWindowAsync(w, SW_SHOWNA);
+        }
+        // Before placing: placing a minimized window only moves where it
+        // would restore to, and restoring after would put it back there.
+        for &w in &fx.restore {
+            let _ = ShowWindowAsync(w, SW_RESTORE);
         }
         for &(w, r) in &fx.place {
             place(w, r);

@@ -7,6 +7,11 @@
 //! The commands are COSMIC's (cosmic-comp's data/keybindings.ron), minus
 //! the ones that need UI this doesn't have yet: stacking, swap mode,
 //! focusing groups, and other monitors.
+//!
+//! Minimized windows stay on their workspace, out of the tiling, as in
+//! COSMIC (`Workspace::minimized_windows`), so the window switcher can list
+//! them and bring them back. COSMIC puts a restored tile back in its old
+//! spot in the tree; here it splits the focused window like a new one.
 
 use crate::motion::{Pace, View};
 use crate::tree::{Axis, Direction, Point, Rect, Tree};
@@ -68,6 +73,8 @@ pub struct Effects<W> {
     /// A workspace switch asked for this one, even if it's already shown:
     /// in COSMIC that cuts a running switch short.
     pub activated: Option<usize>,
+    /// Minimized windows to bring back, before they're placed.
+    pub restore: Vec<W>,
 }
 
 impl<W> Default for Effects<W> {
@@ -80,8 +87,23 @@ impl<W> Default for Effects<W> {
             close: None,
             pace: Pace::Animated,
             activated: None,
+            restore: Vec::new(),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Layer {
+    Tiled,
+    Floating,
+}
+
+/// Where a minimized window goes back to.
+#[derive(Clone, Copy)]
+struct Minimized<W> {
+    w: W,
+    layer: Layer,
+    maximized: bool,
 }
 
 struct Workspace<W> {
@@ -91,15 +113,52 @@ struct Workspace<W> {
     focus: Option<W>,
     maximized: Option<W>,
     tiling: bool,
+    minimized: Vec<Minimized<W>>,
 }
 
 impl<W: Copy + Eq> Workspace<W> {
     fn new() -> Self {
-        Workspace { tiled: Tree::default(), floating: Vec::new(), focus: None, maximized: None, tiling: true }
+        Workspace { tiled: Tree::default(), floating: Vec::new(), focus: None, maximized: None, tiling: true, minimized: Vec::new() }
     }
 
+    /// Shown with the workspace: tiled or floating, not minimized.
     fn contains(&self, w: W) -> bool {
         self.tiled.contains(w) || self.floating.contains(&w)
+    }
+
+    fn holds(&self, w: W) -> bool {
+        self.contains(w) || self.minimized.iter().any(|m| m.w == w)
+    }
+
+    fn minimize(&mut self, w: W) {
+        if !self.contains(w) {
+            return;
+        }
+        let layer = if self.tiled.contains(w) { Layer::Tiled } else { Layer::Floating };
+        let maximized = self.maximized == Some(w);
+        if self.remove(w) {
+            self.minimized.push(Minimized { w, layer, maximized });
+        }
+    }
+
+    fn take_minimized(&mut self, w: W) -> Option<Minimized<W>> {
+        let i = self.minimized.iter().position(|m| m.w == w)?;
+        Some(self.minimized.remove(i))
+    }
+
+    /// Back from being minimized, focused, as it was: tiled or floating,
+    /// maximized if it was and nothing else is now.
+    fn restore(&mut self, m: Minimized<W>, area: Rect) {
+        match m.layer {
+            Layer::Tiled => self.insert(m.w, area),
+            Layer::Floating => {
+                self.floating.push(m.w);
+                self.focus = Some(m.w);
+            }
+        }
+        if m.maximized && self.maximized.is_none() {
+            self.maximized = Some(m.w);
+        }
     }
 
     fn windows(&self) -> Vec<W> {
@@ -120,6 +179,9 @@ impl<W: Copy + Eq> Workspace<W> {
         } else if let Some(i) = self.floating.iter().position(|&x| x == w) {
             self.floating.remove(i);
             None
+        } else if let Some(i) = self.minimized.iter().position(|m| m.w == w) {
+            self.minimized.remove(i);
+            return true;
         } else {
             return false;
         };
@@ -137,11 +199,15 @@ pub struct Wm<W> {
     spaces: [Workspace<W>; WORKSPACES],
     current: usize,
     area: Rect,
+    /// Every window that had focus or was managed, most recent first:
+    /// the window switcher's order, which COSMIC keeps the same way (the
+    /// toplevels by when they were last activated).
+    recent: Vec<W>,
 }
 
 impl<W: Copy + Eq> Wm<W> {
     pub fn new(area: Rect) -> Self {
-        Wm { spaces: std::array::from_fn(|_| Workspace::new()), current: 0, area }
+        Wm { spaces: std::array::from_fn(|_| Workspace::new()), current: 0, area, recent: Vec::new() }
     }
 
     fn current(&self) -> &Workspace<W> {
@@ -153,7 +219,7 @@ impl<W: Copy + Eq> Wm<W> {
     }
 
     fn workspace_of(&self, w: W) -> Option<usize> {
-        self.spaces.iter().position(|s| s.contains(w))
+        self.spaces.iter().position(|s| s.holds(w))
     }
 
     pub fn manages(&self, w: W) -> bool {
@@ -164,6 +230,20 @@ impl<W: Copy + Eq> Wm<W> {
     /// this hid, so their hide events aren't the window going away.
     pub fn is_shown(&self, w: W) -> bool {
         self.current().contains(w)
+    }
+
+    pub fn is_minimized(&self, w: W) -> bool {
+        self.spaces.iter().any(|s| s.minimized.iter().any(|m| m.w == w))
+    }
+
+    /// Most recently focused first; may include windows that aren't managed.
+    pub fn recent(&self) -> &[W] {
+        &self.recent
+    }
+
+    fn touch(&mut self, w: W) {
+        self.recent.retain(|&x| x != w);
+        self.recent.insert(0, w);
     }
 
     /// Every window this has hidden; shown again if the shell exits.
@@ -199,9 +279,12 @@ impl<W: Copy + Eq> Wm<W> {
     }
 
     /// Every window the tiling places, on every workspace: the ones that
-    /// go without a title bar.
+    /// go without a title bar. Minimized tiles keep going without: giving
+    /// it back and taking it again raced the restore, which left restored
+    /// windows with one.
     pub fn tiled(&self) -> Vec<W> {
-        self.spaces.iter().filter(|s| s.tiling).flat_map(|s| s.tiled.windows()).collect()
+        let minimized = |s: &Workspace<W>| s.minimized.iter().filter(|m| m.layer == Layer::Tiled).map(|m| m.w).collect::<Vec<_>>();
+        self.spaces.iter().filter(|s| s.tiling).flat_map(|s| [s.tiled.windows(), minimized(s)].concat()).collect()
     }
 
     /// Super+drag picked up `w`; it gets focus, and a maximized one goes
@@ -265,21 +348,74 @@ impl<W: Copy + Eq> Wm<W> {
         }
         let area = self.area;
         self.current_mut().insert(w, area);
+        self.touch(w);
         self.relayout()
     }
 
+    /// A window that was already minimized when the shell started.
+    pub fn add_minimized(&mut self, w: W) {
+        if self.manages(w) {
+            return;
+        }
+        self.current_mut().minimized.push(Minimized { w, layer: Layer::Tiled, maximized: false });
+        self.recent.push(w);
+    }
+
     pub fn remove(&mut self, w: W) -> Effects<W> {
+        self.recent.retain(|&x| x != w);
         let Some(i) = self.workspace_of(w) else { return Effects::default() };
         self.spaces[i].remove(w);
         if i == self.current { self.relayout() } else { Effects::default() }
     }
 
-    /// Something else focused `w` (a click, a window raising itself).
+    /// `w` got focus, from the shell or anything else (a click, a window
+    /// raising itself). It needn't be managed: the switcher lists dialogs
+    /// and full-screen games too, as COSMIC lists every toplevel.
     pub fn focused(&mut self, w: W) {
+        self.touch(w);
         let s = self.current_mut();
         if s.contains(w) {
             s.focus = Some(w);
         }
+    }
+
+    /// Shown `w` was minimized: it leaves the tiling but not its workspace.
+    pub fn minimize(&mut self, w: W) -> Effects<W> {
+        if !self.is_shown(w) {
+            return Effects::default();
+        }
+        self.current_mut().minimize(w);
+        self.relayout()
+    }
+
+    /// Minimized `w` came back by itself (the app restored it). It lands
+    /// on the workspace being shown, since that's where it now is.
+    pub fn restored(&mut self, w: W) -> Effects<W> {
+        let Some(m) = self.spaces.iter_mut().find_map(|s| s.take_minimized(w)) else { return Effects::default() };
+        let area = self.area;
+        self.current_mut().restore(m, area);
+        self.relayout()
+    }
+
+    /// The switcher picked `w`: COSMIC's activate goes to its workspace,
+    /// unminimizes it and focuses it.
+    pub fn activate(&mut self, w: W) -> Effects<W> {
+        let Some(i) = self.workspace_of(w) else { return Effects::default() };
+        let switched = if i == self.current { Effects::default() } else { self.switch(i) };
+        let area = self.area;
+        let s = self.current_mut();
+        let restore = match s.take_minimized(w) {
+            Some(m) => {
+                s.restore(m, area);
+                vec![w]
+            }
+            None => {
+                s.focus = Some(w);
+                Vec::new()
+            }
+        };
+        self.touch(w);
+        Effects { show: switched.show, hide: switched.hide, activated: switched.activated, restore, ..self.relayout() }
     }
 
     pub fn set_area(&mut self, area: Rect) -> Effects<W> {
@@ -567,6 +703,87 @@ mod tests {
         assert_eq!(wm.command(Command::Resize { dir: Direction::Left, outwards: true }).pace, Pace::Instant);
         assert_eq!(wm.move_edge(1, [Direction::Right, Direction::Down], 900).pace, Pace::Instant);
         assert_eq!(wm.command(Command::Maximize).pace, Pace::Animated);
+    }
+
+    #[test]
+    fn minimized_windows_leave_the_tiling_but_not_their_workspace() {
+        let mut wm = wm_with(2);
+        let fx = wm.minimize(2);
+        assert_eq!(fx.place, [(1, AREA)]);
+        assert_eq!(fx.focus, Some(1));
+        assert!(wm.manages(2) && wm.is_minimized(2) && !wm.is_shown(2));
+        assert_eq!(wm.tiled(), [1, 2], "keeps going without a title bar while minimized");
+        assert!(wm.hidden().is_empty(), "minimized isn't hidden: switching workspaces leaves it be");
+        assert_eq!(wm.minimize(2), Effects::default(), "only a shown window minimizes");
+        wm.remove(2);
+        assert!(!wm.manages(2) && !wm.is_minimized(2));
+    }
+
+    #[test]
+    fn activating_a_minimized_window_goes_to_its_workspace_and_restores_it() {
+        let mut wm = wm_with(2);
+        wm.minimize(2);
+        wm.command(Command::Switch(ws(3)));
+        wm.add(3);
+        let fx = wm.activate(2);
+        assert_eq!(fx.activated, Some(0));
+        assert_eq!((&fx.hide, &fx.show), (&vec![3], &vec![1]));
+        assert_eq!(fx.restore, [2]);
+        assert_eq!(fx.focus, Some(2));
+        assert_eq!(rect(&fx, 2), Some(Rect { left: 800, top: 0, right: 1600, bottom: 1000 }));
+        assert!(wm.is_shown(2) && !wm.is_minimized(2));
+        assert_eq!(wm.restored(2), Effects::default(), "its restore event changes nothing more");
+    }
+
+    #[test]
+    fn activating_a_shown_window_just_focuses_it() {
+        let mut wm = wm_with(2);
+        let fx = wm.activate(1);
+        assert_eq!((fx.focus, fx.activated, fx.restore.len()), (Some(1), None, 0));
+        wm.command(Command::Send(ws(2)));
+        let fx = wm.activate(1);
+        assert_eq!((fx.focus, fx.activated), (Some(1), Some(1)));
+        assert_eq!(wm.activate(9), Effects::default(), "not managed: not the Wm's to do");
+    }
+
+    #[test]
+    fn minimized_windows_come_back_as_they_were() {
+        let mut wm = wm_with(2);
+        wm.command(Command::ToggleFloating);
+        wm.minimize(2);
+        let fx = wm.activate(2);
+        assert_eq!(rect(&fx, 2), None, "still floating");
+        wm.command(Command::Focus(Direction::Left));
+        wm.command(Command::Maximize);
+        wm.minimize(1);
+        assert_eq!(rect(&wm.activate(1), 1), Some(AREA), "still maximized");
+    }
+
+    #[test]
+    fn a_window_restoring_itself_lands_where_you_are() {
+        let mut wm = wm_with(2);
+        wm.minimize(2);
+        wm.command(Command::Switch(ws(2)));
+        let fx = wm.restored(2);
+        assert_eq!((fx.focus, rect(&fx, 2)), (Some(2), Some(AREA)));
+        assert!(wm.is_shown(2));
+    }
+
+    #[test]
+    fn recent_is_most_recently_focused_first() {
+        let mut wm = wm_with(3);
+        assert_eq!(wm.recent(), [3, 2, 1]);
+        wm.focused(1);
+        wm.focused(42);
+        assert_eq!(wm.recent(), [42, 1, 3, 2], "unmanaged windows count too");
+        wm.activate(2);
+        assert_eq!(wm.recent(), [2, 42, 1, 3]);
+        wm.remove(42);
+        wm.remove(3);
+        assert_eq!(wm.recent(), [2, 1]);
+        wm.add_minimized(7);
+        assert_eq!(wm.recent(), [2, 1, 7], "found minimized at startup: least recent");
+        assert!(wm.is_minimized(7));
     }
 
     #[test]
