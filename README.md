@@ -737,3 +737,7 @@ Why the registry isn't edited offline: when wimlib replaces an existing file
 from Linux, the file loses its NTFS security descriptor and gets its parent's
 inherited ACL. For registry hives that's a HiveNightmare-style bug, so Windows
 applies the edits instead.
+
+## License
+
+MIT, see [LICENSE](LICENSE).

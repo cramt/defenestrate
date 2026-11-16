@@ -2,6 +2,7 @@
 name = "defenestrate-shell"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 
 # shell.json, written by dfnstrate (cli/src/cosmic.rs).
 [dependencies]
