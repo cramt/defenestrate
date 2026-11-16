@@ -35,6 +35,7 @@ pub const PARTX: Tool = Tool { names: &["partx"], package: "util-linux" };
 pub const BLOCKDEV: Tool = Tool { names: &["blockdev"], package: "util-linux" };
 pub const UDEVADM: Tool = Tool { names: &["udevadm"], package: "systemd" };
 pub const NTFSRESIZE: Tool = Tool { names: &["ntfsresize"], package: "ntfs-3g" };
+pub const NTFSCAT: Tool = Tool { names: &["ntfscat"], package: "ntfs-3g" };
 pub const NTFS3G: Tool = Tool { names: &["ntfs-3g"], package: "ntfs-3g" };
 pub const NTFS3G_PROBE: Tool = Tool { names: &["ntfs-3g.probe"], package: "ntfs-3g" };
 pub const EFIBOOTMGR: Tool = Tool { names: &["efibootmgr"], package: "efibootmgr" };

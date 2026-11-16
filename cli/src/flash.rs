@@ -15,9 +15,9 @@ use crate::disk::{self, Disk};
 use crate::firmware;
 use crate::gpt;
 use crate::image::{IMAGE_FILE, SIZE_FILE};
-use crate::tools::{self, BLKDISCARD, BLOCKDEV, EFIBOOTMGR, FINDMNT, LSBLK, MCOPY, NTFSRESIZE, PARTX, SFDISK, UDEVADM};
+use crate::tools::{self, BLKDISCARD, BLOCKDEV, EFIBOOTMGR, FINDMNT, LSBLK, MCOPY, NTFSCAT, NTFSRESIZE, PARTX, SFDISK, UDEVADM};
 
-pub const TOOLS: &[tools::Tool] = &[LSBLK, FINDMNT, BLKDISCARD, SFDISK, PARTX, BLOCKDEV, UDEVADM, NTFSRESIZE, EFIBOOTMGR, MCOPY];
+pub const TOOLS: &[tools::Tool] = &[LSBLK, FINDMNT, BLKDISCARD, SFDISK, PARTX, BLOCKDEV, UDEVADM, NTFSRESIZE, EFIBOOTMGR, MCOPY, NTFSCAT];
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -56,7 +56,8 @@ pub fn run(args: &Args) -> Result<()> {
     }
 
     let image = args.image.join(IMAGE_FILE);
-    let esp = if args.into_free_space { into_free_space(&disk, &image, image_size)? } else { whole_disk(&disk, &image, image_size)? };
+    let (esp, windows) = if args.into_free_space { into_free_space(&disk, &image, image_size)? } else { whole_disk(&disk, &image, image_size)? };
+    fit_boot_manager(&disk.partition(esp), &disk.partition(windows))?;
     add_boot_entry(&disk, esp)?;
     println!("Done. Windows is fully set up on it; boot it and it comes up at the shell.");
     Ok(())
@@ -74,8 +75,8 @@ fn confirm(word: &str, what: &str) -> Result<()> {
 }
 
 /// Erases the disk for the image, growing Windows to fill it. Returns the
-/// ESP's partition number.
-fn whole_disk(disk: &Disk, image: &Path, image_size: u64) -> Result<u32> {
+/// ESP's and Windows' partition numbers.
+fn whole_disk(disk: &Disk, image: &Path, image_size: u64) -> Result<(u32, u32)> {
     let (target, dev) = (disk.target.as_str(), disk.dev.as_path());
     let disk_size = std::fs::read_to_string(disk.sys.join("size"))?.trim().parse::<u64>()? * 512;
     if disk_size < image_size {
@@ -114,12 +115,12 @@ fn whole_disk(disk: &Disk, image: &Path, image_size: u64) -> Result<u32> {
         bail!("the kernel still sees {windows} at its old size; rerun to finish");
     }
     grow_ntfs(&windows)?;
-    Ok(1)
+    Ok((1, disk::WINDOWS_PART))
 }
 
 /// Adds the image's partitions in the disk's one big free region, leaving
 /// every existing partition alone, and grows Windows to fill the region.
-/// Returns the new ESP's partition number.
+/// Returns the new ESP's and Windows' partition numbers.
 ///
 /// Windows gets its own ESP rather than a share of Linux's: a NixOS ESP is
 /// often nearly full of kernels, Windows updates rewrite the ESP they boot
@@ -130,7 +131,7 @@ fn whole_disk(disk: &Disk, image: &Path, image_size: u64) -> Result<u32> {
 /// The partitions keep the image's partition GUIDs: Windows' MountedDevices
 /// finds C: by it, so a new one would leave C: unassigned. The disk keeps
 /// its own GUID, Linux's.
-fn into_free_space(disk: &Disk, image: &Path, image_size: u64) -> Result<u32> {
+fn into_free_space(disk: &Disk, image: &Path, image_size: u64) -> Result<(u32, u32)> {
     let (target, dev) = (disk.target.as_str(), disk.dev.as_path());
     let table = gpt::parse(&tools::output_string(SFDISK.cmd().arg("--json").arg(dev))?)?;
     // Partitions resized while mounted (shrinking Linux to make the space)
@@ -208,7 +209,7 @@ fn into_free_space(disk: &Disk, image: &Path, image_size: u64) -> Result<u32> {
     let esp_node = disk.partition(esp);
     retarget_bcd(&esp_node, image_disk, table.id)?;
     grow_ntfs(&disk.partition(windows))?;
-    Ok(esp)
+    Ok((esp, windows))
 }
 
 /// The image's partition table, from its first MiB.
@@ -294,6 +295,43 @@ fn retarget_bcd(esp: &str, from: gpt::Guid, to: gpt::Guid) -> Result<()> {
         mtools(&["-o".as_ref(), tmp.as_os_str(), BCD.as_ref()])?;
         File::open(esp)?.sync_all()?;
         println!("pointed {n} BCD device entries at this disk");
+        Ok(())
+    })();
+    std::fs::remove_file(&tmp).ok();
+    result
+}
+
+/// Puts the boot manager this machine's Secure Boot db trusts on the ESP,
+/// as Setup would have (see firmware::WindowsBootManager). `build image`
+/// ran Setup under OVMF's keys, which include Windows UEFI CA 2023, so the
+/// image's ESP has the 2023-signed one: on firmware without that CA, Secure
+/// Boot refuses it and Windows doesn't start. The frozen 2011-signed one is
+/// in the install's own C:\Windows\Boot\EFI, where Setup takes it from.
+fn fit_boot_manager(esp: &str, windows: &str) -> Result<()> {
+    let db = match std::fs::read(Path::new("/sys/firmware/efi/efivars").join(format!("db-{}", firmware::DB_GUID))) {
+        Ok(b) => Some(b),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e).context("reading Secure Boot's db"),
+    };
+    if firmware::WindowsBootManager::for_db(db.as_deref()) == firmware::WindowsBootManager::Ca2023 {
+        println!("the firmware trusts Windows UEFI CA 2023: keeping the image's boot manager");
+        return Ok(());
+    }
+    let tmp = std::env::temp_dir().join(format!("dfnstrate-bootmgfw-{}", std::process::id()));
+    let result = (|| {
+        // -f: ntfsresize leaves the volume marked for a check.
+        let bootmgr = tools::output(NTFSCAT.cmd().arg("-f").arg(windows).arg("/Windows/Boot/EFI/bootmgfw.efi"))?;
+        if !firmware::contains(&bootmgr, b"Microsoft Windows Production PCA 2011") {
+            bail!("C:\\Windows\\Boot\\EFI\\bootmgfw.efi in the image isn't signed by the Windows Production PCA 2011");
+        }
+        std::fs::write(&tmp, &bootmgr)?;
+        for dest in ["::/EFI/Microsoft/Boot/bootmgfw.efi", "::/EFI/BOOT/BOOTX64.EFI"] {
+            tools::run(MCOPY.cmd().env("MTOOLS_SKIP_CHECK", "1").arg("-i").arg(esp).arg("-o").arg(&tmp).arg(dest))?;
+        }
+        File::open(esp)?.sync_all()?;
+        println!(
+            "the firmware doesn't trust Windows UEFI CA 2023: put Windows' 2011-signed boot manager on the ESP (Windows moves to the 2023 one by itself once the firmware trusts it)"
+        );
         Ok(())
     })();
     std::fs::remove_file(&tmp).ok();

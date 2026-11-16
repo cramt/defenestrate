@@ -41,22 +41,24 @@ values per hive. Every config is layered over the distro's own defaults,
 - [x] libcosmic builds for Windows from Linux (`nix build .#cosmic-bar-prototype`); not run on Windows yet
 - [ ] Shell: system tray, notifications, COSMIC's stacking and swap mode
 - [x] Provisioned AppX removal (`appx.remove`): deprovisioned during specialize, names checked against the image at build time. All 17 in the defaults removed in a `build image` run (from `specialize.log` on the image)
-- [ ] Gaming defaults for the new user: mouse acceleration ("Enhance pointer precision") off, and the Sticky/Filter/Toggle Keys hotkeys that pop a dialog over the game off. Stock values checked in the Default profile's hive; not yet seen applied in a booted VM
-- [x] Windows apps (`apps`): winget IDs, unpinned, installed by winget at the first real boot from a logon task first logon registers. Seen in the VM under our shell, online: the script installed Firefox elevated, and an equivalent logon task fired at the next logon, installed 7-Zip and deleted itself. Not yet seen from a fresh `build image`
-  - GPU drivers (`gpu`): a Windows Update pass for display drivers at first boot, plus per-vendor winget lists picked by PCI vendor ID. Unit-tested; not yet seen on real GPU hardware
+- [x] Gaming defaults for the new user: mouse acceleration ("Enhance pointer precision") off, and the Sticky/Filter/Toggle Keys hotkeys that pop a dialog over the game off. Seen in the user's hive after a fresh `build image` booted in the VM: MouseSpeed/MouseThreshold1/MouseThreshold2 0/0/0, StickyKeys 506, Keyboard Response 122, ToggleKeys 58
+- [x] Windows apps (`apps`): winget IDs, unpinned, installed by winget at the first real boot from a logon task first logon registers. Seen in the VM under our shell, online: the script installed Firefox elevated, and an equivalent logon task fired at the next logon, installed 7-Zip and deleted itself. From a fresh `build image`: first logon registered the task, and it ran at the first real boot and removed itself (the VM config has no apps, so only the GPU pass below ran)
+  - GPU drivers (`gpu`): a Windows Update pass for display drivers at first boot, plus per-vendor winget lists picked by PCI vendor ID. Seen from a fresh `build image` in the VM, online: the pass found QEMU's VGA (vendor 1234), asked Windows Update, which had no display driver for it, and finished in 6 minutes. Not yet seen on real GPU hardware
 - [ ] WSL installed offline, and the machine's Linux install run through it (`wsl.linux`): its disks attached and mounted, its apps in the Start Menu, run chrooted as its user
   - Seen in a VM (Windows nested in KVM, a saturn-shaped btrfs test install as a second disk, `nix build .#test-linux-disk`): WSL installs from the image, the logon task imports the distro, attaches the disk by GPT GUID, mounts it and puts its Firefox in the Start Menu; the launcher starts it, and Firefox runs from the install as its user, with its profile in the install's home. dfn's half is also a flake check (`checks.x86_64-linux.dfn`)
   - Linux GUI windows are a non-goal. WSLg's viewer (msrdc) only connects while a real explorer runs as the shell: a dump of it under our shell shows its connection thread never starting, and faking explorer's documented surface (Shell_TrayWnd and its appbar/tray messages, the shell window, the shell-ready events, TaskbarCreated) doesn't change that. Running explorer hidden underneath works, but this Windows exists to be a console for kernel-anticheat games, so explorer stays out. The experiment is on branch `t3/wslg-windows-under-shell`
   - Terminal programs work: Start Menu → "Linux terminal" (`dfn shell`) opens the user's login shell from the install, as the user, in their home
 - [x] Updating an install from Linux without a reflash (`dfnstrate update`, `build.update`): the shell, fonts and WSL payload are rewritten in place on the shut-down Windows partition, each keeping its NTFS security descriptor, and the logon task re-imports the distro when `rootfs.tar` changed
   - Seen on a `build image` output booted in the VM: `update` rewrote `rootfs.tar` and `wsl-logon.ps1` with their descriptors unchanged; at the next logon the distro was re-imported with the new `dfn` and mounted the test install, which the image's older distro had failed to; the logon after that didn't re-import. The partition was reached through ntfs-3g in a user namespace, so the by-id disk route has only been run as far as its refusals (a mounted disk, a partition, a non-by-id path), not onto a real disk
-- [x] `dfnstrate reboot`: into Windows once, by the firmware's BootNext, so the boot after it is Linux again. Picks the Windows Boot Manager entry whose ESP is on a disk that's attached, refuses to guess between two Windows (`--entry`); entries sharing an ESP count as one, `--no-reboot` only sets it. Unit-tested; not yet run on real hardware
-- [x] `dfnstrate doctor`: a read-only preflight run as the user, one line per check with the fix: UEFI, Secure Boot (with a fix for the bootloader it finds: lanzaboote, systemd-boot, GRUB, shim), TPM 2.0, `/dev/kvm`, every command's tools and the OVMF, scratch and cache space, whether the work dir is on a spinning disk, Windows Boot Manager entries live or stale, an RTC on local time, and disk swap Linux could hibernate to. Exits non-zero on any failure. Parsing is unit-tested; run on one NixOS machine so far
-- [x] "Reboot to Linux" in the launcher: boots the firmware's Linux entry once (BootNext, via `{fwbootmgr}` bootsequence) and reboots, through an on-demand elevated task, so no UAC prompt (`linuxBootEntry`). Seen in the VM, with Windows Boot Manager first in BootOrder and a "Linux Boot Manager" entry (a UEFI shell on the ESP) last: the shortcut started the task unelevated with no window and no prompt, the script picked the Linux entry, the next boot was the UEFI shell, and the boot after that was Windows again. First logon's registration was run by hand there, not from a fresh `build image`; the nothing-matches path and a `description` pin are untested
-- [x] Linux stays the firmware's default: a task at every Windows startup puts the `linuxBootEntry` entry back first in BootOrder, since Windows' first boot puts a Windows Boot Manager entry of its own first (and boot manager updates can again). Refuses when two entries could be Linux; `linuxBootEntry = "none"` turns it off. Seen in the VM on a `flash --into-free-space` disk with a "Linux Boot Manager" entry: Windows' first boot put a new Windows entry first; the task put Linux back, and did again with no logon after BootOrder was set Windows-first offline; the next plain boot was systemd-boot. The task was registered by hand there (the disk's image predates it), not from a fresh `build image`; the refusal and pinning paths ran only against mocked entries. Installs from before it need a reflash: `update` can't register tasks
+- [x] `dfnstrate reboot`: into Windows once, by the firmware's BootNext, so the boot after it is Linux again. Picks the Windows Boot Manager entry whose ESP is on a disk that's attached, refuses to guess between two Windows (`--entry`); entries sharing an ESP count as one, `--no-reboot` only sets it. Seen in the VM on a `flash --into-free-space` disk: with dfnstrate's entry and Windows' own on one ESP it set BootNext without asking; not yet run on real hardware
+- [x] `dfnstrate doctor`: a read-only preflight run as the user, one line per check with the fix: UEFI, Secure Boot (with a fix for the bootloader it finds: lanzaboote, systemd-boot, GRUB, shim), TPM 2.0, `/dev/kvm`, every command's tools and the OVMF, which Windows boot manager Secure Boot's db trusts, scratch and cache space, whether the work dir is on a spinning disk, Windows Boot Manager entries live or stale, an RTC on local time, and disk swap Linux could hibernate to. Exits non-zero on any failure. Parsing is unit-tested; run on one NixOS machine and in the free-space test VM so far
+- [x] "Reboot to Linux" in the launcher: boots the firmware's Linux entry once (BootNext, via `{fwbootmgr}` bootsequence) and reboots, through an on-demand elevated task, so no UAC prompt (`linuxBootEntry`). Seen in the VM, with Windows Boot Manager first in BootOrder and a "Linux Boot Manager" entry (a UEFI shell on the ESP) last: the shortcut started the task unelevated with no window and no prompt, the script picked the Linux entry, the next boot was the UEFI shell, and the boot after that was Windows again. A fresh `build image` registers the task and the Start Menu shortcut at first logon, and the launcher finds "Reboot to Linux"; the shortcut wasn't started in that run. The nothing-matches path and a `description` pin are untested
+- [x] Linux stays the firmware's default: a task at every Windows startup puts the `linuxBootEntry` entry back first in BootOrder, since Windows' first boot puts a Windows Boot Manager entry of its own first (and boot manager updates can again). Refuses when two entries could be Linux; `linuxBootEntry = "none"` turns it off. Seen in the VM on a `flash --into-free-space` disk with a "Linux Boot Manager" entry: Windows' first boot put a new Windows entry first; the task put Linux back, and did again with no logon after BootOrder was set Windows-first offline; the next plain boot was systemd-boot. From a fresh `build image` flashed into free space: first logon registered the task, and Windows' very first boot left Linux first again; so did the three boots after it, through Windows replacing its own boot manager (below). The refusal and pinning paths ran only against mocked entries. Installs from before it need a reflash: `update` can't register tasks
 - [x] Whole-disk image built in a sandboxed VM (`dfnstrate build image`, `build.image`) and flashed from Linux with no boot media (`dfnstrate flash`, `build.install`), replacing nixconf's `saturn-windows-image.sh`. Flash-and-boot verified on a disk-sized file, and booted to the shell on real hardware
 - [x] Flashing next to Linux on the same disk (`dfnstrate flash --into-free-space`): Windows' partitions go into the one free region the user made, its own ESP included, with Linux mounted and every existing partition untouched; the BCD is pointed at the disk's GUID
   - Seen in a VM, Linux running from the 1 TB disk it flashed: Linux's partitions hashed identically before and after, and after two Windows boots; Windows booted under Secure Boot to the shell on a 921 GiB C:, and Linux booted again afterwards. Not run on real hardware. Windows' first boot moves itself first in BootOrder (both layouts), which the startup task above undoes, and `update` doesn't support this layout
+  - Run end to end from a fresh `build image`: Linux's root and data partitions untouched, Windows to the shell under Secure Boot, Linux booting by default afterwards, and `dfnstrate reboot --no-reboot` picking Windows without `--entry`, both with dfnstrate's entry and Windows' own on the one ESP and with only Windows' left
+- [x] `flash` puts the Windows boot manager this machine's Secure Boot trusts on Windows' ESP ([Secure Boot and Windows' boot manager](#secure-boot-and-windows-boot-manager)). Seen in the VM on firmware whose db has only the 2011 Microsoft CAs: without it, Secure Boot refuses the image's boot manager and nothing boots; with it, Windows boots, and Windows Update then adds the 2023 CA to db and moves itself to the 2023 boot manager over two reboots
 
 ## Usage
 
@@ -291,13 +293,40 @@ Windows' first boot (on either layout) adds its own "Windows Boot
 Manager" entry and puts it first in BootOrder; giving dfnstrate's entry
 Windows' own optional data doesn't stop it. The startup task in
 [Updating an install](#updating-an-install) puts Linux back first at
-startup. Whether it lands after the takeover in that very first boot
-hasn't been seen (the test disk's image predates the task), so at worst
-one more Windows boot goes by first. That leaves two Windows
+startup, within that same first boot. That leaves two Windows
 entries on the same ESP; `dfnstrate reboot` knows they're one Windows.
 
 `dfnstrate update` doesn't handle this layout yet: it wants the whole disk
 unused and Windows on partition 3.
+
+### Secure Boot and Windows' boot manager
+
+Microsoft's Windows Production PCA 2011, which signed every Windows boot
+manager until 2026, expired in October 2026. Windows now carries two boot
+managers: the last 2011-signed one, frozen, and one signed by Windows UEFI
+CA 2023. Firmware only starts the 2023 one if its Secure Boot db holds
+that CA, which PCs from before ~2024 often don't. So Setup puts the 2023
+one on the ESP only where db trusts it, the 2011 one elsewhere, and
+Windows Update moves the ESP to 2023 once it has added the CA to db
+([KB5132953](https://support.microsoft.com/en-us/servicing/os/secure-boot/2026/10/kb5132953-windows-production-ca-2011-expiration-bootloader-updates),
+[the servicing steps](https://support.microsoft.com/en-us/servicing/os/secure-boot/2026/03/secure-boot-troubleshooting-guide)).
+
+`build image` runs Setup under OVMF's keys, which include the 2023 CA, so
+the image's ESP has the 2023 boot manager. `flash` reads the machine's
+db, and where it lacks Windows UEFI CA 2023 it copies the 2011 one from
+the install's own `C:\Windows\Boot\EFI` over `bootmgfw.efi` and the
+fallback `BOOTX64.EFI`, as Setup would have. `dfnstrate doctor` shows
+which one a machine will get.
+
+Seen in the VM, firmware with only the 2011 CAs (PCA 2011, UEFI CA 2011,
+KEK CA 2011): with the image's 2023 boot manager, Secure Boot refused it
+("Access Denied") and nothing booted. After `flash` put the 2011 one
+there, Windows booted to the shell under Secure Boot. At its next boot
+Windows' Secure Boot task wrote Windows UEFI CA 2023 and the other 2023
+CAs into db, and the boot after that replaced both files on its ESP
+with the 2023 boot manager, which the firmware then started. Microsoft
+also says future Windows releases won't install without the 2023 CA in
+db, so a firmware update that adds it is worth having anyway.
 
 ### Updating an install
 
@@ -582,9 +611,12 @@ Seen in the VM (the shell signed by `nix build .#shell` and installed onto a
 - Winlogon doesn't restart a Shell process that dies (killed, exit code 1),
   so the launcher exiting after the hand-over loses nothing.
 
-Not seen yet: a fresh `build image` (where setup imports the certificate
-from `software.reg` rather than `update` adding it), real hardware, and
-the AUR package's signing step.
+- A fresh `build image` flashed into free space: setup put the certificate
+  (`CN=defenestrate shell`, Code Signing) in LocalMachine\Root from
+  `software.reg`, and the first logon went launcher, then the uiAccess
+  binary, `TokenUIAccess=1`.
+
+Not seen yet: real hardware and the AUR package's signing step.
 
 ### Shell settings
 

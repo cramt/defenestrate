@@ -103,6 +103,11 @@ fn checks(iso_pin: &IsoPin, cache: &Cache, work_dir: &Path) -> Vec<Check> {
 
     if uefi {
         add("windows boot entries", boot_entries());
+        add("windows boot manager", boot_manager(match efivar("db", firmware::DB_GUID) {
+            Ok(b) => Ok(Some(b)),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }));
     }
     add("hardware clock", rtc(std::fs::read_to_string("/etc/adjtime").ok().as_deref()));
     add("hibernation", hibernation(std::fs::read_to_string("/proc/swaps").ok().as_deref()));
@@ -512,6 +517,22 @@ fn boot_entries() -> Outcome {
     }
 }
 
+/// Which boot manager `flash` will leave on Windows' ESP (see
+/// firmware::WindowsBootManager); worth knowing before Secure Boot goes on.
+fn boot_manager(db: std::io::Result<Option<Vec<u8>>>) -> Outcome {
+    use firmware::WindowsBootManager::{Ca2023, Pca2011};
+    match db {
+        Err(e) => warn(format!("can't read Secure Boot's db: {e}"), "`flash` checks it again as root; nothing to do here"),
+        Ok(db) => match firmware::WindowsBootManager::for_db(db.as_deref()) {
+            Ca2023 => pass("Secure Boot's db trusts Windows UEFI CA 2023, so Windows keeps its current boot manager"),
+            Pca2011 => warn(
+                if db.is_some() { "Secure Boot's db lacks Windows UEFI CA 2023" } else { "no Secure Boot db (setup mode)" },
+                "nothing needed to install: `flash` puts Windows' frozen 2011-signed boot manager on its ESP, and Windows Update moves it to the 2023 one once it has added the CA. A firmware update that adds Windows UEFI CA 2023 is better: Microsoft says future Windows releases won't install without it (KB5132953)",
+            ),
+        },
+    }
+}
+
 fn entries_outcome(entries: &[WindowsEntry], live: impl Fn(&WindowsEntry) -> bool) -> Outcome {
     let (live, stale): (Vec<&WindowsEntry>, Vec<&WindowsEntry>) = entries.iter().partition(|e| live(e));
     let nums = |es: &[&WindowsEntry]| es.iter().map(|e| format!("Boot{}", e.num)).collect::<Vec<_>>().join(", ");
@@ -521,9 +542,14 @@ fn entries_outcome(entries: &[WindowsEntry], live: impl Fn(&WindowsEntry) -> boo
             "harmless clutter; `dfnstrate flash` prunes them, or `sudo efibootmgr -b XXXX -B` each",
         );
     }
-    match live.len() {
+    // As `reboot` counts them: Windows' first boot adds its own entry next
+    // to flash's, both on one ESP, and that's still one Windows.
+    let mut esps: Vec<&str> = live.iter().map(|e| e.esp.as_str()).collect();
+    esps.sort_unstable();
+    esps.dedup();
+    match esps.len() {
         0 => pass("none yet; `dfnstrate flash` adds one"),
-        1 => pass(format!("{}, on a disk here; `dfnstrate reboot` boots it", nums(&live))),
+        1 => pass(format!("{}, one Windows on a disk here; `dfnstrate reboot` boots it", nums(&live))),
         _ => warn(format!("{} are all on disks here", nums(&live)), "`dfnstrate reboot` won't guess: pick one with `--entry XXXX`"),
     }
 }
@@ -671,6 +697,7 @@ mod tests {
         assert_eq!(label(&stale), "warn");
         assert!(matches!(&stale, Warn { found, .. } if found.contains("Boot0001") && !found.contains("Boot0003")));
         assert!(fix(&entries_outcome(&[e("0003", "a"), e("0004", "b")], |_| true)).contains("--entry"));
+        assert_eq!(label(&entries_outcome(&[e("0003", "esp"), e("0006", "esp")], |_| true)), "ok");
     }
 
     #[test]
