@@ -178,10 +178,9 @@ impl Cache {
     /// file reused while it's still in the cache.
     pub fn get_unpinned(&self, url: &str) -> Result<(PathBuf, Sri)> {
         let index = self.dir.join("urls").join(hex(&Sha256::digest(url.as_bytes())));
-        if let Some(hash) = std::fs::read_to_string(&index).ok().and_then(|h| Sri::try_from(h.trim().to_owned()).ok()) {
-            if let Some(p) = self.lookup(&hash) {
-                return Ok((p, hash));
-            }
+        let known = std::fs::read_to_string(&index).ok().and_then(|h| Sri::try_from(h.trim().to_owned()).ok());
+        if let Some((p, hash)) = known.and_then(|h| Some((self.lookup(&h)?, h))) {
+            return Ok((p, hash));
         }
         let got = self.download(url)?;
         let hash = got.hash.clone();
