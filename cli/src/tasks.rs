@@ -22,10 +22,19 @@ pub enum Trigger<'a> {
     Startup,
 }
 
-/// Elevated (HighestAvailable) as the configured user, in `logon`'s session.
+/// As the configured user, in `logon`'s session.
 pub struct AsUser<'a> {
     pub user: &'a str,
     pub logon: Logon,
+    pub level: RunLevel,
+}
+
+pub enum RunLevel {
+    /// Elevated (HighestAvailable): the user is an administrator.
+    Elevated,
+    /// The user's ordinary, filtered token (LeastPrivilege), for installers
+    /// that break when elevated (Discord's crashes).
+    Limited,
 }
 
 pub enum Logon {
@@ -42,12 +51,16 @@ pub enum Logon {
 pub fn xml(t: &Task) -> anyhow::Result<Vec<u8>> {
     let Task { description, trigger, command, arguments } = t;
     let x = crate::unattend::escape;
-    let principal = |AsUser { user, logon }: &AsUser| {
+    let principal = |AsUser { user, logon, level }: &AsUser| {
         let logon_type = match logon {
             Logon::Interactive => "InteractiveToken",
             Logon::Session0 => "S4U",
         };
-        format!("<UserId>{}</UserId><LogonType>{logon_type}</LogonType><RunLevel>HighestAvailable</RunLevel>", x(user))
+        let level = match level {
+            RunLevel::Elevated => "HighestAvailable",
+            RunLevel::Limited => "LeastPrivilege",
+        };
+        format!("<UserId>{}</UserId><LogonType>{logon_type}</LogonType><RunLevel>{level}</RunLevel>", x(user))
     };
     let (triggers, principal) = match trigger {
         Trigger::Logon(as_user) => (
@@ -112,7 +125,7 @@ mod tests {
 
     #[test]
     fn on_demand_has_no_trigger() {
-        let s = text(Trigger::OnDemand(AsUser { user: "u", logon: Logon::Session0 }));
+        let s = text(Trigger::OnDemand(AsUser { user: "u", logon: Logon::Session0, level: RunLevel::Elevated }));
         assert!(!s.contains("<Triggers>"), "{s}");
         assert!(s.contains("<LogonType>S4U</LogonType><RunLevel>HighestAvailable</RunLevel>"), "{s}");
         assert!(s.contains("<AllowStartOnDemand>true</AllowStartOnDemand>"), "{s}");
@@ -120,9 +133,9 @@ mod tests {
 
     #[test]
     fn logon_trigger_names_the_user() {
-        let s = text(Trigger::Logon(AsUser { user: "u", logon: Logon::Interactive }));
+        let s = text(Trigger::Logon(AsUser { user: "u", logon: Logon::Interactive, level: RunLevel::Limited }));
         assert!(s.contains("<LogonTrigger>\r\n      <Enabled>true</Enabled>\r\n      <UserId>u</UserId>"), "{s}");
-        assert!(s.contains("<LogonType>InteractiveToken</LogonType>"), "{s}");
+        assert!(s.contains("<LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel>"), "{s}");
     }
 
     #[test]

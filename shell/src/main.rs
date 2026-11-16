@@ -34,6 +34,8 @@ mod modes;
 mod overlay;
 #[cfg(windows)]
 mod switcher;
+#[cfg(windows)]
+mod theme;
 
 #[cfg(not(windows))]
 fn main() {
@@ -95,7 +97,7 @@ mod windows_main {
     use windows::core::{PCWSTR, PWSTR, Result, w};
 
     use crate::keys::{self, Action, WM_ACTION};
-    use crate::{desktop, env, launcher, settings, switcher};
+    use crate::{desktop, env, launcher, settings, switcher, theme};
 
     // In 96 DPI pixels; scaled to the DPI of the monitor it's drawn on.
     const FONT_HEIGHT: i32 = 18;
@@ -211,6 +213,8 @@ mod windows_main {
                 Ok(()) => log("keyboard hook installed"),
                 Err(e) => log(&format!("installing the keyboard hook failed: {e}")),
             }
+            // Before the apps the logon starts, so they open in it.
+            theme::apply();
             if let Err(e) = launcher::create(instance) {
                 log(&format!("creating the launcher failed: {e}"));
             }

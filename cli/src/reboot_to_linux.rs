@@ -28,7 +28,7 @@ use anyhow::Result;
 
 use crate::config::{Config, LinuxBootEntry};
 use crate::render::{IfMissing, InstallFile, ReadAt};
-use crate::tasks::{self, AsUser, Logon, Task, Trigger};
+use crate::tasks::{self, AsUser, Logon, RunLevel, Task, Trigger};
 
 pub const DIR: &str = "Windows/Setup/defenestrate/reboot";
 pub const TASK: &str = "defenestrate-reboot-to-linux";
@@ -67,7 +67,7 @@ pub fn render(config: &Config, dir: &Path) -> Result<Vec<InstallFile>> {
             description: "Boots the firmware's Linux entry once and reboots; started by the Start Menu's \"Reboot to Linux\". Log: %LOCALAPPDATA%\\defenestrate\\reboot.log",
             // Session 0: nothing to see, and no console window flashing up
             // over the game the user is quitting.
-            trigger: Trigger::OnDemand(AsUser { user, logon: Logon::Session0 }),
+            trigger: Trigger::OnDemand(AsUser { user, logon: Logon::Session0, level: RunLevel::Elevated }),
             command: "powershell.exe",
             arguments: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\\Windows\\Setup\\defenestrate\\reboot\\reboot-to-linux.ps1".into(),
         })?,

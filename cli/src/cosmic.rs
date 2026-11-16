@@ -3,8 +3,9 @@
 //! `compositor` is com.system76.CosmicComp, `theme` the bits of
 //! com.system76.CosmicTheme.Dark the shell draws with, `shortcuts` the
 //! custom shortcuts of com.system76.CosmicSettings.Shortcuts, layered over
-//! COSMIC's default bindings as COSMIC layers them, and `window_rules`
-//! com.system76.CosmicSettings.WindowRules.
+//! COSMIC's default bindings as COSMIC layers them, `window_rules`
+//! com.system76.CosmicSettings.WindowRules, and `mode`
+//! com.system76.CosmicTheme.Mode.
 //!
 //! Only what the shell does is accepted: an unknown key, or an action the
 //! shell has no counterpart for, fails the build rather than doing nothing on
@@ -21,10 +22,18 @@ use serde::{Deserialize, Serialize};
 pub struct Cosmic {
     pub compositor: Compositor,
     pub theme: Theme,
+    pub mode: Mode,
     #[serde(default)]
     pub shortcuts: Shortcuts,
     #[serde(default)]
     pub window_rules: WindowRules,
+}
+
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Mode {
+    /// Windows' dark mode for apps and the system, set at every logon.
+    pub is_dark: bool,
 }
 
 #[derive(Deserialize, Debug, Clone, Default, PartialEq)]
@@ -374,6 +383,7 @@ pub struct ShellSettings {
     pub tiling_exceptions: Vec<ApplicationException>,
     /// Not COSMIC's: the config's `displays`.
     pub displays: Vec<crate::config::DisplayMode>,
+    pub dark: bool,
 }
 
 #[derive(Serialize, Debug, PartialEq)]
@@ -414,6 +424,7 @@ impl Cosmic {
             shortcuts: self.shortcuts.0.iter().map(|(&keys, action)| Shortcut { keys, action: action.clone() }).collect(),
             tiling_exceptions: self.window_rules.tiling_exception_custom.iter().filter(|e| e.enabled).cloned().collect(),
             displays: displays.to_vec(),
+            dark: self.mode.is_dark,
         }
     }
 
@@ -507,11 +518,14 @@ mod tests {
             gaps = [0, 8]
             active_hint = 3
             accent = { red = 0.39, green = 0.69, blue = 0.89 }
+            [mode]
+            is_dark = false
             "#,
         )
         .unwrap();
         let s = c.shell_settings(&[]);
         assert_eq!((s.active_hint, s.focus_follows_cursor), (None, None));
+        assert!(!s.dark);
         c.compositor.active_hint = true;
         assert_eq!(c.shell_settings(&[]).active_hint, Some(ActiveHint { thickness: 3, colour: [99, 176, 227] }));
         c.theme.active_hint = 0;

@@ -314,6 +314,7 @@ mod tests {
             (format!("{s}/apps/apps.json"), ReadAt::EveryLogon),
             (format!("{s}/apps/install-apps.ps1"), ReadAt::EveryLogon),
             (format!("{s}/apps/task.xml"), ReadAt::Setup),
+            (format!("{s}/apps/limited-task.xml"), ReadAt::EveryLogon),
             (format!("{s}/reboot/reboot.json"), ReadAt::EveryLogon),
             (format!("{s}/reboot/linux-entry.ps1"), ReadAt::EveryLogon),
             (format!("{s}/reboot/reboot-to-linux.ps1"), ReadAt::EveryLogon),

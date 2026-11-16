@@ -5,6 +5,7 @@
 # own fileSystems, and programs run chrooted in it as its user, so Firefox is
 # the same binary with the same profile as when Linux is booted.
 #
+#   dfn boot           wsl.conf's boot command: share mounts, then mount
 #   dfn mount          mount the install at /linux (idempotent)
 #   dfn pack <path>    a tar of the install's <path> on stdout, symlinks followed
 #   dfn run <cmd>...   run a command as the user, through a login shell
@@ -63,6 +64,11 @@ do_mount() {
 		bind /mnt/wslg "$ROOT/run/wslg"
 		$bb mkdir -p "$ROOT/run/defenestrate"
 		resolv
+	fi
+	# The Linux user, by the install's uid, so wsl.conf can make them the
+	# distro's default user: what Windows writes over \\wsl$ is then theirs.
+	if ! $bb grep -q "^$USER_NAME:" /etc/passwd; then
+		echo "$USER_NAME:x:$(user_field 3):$(user_field 4)::/:/bin/sh" >>/etc/passwd
 	fi
 	# What _session runs on inside the install. Copied every time so an
 	# updated dfn takes effect without a remount.
@@ -176,6 +182,19 @@ session() {
 }
 
 case ${1:-} in
+boot)
+	# WSL gives elevated and non-elevated Windows clients separate mount
+	# namespaces, the second unshared from the first the first time it's
+	# needed (src/linux/init/config.cpp), and \\wsl$ is served from whichever
+	# client started the instance. The logon task mounts as an elevated one,
+	# so on a non-elevated start \\wsl$ showed an empty /linux. Shared before
+	# that split, a mount made in either namespace shows in both.
+	$bb mount --make-rshared /
+	# An instance WSL stopped and started again mounts by itself, if the
+	# disks are still attached. Its own process, so a missing disk stops it
+	# at the first mount (set -e) instead of binding into an empty /linux.
+	$bb sh /defenestrate/dfn mount >/tmp/dfn-boot.log 2>&1 || true
+	;;
 _enter)
 	shift
 	enter "$@"
@@ -190,6 +209,10 @@ mount)
 pack)
 	[ $# -eq 2 ] || { echo "usage: dfn pack <path>" >&2; exit 2; }
 	do_mount
+	# A path the Windows config names but the install doesn't have: the
+	# config is newer than the Linux generation last booted.
+	$bb chroot "$ROOT" /run/defenestrate/busybox test -e "$2" ||
+		{ echo "dfn: no $2 in the install; was Linux switched to the config that makes it before booting Windows?" >&2; exit 1; }
 	# Chrooted, so absolute symlinks (home-manager's into the store) resolve
 	# inside the install; -h follows them. As root: rendered secrets aren't
 	# the user's to read.
@@ -208,7 +231,7 @@ shell)
 	as_user 'exec "$1" -l' "$(user_field 7)"
 	;;
 *)
-	echo "usage: dfn mount | pack <path> | run <command> [args] | shell" >&2
+	echo "usage: dfn boot | mount | pack <path> | run <command> [args] | shell" >&2
 	exit 2
 	;;
 esac

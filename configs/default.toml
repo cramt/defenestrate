@@ -100,6 +100,9 @@ cursor_follows_focus = true          # stock: false
 # themselves; they're marked urgent instead. Stock: "Focus".
 activation_policy = "FocusIfActiveWorkspace"
 
+[cosmic.mode]                        # com.system76.CosmicTheme.Mode
+is_dark = true                       # Windows' dark mode for apps and the system
+
 [cosmic.theme]                       # com.system76.CosmicTheme.Dark
 # (outer, inner). cosmic-comp halves `inner` between tiles, rounding down, so
 # (0, 1) is a 1 px margin at the screen's edges and none between tiles.
@@ -118,6 +121,14 @@ accent = { red = 0.5450980392, green = 0.5254901961, blue = 0.5137254902 }
 "Super+d" = { System = "Launcher" }
 "Super+Shift+space" = { System = "PlayPause" }
 "Super+Escape" = { System = "LockScreen" }
+
+# COSMIC's tiling exceptions: windows that float although the shell would
+# tile them (README, "Shell settings").
+[[cosmic.window_rules.tiling_exception_custom]]
+# Discord's updater box: fixed-size and minimizable, like an app window,
+# and gone in seconds.
+appid = "^Discord(PTB|Canary)?$"
+title = "^Discord Updater$"
 
 [registry.system]
 # 24H2+ silently BitLockers the system drive on first sign-in and escrows

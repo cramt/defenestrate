@@ -4,9 +4,7 @@
 //! since there's no bar to put one in.
 
 use std::cell::{Cell, RefCell};
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -16,11 +14,13 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::Input::KeyboardAndMouse::{VK_DOWN, VK_ESCAPE, VK_NEXT, VK_PRIOR, VK_RETURN, VK_TAB, VK_UP};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, IDC_ARROW, KillTimer, LoadCursorW, RegisterClassW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE,
+    CreateWindowExW, DefWindowProcW, IDC_ARROW, KillTimer, LoadCursorW, RegisterClassW, SW_HIDE, SW_SHOW, SW_SHOWNORMAL, SWP_NOACTIVATE,
     SetTimer, SetWindowPos, ShowWindow, WA_INACTIVE, WM_ACTIVATE,
     WM_CHAR, WM_KEYDOWN, WM_PAINT, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
-use windows::core::{Result, w};
+use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx};
+use windows::Win32::UI::Shell::{SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW};
+use windows::core::{HSTRING, PCWSTR, Result, w};
 
 use crate::{desktop, font, fuzzy, log, scaled, use_dpi};
 
@@ -29,8 +29,6 @@ pub const WIDTH: i32 = 640;
 pub const ROW_HEIGHT: i32 = 28;
 pub const PADDING: i32 = 12;
 const CLOCK_TIMER: usize = 1;
-// CREATE_NO_WINDOW: `cmd /c start` is only a launcher, no console wanted.
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 // COLORREF is 0x00BBGGRR.
 pub const BACKGROUND: COLORREF = COLORREF(0x0020_1818);
@@ -184,21 +182,40 @@ fn walk(dir: &Path, out: &mut Vec<App>) {
     }
 }
 
+/// Through ShellExecuteEx, as explorer opens things: a shortcut's target,
+/// arguments and working directory come from the shortcut itself. Typed
+/// lines go to `start`, which resolves URLs, PATH lookups and arguments the
+/// way the Run box does. Spawning cmd.exe for shortcuts too failed once with
+/// "Access is denied" on saturn while Super+T's cmd.exe started fine
+/// (windows-bugs.md #14); the cause wasn't found.
 fn launch(what: Launch) {
-    // `start` resolves shortcuts, URLs, PATH lookups and arguments the
-    // way the Run box does, and doesn't wait for what it starts.
-    let target = match &what {
-        Launch::Shortcut(path) => format!("\"{}\"", path.display()),
-        Launch::CommandLine(line) => line.clone(),
+    let home = std::env::var_os("USERPROFILE").map(HSTRING::from);
+    let (file, params, show, target) = match what {
+        Launch::Shortcut(path) => (HSTRING::from(path.as_os_str()), None, SW_SHOWNORMAL, path.display().to_string()),
+        Launch::CommandLine(line) => (HSTRING::from("cmd.exe"), Some(HSTRING::from(format!("/c start \"\" {line}"))), SW_HIDE, line),
     };
-    let mut cmd = Command::new("cmd.exe");
-    cmd.raw_arg(format!("/c start \"\" {target}")).creation_flags(CREATE_NO_WINDOW);
-    if let Some(home) = std::env::var_os("USERPROFILE") {
-        cmd.current_dir(home);
-    }
-    if let Err(e) = cmd.spawn() {
-        log(&format!("launching {target} failed: {e}"));
-    }
+    // Its own thread: a slow or hung shell extension mustn't hang the shell.
+    std::thread::spawn(move || {
+        let pcwstr = |s: &Option<HSTRING>| s.as_ref().map_or(PCWSTR::null(), |s| PCWSTR(s.as_ptr()));
+        let mut info = SHELLEXECUTEINFOW {
+            cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+            // Done before returning, as this thread ends right after; errors
+            // go to the log, not a dialog.
+            fMask: SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC,
+            lpFile: PCWSTR(file.as_ptr()),
+            lpParameters: pcwstr(&params),
+            lpDirectory: pcwstr(&home),
+            nShow: show.0,
+            ..Default::default()
+        };
+        unsafe {
+            // ShellExecuteEx wants COM, single-threaded, as its docs say.
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+            if let Err(e) = ShellExecuteExW(&mut info) {
+                log(&format!("launching {target:?} failed: {e}"));
+            }
+        }
+    });
 }
 
 fn on_key(key: u16) -> bool {

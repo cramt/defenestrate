@@ -18,6 +18,7 @@ use crate::settings::TilingException;
 const WS_CHILD: u32 = 0x4000_0000;
 const WS_THICKFRAME: u32 = 0x0004_0000;
 const WS_MINIMIZEBOX: u32 = 0x0002_0000;
+const WS_EX_TOPMOST: u32 = 0x0000_0008;
 const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
 const WS_EX_NOACTIVATE: u32 = 0x0800_0000;
 
@@ -51,6 +52,9 @@ pub enum Why {
     Owned,
     ToolWindow,
     NoActivate,
+    /// Always on top: splash screens (Squirrel's "Installing..."), overlays
+    /// and fullscreen games, none of which belong in a tile.
+    Topmost,
     /// Neither sizable nor minimizable.
     Dialog,
     Ours,
@@ -80,6 +84,7 @@ impl fmt::Display for Verdict {
             Why::Owned => f.write_str("owned"),
             Why::ToolWindow => f.write_str("WS_EX_TOOLWINDOW"),
             Why::NoActivate => f.write_str("WS_EX_NOACTIVATE"),
+            Why::Topmost => f.write_str("WS_EX_TOPMOST"),
             Why::Dialog => f.write_str("no WS_THICKFRAME or WS_MINIMIZEBOX"),
             Why::Ours => f.write_str("the shell's own"),
             Why::OutOfReach => f.write_str("elevated or unopenable, and the shell has no uiAccess"),
@@ -104,6 +109,9 @@ pub fn classify(w: &Facts, exceptions: &[TilingException]) -> Verdict {
     }
     if w.ex_style & WS_EX_NOACTIVATE != 0 {
         return float(Why::NoActivate);
+    }
+    if w.ex_style & WS_EX_TOPMOST != 0 {
+        return float(Why::Topmost);
     }
     if w.ours {
         return float(Why::Ours);
@@ -136,6 +144,12 @@ mod tests {
         let league_lobby = facts(0x1402_0000, 0);
         assert_eq!(classify(&riot_client, &[]), Verdict::Tile);
         assert_eq!(classify(&league_lobby, &[]), Verdict::Tile);
+    }
+
+    /// Squirrel's "Installing..." splash, Discord's installer (windows-bugs.md #15).
+    #[test]
+    fn topmost_splashes_float() {
+        assert_eq!(classify(&facts(0x160f_0000, 0x000c_0108), &[]), Verdict::Float(Why::Topmost));
     }
 
     #[test]

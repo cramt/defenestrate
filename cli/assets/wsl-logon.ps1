@@ -1,6 +1,7 @@
 # Runs at each logon of the configured user, elevated, from the scheduled
 # task defenestrate-wsl (registered at first logon). Puts the machine's Linux
 # install within reach of WSL:
+#   - keeps WSL from stopping the distro when it's idle (.wslconfig),
 #   - imports the defenestrate distro (busybox and dfn) the first time, and
 #     again whenever rootfs.tar has changed,
 #   - attaches the install's disks to WSL (`wsl --mount --bare` needs admin,
@@ -45,7 +46,7 @@ function Copy-FromLinux([string]$from, [string]$to) {
     New-Item -ItemType Directory -Path $tmp | Out-Null
     try {
         $psi = New-Object System.Diagnostics.ProcessStartInfo $wsl
-        $psi.Arguments = "-d $distro --cd / --exec /defenestrate/dfn pack `"$from`""
+        $psi.Arguments = "-d $distro -u root --cd / --exec /defenestrate/dfn pack `"$from`""
         $psi.UseShellExecute = $false
         $psi.RedirectStandardOutput = $true
         $psi.RedirectStandardError = $true
@@ -66,8 +67,42 @@ function Copy-FromLinux([string]$from, [string]$to) {
     }
 }
 
+# Sets one key in the user's .wslconfig, keeping the rest of the file.
+function Set-WslConfig([string]$section, [string]$key, [string]$value) {
+    $path = Join-Path $env:USERPROFILE '.wslconfig'
+    $lines = [System.Collections.Generic.List[string]]::new()
+    if (Test-Path -LiteralPath $path) { $lines.AddRange([string[]](Get-Content -LiteralPath $path)) }
+    $in = $false; $start = -1; $end = $lines.Count
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '^\s*\[(.+)\]\s*$') {
+            if ($in) { $end = $i; break }
+            $in = $Matches[1].Trim() -eq $section
+            if ($in) { $start = $i }
+        } elseif ($in -and $lines[$i] -match "^\s*$([regex]::Escape($key))\s*=") {
+            if ($lines[$i].Trim() -eq "$key=$value") { return }
+            $lines[$i] = "$key=$value"
+            Set-Content -LiteralPath $path -Value $lines
+            Log ".wslconfig: $section.$key=$value"
+            return
+        }
+    }
+    if ($start -lt 0) {
+        $lines.Add("[$section]")
+        $lines.Add("$key=$value")
+    } else {
+        $lines.Insert($end, "$key=$value")
+    }
+    Set-Content -LiteralPath $path -Value $lines
+    Log ".wslconfig: $section.$key=$value"
+}
+
 try {
     Log 'logon'
+    # WSL stops a distro seconds after its last process exits, mounts and
+    # all, and the VM a minute later, which detaches the disks `wsl --mount`
+    # attached: the install would vanish from \\wsl$ until the next logon.
+    # Before any wsl call, since WSL reads it when it starts.
+    Set-WslConfig 'general' 'instanceIdleTimeout' '-1'
     $registered = Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss' -ErrorAction SilentlyContinue |
         Where-Object { (Get-ItemProperty $_.PSPath).DistributionName -eq $distro }
     # rootfs.tar is the distro's source of truth: `dfnstrate update` can
@@ -102,9 +137,21 @@ try {
     }
 
     Log 'mounting'
-    # Only a check that the install is reachable: WSL stops an idle distro
-    # within seconds, mounts and all, so every launch mounts again.
-    Wsl @('-d', $distro, '--cd', '/', '--exec', '/defenestrate/dfn', 'mount') | Out-Null
+    # The distro's boot command (dfn boot) mounted already if the disks were
+    # attached when it started; this covers the first logon, where they
+    # weren't. Every launch mounts again too, in case WSL restarted it.
+    Wsl @('-d', $distro, '-u', 'root', '--cd', '/', '--exec', '/defenestrate/dfn', 'mount') | Out-Null
+    # The distro's default user is the Linux user, so what Windows writes over
+    # \\wsl$ is theirs rather than root's. Its uid is the install's, which dfn
+    # mount just copied into the distro's passwd; WSL looks the user up only
+    # when the instance starts, so a first start (a fresh import) needs one
+    # more.
+    $uid = (Wsl @('-d', $distro, '--cd', '/', '--exec', '/bin/busybox', 'id', '-u') -AllowFailure | Select-Object -Last 1)
+    if ("$uid".Trim() -eq '0') {
+        Log "restarting the $distro distro so it runs as the Linux user"
+        Wsl @('--terminate', $distro) -AllowFailure | Out-Null
+        Wsl @('-d', $distro, '-u', 'root', '--cd', '/', '--exec', '/defenestrate/dfn', 'mount') | Out-Null
+    }
 
     # Only the terminal: WSLg's windows never show under our shell (README,
     # "Linux GUI windows are a non-goal"), so GUI apps would be dead entries.
@@ -120,7 +167,7 @@ try {
     $wanted[$file] = $true
     $lnk = $shell.CreateShortcut((Join-Path $menu $file))
     $lnk.TargetPath = $wsl
-    $lnk.Arguments = "-d $distro --cd / --exec /defenestrate/dfn shell"
+    $lnk.Arguments = "-d $distro -u root --cd / --exec /defenestrate/dfn shell"
     $lnk.Description = 'Login shell of the Linux install'
     $lnk.Save()
     Get-ChildItem $menu -Filter *.lnk | Where-Object { -not $wanted.ContainsKey($_.Name) } | Remove-Item

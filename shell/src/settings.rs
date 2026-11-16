@@ -30,6 +30,8 @@ pub struct Settings {
     pub tiling_exceptions: Vec<TilingException>,
     /// Not COSMIC's: the config's `displays`, display.rs.
     pub displays: Vec<DisplayMode>,
+    /// COSMIC's Mode is_dark: Windows' dark mode (theme.rs).
+    pub dark: bool,
 }
 
 /// Floats windows whose app ID and title both match, as COSMIC's
@@ -191,6 +193,7 @@ impl Default for Settings {
             shortcuts: Vec::new(),
             tiling_exceptions: Vec::new(),
             displays: Vec::new(),
+            dark: true,
         }
     }
 }
@@ -260,8 +263,11 @@ mod tests {
         assert_eq!(s.shortcut(super_(b'D')), Some(&Action::System(System::Launcher)));
         assert_eq!(s.shortcut(Keys { shift: true, ..super_(0x20) }), Some(&Action::System(System::PlayPause)));
         assert_eq!(s.shortcut(super_(b'Q')), None, "unbound here: COSMIC's default applies");
-        assert_eq!(s.tiling_exceptions, Vec::new());
+        assert_eq!(s.tiling_exceptions, vec![TilingException::new("^Discord(PTB|Canary)?$", "^Discord Updater$").unwrap()]);
+        assert!(s.tiling_exceptions[0].matches("Discord", "Discord Updater"));
+        assert!(!s.tiling_exceptions[0].matches("Discord", "Discord"));
         assert_eq!(s.displays, Vec::new());
+        assert!(s.dark);
     }
 
     #[test]
@@ -273,7 +279,7 @@ mod tests {
         let with_mode = Settings::parse(&RENDERED.replacen("\"displays\": []", mode, 1)).unwrap();
         assert_eq!(with_mode.displays.len(), 1, "what cli/src/config.rs's DisplayMode renders to");
         assert!(Settings::parse(&RENDERED.replacen("\"displays\": []", &mode.replace("5120", "0"), 1)).is_err());
-        let bad_regex = RENDERED.replacen("\"tiling_exceptions\": []", "\"tiling_exceptions\": [{\"appid\": \"(\", \"title\": \"\"}]", 1);
+        let bad_regex = RENDERED.replacen("\"^Discord Updater$\"", "\"(\"", 1);
         assert_ne!(bad_regex, RENDERED);
         assert!(Settings::parse(&bad_regex).is_err());
     }

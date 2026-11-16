@@ -17,7 +17,7 @@ use anyhow::Result;
 use crate::cache::Cache;
 use crate::config::{Config, Linux};
 use crate::render::{InstallFile, ReadAt};
-use crate::tasks::{self, AsUser, Logon, Task, Trigger};
+use crate::tasks::{self, AsUser, Logon, RunLevel, Task, Trigger};
 
 /// Relative to C:.
 pub const DIR: &str = "Windows/Setup/defenestrate/wsl";
@@ -61,7 +61,7 @@ pub fn render(config: &Config, cache: &Cache, work: &Path, dir: &Path) -> Result
             // hand, but failed at logon with 0x80070003. GUI apps are blocked
             // anyway under this shell (README), so this stays until both are
             // solved.
-            trigger: Trigger::Logon(AsUser { user, logon: Logon::Session0 }),
+            trigger: Trigger::Logon(AsUser { user, logon: Logon::Session0, level: RunLevel::Elevated }),
             command: "powershell.exe",
             arguments: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\\Windows\\Setup\\defenestrate\\wsl\\wsl-logon.ps1".into(),
         })?,
@@ -93,7 +93,15 @@ fn rootfs(busybox: &[u8], linux: &Linux) -> Result<Vec<u8>> {
     add("etc/passwd", 0o644, b"root:x:0:0:root:/root:/bin/sh\n")?;
     add("etc/group", 0o644, b"root:x:0:\n")?;
     // The distro only ever runs dfn: no Windows PATH, no C: drive, no fstab.
-    add("etc/wsl.conf", 0o644, b"[automount]\nenabled = false\nmountFsTab = false\n\n[interop]\nappendWindowsPath = false\n\n[user]\ndefault = root\n")?;
+    // dfn boot shares mounts between WSL's elevated and non-elevated views.
+    // The default user is the Linux one, so files Windows writes over \\wsl$
+    // are theirs; dfn mount adds them to passwd (only the install knows the
+    // uid), and everything that needs root asks for it (`-u root`).
+    let wsl_conf = format!(
+        "[automount]\nenabled = false\nmountFsTab = false\n\n[interop]\nappendWindowsPath = false\n\n[user]\ndefault = {}\n\n[boot]\ncommand = /defenestrate/dfn boot\n",
+        linux.user
+    );
+    add("etc/wsl.conf", 0o644, wsl_conf.as_bytes())?;
     drop(add);
     for dir in ["dev", "proc", "sys", "tmp", "run", "mnt", "root", "linux", "lib", "usr"] {
         let mut h = tar::Header::new_gnu();
@@ -104,7 +112,7 @@ fn rootfs(busybox: &[u8], linux: &Linux) -> Result<Vec<u8>> {
         tar.append_data(&mut h, format!("{dir}/"), std::io::empty())?;
     }
     // WSL runs commands through /bin/sh and calls mount and friends itself;
-    // the rest is for poking around (`wsl -d defenestrate`).
+    // the rest is for poking around (`wsl -d defenestrate -u root`).
     for applet in APPLETS {
         let mut h = tar::Header::new_gnu();
         h.set_entry_type(tar::EntryType::Symlink);

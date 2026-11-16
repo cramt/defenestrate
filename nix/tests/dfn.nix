@@ -40,8 +40,30 @@ pkgs.vmTools.runInLinuxVM (pkgs.runCommand "dfn-test"
     for _ in $(seq 50); do inside /bin/busybox true 2>/dev/null && break; sleep 0.2; done
     dfn() { inside /defenestrate/dfn "$@"; }
 
+    # wsl.conf's boot command, as the instance starts: the disks are
+    # attached, so it mounts the install.
+    dfn boot
+    inside /bin/busybox grep -q ' /linux ' /proc/mounts || { inside /bin/busybox cat /tmp/dfn-boot.log; exit 1; }
+    # WSL's second mount namespace (elevated or not, whichever came second):
+    # a bare unshare(2) of the first, propagation untouched, as its init
+    # makes it (busybox's --propagation unchanged still remounts, and fails).
+    # What the logon task mounts in there has to show where \\wsl$ looks.
+    # From inside the distro's root, as WSL's init is: unshare(2) moves the
+    # root onto the new namespace's copy of it.
+    python3 -c 'import os, sys, time; os.setns(os.open(f"/proc/{sys.argv[1]}/ns/mnt", os.O_RDONLY), os.CLONE_NEWNS); os.chroot(f"/proc/{sys.argv[1]}/root"); os.unshare(os.CLONE_NEWNS); time.sleep(100000)' $holder &
+    second=$!
+    for _ in $(seq 50); do [ -e /proc/$second/root/bin/busybox ] && break; sleep 0.2; done
+    [ "$(readlink /proc/$second/ns/mnt)" != "$(readlink /proc/$holder/ns/mnt)" ]
+    inside /bin/busybox mkdir -p /linux/tmp/probe
+    nsenter -t $second -m -r -- /bin/busybox mount -t tmpfs probe /linux/tmp/probe
+    inside /bin/busybox grep -q ' /linux/tmp/probe ' /proc/mounts || { echo "a mount in WSL's other namespace didn't propagate"; exit 1; }
+    kill $second
+
     dfn mount
     dfn mount # again: idempotent, as every logon runs it
+    # The Linux user, by the install's uid, once: wsl.conf's default user.
+    [ "$(inside /bin/busybox grep -c '^user:x:1000:' /etc/passwd)" = 1 ]
+    inside /bin/busybox grep -q '^default = user$' /etc/wsl.conf
 
     uid=$(dfn run id -u)
     [ "$uid" = 1000 ] || { echo "ran as uid $uid, not the user's 1000"; exit 1; }

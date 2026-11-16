@@ -4,6 +4,9 @@
 //!   apps.json          what to install (see [`Plan`])
 //!   install-apps.ps1   what the task runs
 //!   task.xml           the task
+//!   limited-task.xml   the same script unelevated, on demand, which the
+//!                      task registers and runs for an installer that
+//!                      failed elevated
 
 use std::path::Path;
 
@@ -12,7 +15,7 @@ use serde::Serialize;
 
 use crate::config::{AppId, Config};
 use crate::render::{InstallFile, ReadAt};
-use crate::tasks::{self, AsUser, Logon, Task, Trigger};
+use crate::tasks::{self, AsUser, Logon, RunLevel, Task, Trigger};
 
 pub const DIR: &str = "Windows/Setup/defenestrate/apps";
 pub const TASK: &str = "defenestrate-apps";
@@ -34,6 +37,8 @@ struct VendorApps<'a> {
     pci_vendor: &'static str,
     apps: &'a [AppId],
 }
+
+const SCRIPT_ARGS: &str = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\\Windows\\Setup\\defenestrate\\apps\\install-apps.ps1";
 
 pub fn needed(config: &Config) -> bool {
     !config.apps.is_empty() || config.gpu.installs_anything()
@@ -77,11 +82,23 @@ pub fn render(config: &Config, dir: &Path) -> Result<Vec<InstallFile>> {
             // the user's profile, which they wouldn't as SYSTEM (winget
             // doesn't run as SYSTEM anyway). The cost: while an installer
             // window is focused, the shell's keyboard hook gets no keys.
-            trigger: Trigger::Logon(AsUser { user, logon: Logon::Interactive }),
+            trigger: Trigger::Logon(AsUser { user, logon: Logon::Interactive, level: RunLevel::Elevated }),
             command: "powershell.exe",
-            arguments: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\\Windows\\Setup\\defenestrate\\apps\\install-apps.ps1".into(),
+            arguments: SCRIPT_ARGS.into(),
         })?,
         ReadAt::Setup,
+    )?;
+    // Registered by install-apps.ps1 itself (schtasks /create /f), not at
+    // first logon, so an install `dfnstrate update` brings it to gets it too.
+    write(
+        "limited-task.xml",
+        &tasks::xml(&Task {
+            description: "Installs one winget app unelevated, for defenestrate-apps: some per-user installers crash elevated (Discord's).",
+            trigger: Trigger::OnDemand(AsUser { user, logon: Logon::Interactive, level: RunLevel::Limited }),
+            command: "powershell.exe",
+            arguments: format!("{SCRIPT_ARGS} -Limited"),
+        })?,
+        ReadAt::EveryLogon,
     )?;
     Ok(files)
 }
@@ -89,6 +106,14 @@ pub fn render(config: &Config, dir: &Path) -> Result<Vec<InstallFile>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn script_knows_the_tasks_by_their_names() {
+        let script = include_str!("../assets/install-apps.ps1");
+        // The file render() writes, which the script registers itself.
+        assert!(script.contains("(Join-Path $here 'limited-task.xml')"));
+        assert!(script.contains(&format!("$taskName = '{TASK}'")));
+    }
 
     #[test]
     fn plan_keeps_only_vendors_with_apps() {

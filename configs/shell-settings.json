@@ -98,6 +98,12 @@
       }
     }
   ],
-  "tiling_exceptions": [],
-  "displays": []
+  "tiling_exceptions": [
+    {
+      "appid": "^Discord(PTB|Canary)?$",
+      "title": "^Discord Updater$"
+    }
+  ],
+  "displays": [],
+  "dark": true
 }

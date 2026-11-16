@@ -5,6 +5,12 @@
 # that first logon is the build's offline VM, so the first time this runs is
 # the machine's first real boot. Runs elevated in the user's session.
 # Log: %LOCALAPPDATA%\defenestrate\apps.log
+#
+# -Limited: what defenestrate-apps-limited runs, unelevated, for an ID that
+# failed elevated (Discord's Squirrel installer crashes when elevated):
+# installs the one ID in limited-request.txt and writes how it went to
+# limited-result.txt.
+param([switch]$Limited)
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
 $state = Join-Path $env:LOCALAPPDATA 'defenestrate'
@@ -14,37 +20,75 @@ $log = Join-Path $state 'apps.log'
 # what already worked.
 $doneFile = Join-Path $state 'apps-done.txt'
 $taskName = 'defenestrate-apps'
+$limitedTask = 'defenestrate-apps-limited'
+$request = Join-Path $state 'limited-request.txt'
+$result = Join-Path $state 'limited-result.txt'
 # Can't clash with a winget ID, which has no colon.
 $wuItem = 'windows-update:display-drivers'
 
 function Log([string]$msg) {
-    Add-Content -LiteralPath $log -Value ('{0:yyyy-MM-dd HH:mm:ss} {1}' -f (Get-Date), $msg)
+    $who = if ($Limited) { ' (unelevated)' } else { '' }
+    Add-Content -LiteralPath $log -Value ('{0:yyyy-MM-dd HH:mm:ss}{1} {2}' -f (Get-Date), $who, $msg)
 }
 
 # Start-Process -Wait has no timeout, and an installer stuck on a dialog
-# nobody sees would hold up everything after it forever. winget's own log
-# and its output go to winget\<id>.log and winget\<id>.out.log: the exit
-# code alone says nothing about why an installer failed.
+# nobody sees would hold up everything after it forever. winget's output goes
+# to winget\<id>.out.log and its own log to winget\<id>.log: the exit code
+# alone says nothing about why an installer failed. Unelevated, user scope
+# only: a machine-wide installer would stop on a UAC prompt.
 function Invoke-Winget([string]$winget, [string]$id) {
     $logs = Join-Path $state 'winget'
     New-Item -ItemType Directory -Force -Path $logs | Out-Null
+    $name = if ($Limited) { "$id.unelevated" } else { $id }
+    $scope = if ($Limited) { ' --scope user' } else { '' }
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $winget
-    $psi.Arguments = "install --id `"$id`" --exact --source winget --silent --accept-package-agreements --accept-source-agreements --disable-interactivity --verbose-logs --log `"$(Join-Path $logs "$id.log")`""
+    $psi.Arguments = "install --id `"$id`" --exact --source winget --silent --accept-package-agreements --accept-source-agreements --disable-interactivity --verbose-logs$scope"
     $psi.UseShellExecute = $false
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
+    $started = Get-Date
     $p = [System.Diagnostics.Process]::Start($psi)
     # Both read at once: a full pipe on the one not being read would stall winget.
     $out = $p.StandardOutput.ReadToEndAsync()
     $err = $p.StandardError.ReadToEndAsync()
     $finished = $p.WaitForExit(30 * 60 * 1000)
     if (-not $finished) { $p.Kill() }
-    Set-Content -LiteralPath (Join-Path $logs "$id.out.log") -Value ($out.Result + $err.Result)
+    Set-Content -LiteralPath (Join-Path $logs "$name.out.log") -Value ($out.Result + $err.Result)
+    Copy-WingetLog $started (Join-Path $logs "$name.log")
     if (-not $finished) { throw 'still running after 30 minutes, killed it' }
     # 0x8A15002B: already installed, e.g. a rerun after the install worked
     # but the done file didn't get written.
-    if (@(0, -1978335189) -notcontains $p.ExitCode) { throw ('exit code 0x{0:X8}, see winget\{1}.log' -f $p.ExitCode, $id) }
+    if (@(0, -1978335189) -notcontains $p.ExitCode) { throw ('exit code 0x{0:X8}, see winget\{1}.log' -f $p.ExitCode, $name) }
+}
+
+# winget ignores --log here (1.26.509, saturn): its log only ever lands in
+# its own DiagOutputDir, so the newest one since $since is copied out.
+function Copy-WingetLog([datetime]$since, [string]$to) {
+    $dir = Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.DesktopAppInstaller_8wekyb3d8bbwe\LocalState\DiagOutputDir'
+    $newest = Get-ChildItem -LiteralPath $dir -Filter 'WinGet-*.log' -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -ge $since } | Sort-Object LastWriteTime | Select-Object -Last 1
+    if ($newest) { Copy-Item -LiteralPath $newest.FullName -Destination $to -Force }
+}
+
+# Runs $id through defenestrate-apps-limited, unelevated, and waits for it.
+function Invoke-Limited([string]$id) {
+    # /f: an install from before the task existed gets it, and a changed
+    # limited-task.xml replaces the old one.
+    schtasks.exe /create /tn $limitedTask /xml (Join-Path $here 'limited-task.xml') /f | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "registering $limitedTask failed ($LASTEXITCODE)" }
+    Remove-Item -LiteralPath $result -ErrorAction SilentlyContinue
+    Set-Content -LiteralPath $request -Value $id
+    schtasks.exe /run /tn $limitedTask | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "starting $limitedTask failed ($LASTEXITCODE)" }
+    # Invoke-Winget's own limit, and a little.
+    $deadline = (Get-Date).AddMinutes(32)
+    while (-not (Test-Path -LiteralPath $result)) {
+        if ((Get-Date) -gt $deadline) { throw "$limitedTask didn't finish" }
+        Start-Sleep -Seconds 5
+    }
+    $outcome = (Get-Content -Raw -LiteralPath $result).Trim()
+    if ($outcome -ne 'installed') { throw "unelevated: $outcome" }
 }
 
 # What explorer does with a PATH an installer changed, and the shell does
@@ -116,6 +160,22 @@ function Find-Winget {
     return $null
 }
 
+if ($Limited) {
+    try {
+        $id = (Get-Content -Raw -LiteralPath $request).Trim()
+        Log "$id"
+        $winget = Find-Winget
+        if (-not $winget) { throw 'winget not available' }
+        Invoke-Winget $winget $id
+        Log "${id}: installed"
+        Set-Content -LiteralPath $result -Value 'installed'
+    } catch {
+        Log "failed: $_"
+        Set-Content -LiteralPath $result -Value "$_"
+    }
+    exit
+}
+
 try {
     $plan = Get-Content -Raw -LiteralPath (Join-Path $here 'apps.json') | ConvertFrom-Json
     # Drivers first: the vendors' apps and the games want them in.
@@ -153,7 +213,17 @@ try {
         foreach ($id in $pending) {
             Log "$id"
             try {
-                if ($id -eq $wuItem) { Install-DisplayDrivers } else { Invoke-Winget $winget $id }
+                if ($id -eq $wuItem) {
+                    Install-DisplayDrivers
+                } else {
+                    try {
+                        Invoke-Winget $winget $id
+                    } catch {
+                        # Per-user installers can fail just for being elevated.
+                        Log "${id}: failed elevated ($_), trying unelevated"
+                        Invoke-Limited $id
+                    }
+                }
                 Add-Content -LiteralPath $doneFile -Value $id
                 Log "${id}: installed"
                 Send-EnvironmentChanged

@@ -36,7 +36,7 @@ values per hive. Every config is layered over the distro's own defaults,
   - Window switcher (Alt+Tab, Super+Tab), as cosmic-launcher's alt-tab view: every window on every workspace, minimized ones included, most recently focused first; letting go of the modifiers goes to the selection's workspace, restores and focuses it. Without explorer, Windows' own Alt+Tab still switches but shows nothing and can't reach other workspaces, so the shell takes the keys. Seen in the VM: switching among three windows (five times running), Shift going backwards, Escape cancelling, and bringing back a window minimized on another workspace, onto its workspace and back into the tiling. Windows the shell doesn't tile (games in exclusive fullscreen, and elevated apps when it runs without uiAccess) are listed too, untested. A restored tile splits the focused window instead of going back to its old spot, as COSMIC's would
   - Multiple monitors, as COSMIC's default "workspaces per display": each monitor has its own nine workspaces and switches them by itself; new windows, Super+1–9, the launcher and the switcher go by the monitor the pointer is on, moving windows by the one with focus. Focus past the left or right edge of a monitor's tiling goes to the next monitor (the pointer goes along), and a window moved past it goes there too, taking the half of the layout it came in on; past the top or bottom, the previous or next workspace. A tile Super+dragged onto another monitor drops into that one's tiling. An unplugged monitor's workspaces go to the first monitor, into free slots, and back to their own slots when it's plugged in again. Overlays and Super+drag sizes follow each monitor's DPI. Seen in the VM with two monitors (std VGA plus virtio-gpu with virtio-win's viogpudo, since Windows' inbox driver drives only one): tiling on each in its own area, Super+Alt+Right moving the pointer and new windows to the second, focus coming back with Super+Left, Super+1/2 switching one monitor's workspace with the other left alone, Super+Shift+Right carrying a window across onto the near half and Super+Shift+Alt+Left bringing it back, the launcher opening on the pointer's monitor, and a monitor switched off and on again (`DisplaySwitch /internal`, `/extend`), its workspace landing in a free slot on the other and going home after. Unit-tested only: Super+drag between monitors, mixed DPI (the VM's two are the same), floating windows keeping their place across, and unplugging real hardware
   - COSMIC's settings from the config, under cosmic-comp's names ([Shell settings](#shell-settings)): gaps, the active hint (a 1 px accent border just outside the focused window, a click-through window of the shell's own, moved only when focus or a tile changes), focus following the pointer after a delay, the pointer following keyboard focus, windows on other workspaces raising themselves left there, autotile, and custom shortcuts over COSMIC's defaults. Seen in the VM: the hint around the focused tile in the 1 px edge gap and on the seam between two tiles, which have no gap between them; Super+T and Super+D running the terminal and the launcher; Super+Y and Super+F doing nothing in the shell (the letter reaches the focused app, as any unbound Super+letter does without explorer); focus following the pointer, with a pass over a tile shorter than the delay changing nothing (the hint moved 260–300 ms after the pointer against 100–140 ms after a key, in a loaded VM drawing 5–8 frames a second); the pointer jumping to a new window and to one focused with Super+L. Windows' own Win+V (clipboard history) and Win+. (emoji panel) don't open without explorer. The activation policy and media keys are unit-tested or untested only,; gaps and the hint are sized by the primary monitor's DPI on every monitor
-  - A minimized window leaves the tiling but stays on its workspace; where no tile covers it, Windows still draws its stub of title bar in the bottom-left corner. Dialogs float: windows that are owned, tool windows, or neither sizable nor minimizable. Fixed-size and self-drawn app windows (launchers, installers, League's client) tile, since a minimize box is what sets them apart from a dialog; `cosmic.window_rules` floats the ones that still shouldn't, and `shell.log` has a line per new window saying which it got and why. Elevated windows tile and take the shell's keys and Super+drag like any other, through uiAccess ([Elevated windows](#elevated-windows)); if Windows won't grant it, they float and the keys don't reach them, as before. A crashing shell leaves windows on other workspaces hidden
+  - A minimized window leaves the tiling but stays on its workspace; where no tile covers it, Windows still draws its stub of title bar in the bottom-left corner. Dialogs float: windows that are owned, tool windows, always on top (splash screens), or neither sizable nor minimizable. Fixed-size and self-drawn app windows (launchers, installers, League's client) tile, since a minimize box is what sets them apart from a dialog; `cosmic.window_rules` floats the ones that still shouldn't, and `shell.log` has a line per new window saying which it got and why. Elevated windows tile and take the shell's keys and Super+drag like any other, through uiAccess ([Elevated windows](#elevated-windows)); if Windows won't grant it, they float and the keys don't reach them, as before. A crashing shell leaves windows on other workspaces hidden
 - [x] Iosevka Nerd Font Mono installed system-wide (`fonts`, fetched from the Nerd Fonts release) and used by the shell and every console. Windows 11 hands consoles to Windows Terminal once it's registered, which ignores console fonts, so the default terminal is pinned to conhost
 - [x] libcosmic builds for Windows from Linux (`nix build .#cosmic-bar-prototype`); not run on Windows yet
 - [ ] Shell: system tray, notifications, COSMIC's stacking and swap mode
@@ -550,13 +550,18 @@ an hour. Each ID that's in is recorded in
 next logon, and once everything is in the task deletes itself. The
 installers' elevated windows tile and the shell's keys keep working while
 they have focus (see [Elevated windows](#elevated-windows)). An ID that fails
-three times in a run is left for the next logon rather than retried every
+elevated is tried again unelevated and user-scope, through the on-demand
+task `defenestrate-apps-limited`, which the apps task registers itself:
+some per-user installers crash when elevated (Discord's Squirrel one does,
+every time). An ID that fails three times in a run is left for the next logon rather than retried every
 minute. After each install the task broadcasts that the environment changed,
 and the shell, which has no explorer to do it, reloads its own from the
 registry, so an app that put itself on PATH runs from the next thing started
 without logging out. Log: `%LOCALAPPDATA%\defenestrate\apps.log`, with
 winget's own log and output per ID in `winget\<id>.log` and
-`winget\<id>.out.log` next to it.
+`winget\<id>.out.log` next to it (`<id>.unelevated.*` for the second
+try). winget ignores `--log`, so its log is copied from its own
+`DiagOutputDir`.
 
 #### GPU drivers
 
@@ -622,22 +627,31 @@ also registers the logon task `defenestrate-wsl`. It runs elevated
 (`wsl --mount` needs admin) in session 0, so it never shows a window, and on
 each logon it:
 
-1. imports the `defenestrate` distro from `rootfs.tar` the first time, and
+1. sets `instanceIdleTimeout=-1` under `[general]` in `%USERPROFILE%\.wslconfig`,
+   leaving the rest of the file alone. WSL otherwise stops the distro seconds
+   after its last process, mounts and all, and the VM a minute later, which
+   detaches the disks;
+2. imports the `defenestrate` distro from `rootfs.tar` the first time, and
    again whenever that file has changed (by its SHA-256), so `update` reaches
    it. That's static busybox and `dfn` (`cli/assets/dfn.sh`), about a
    megabyte, with nothing in it worth keeping;
-2. attaches the disks named in `wsl.linux.disks` to WSL (`wsl --mount
+3. attaches the disks named in `wsl.linux.disks` to WSL (`wsl --mount
    --bare`), found by GPT disk GUID, which Windows and Linux both report;
-3. runs `dfn mount`, which mounts `wsl.linux.mounts` at `/linux` the way
+4. runs `dfn mount`, which mounts `wsl.linux.mounts` at `/linux` the way
    NixOS mounts its `fileSystems`, by `LABEL=` or `UUID=` because device
    names differ inside WSL, then binds `/proc`, `/dev`, WSLg's sockets and
-   WSL's DNS into it, and gives it a fresh `/run` with `current-system`;
-4. writes the Start Menu shortcut Programs\Linux\Linux terminal, which runs
+   WSL's DNS into it, and gives it a fresh `/run` with `current-system`.
+   It also adds the Linux user to the distro's passwd with the install's
+   uid: they're the distro's default user (`wsl.conf`), so what Windows
+   writes into the install over `\\wsl$` is theirs, not root's. WSL reads
+   the default user as the distro starts, so after a fresh import the task
+   restarts it once;
+5. writes the Start Menu shortcut Programs\Linux\Linux terminal, which runs
    `dfn shell`: it chroots into the install and opens the user's login
    shell as the user, in their home, so the profiles' environment applies.
    The install's GUI apps get no shortcuts, and any left in that folder by
    older versions are removed;
-5. copies `wsl.linux.files` into the user's profile, each a destination
+6. copies `wsl.linux.files` into the user's profile, each a destination
    under `%USERPROFILE%` mapped to a file or directory in the install.
    `dfn pack` tars it up as root inside the install, so symlinks into the
    Nix store resolve and rendered secrets (`/var/lib/op-secrets`, say) can
@@ -646,7 +660,16 @@ each logon it:
    fails keeps its last copy, and one dropped from the config is deleted.
    This is how config and secrets from Linux reach Windows programs without
    anything secret going into the image, and they're as fresh as Linux's
-   last render.
+   last render. A path the install doesn't have (a Windows config newer
+   than the Linux generation last booted) says so in the log.
+
+The distro's `wsl.conf` boot command, `dfn boot`, makes its mounts shared
+and mounts the install whenever WSL starts the distro, if the disks are
+attached. WSL gives elevated and non-elevated Windows programs separate
+mount namespaces, and `\\wsl$` is served from whichever started the distro;
+shared, the logon task's (elevated) mounts show in Explorer's and any
+other program's `\\wsl$\defenestrate\linux`. `nix/tests/dfn.nix` checks
+that against a namespace made the way WSL's init makes it.
 
 Logs go to `%LOCALAPPDATA%\defenestrate\wsl.log`.
 
@@ -772,8 +795,9 @@ Not seen yet: real hardware and the AUR package's signing step.
 The shell's behaviour is the config's `cosmic` table, keyed by cosmic-comp's
 own setting names, so a COSMIC config carries over key for key: the
 `compositor` keys are `com.system76.CosmicComp`'s, the `theme` keys
-`com.system76.CosmicTheme.Dark`'s, `shortcuts` are COSMIC's custom
-shortcuts, and `window_rules` is `com.system76.CosmicSettings.WindowRules`. The defaults in `configs/default.toml` are the maintainer's
+`com.system76.CosmicTheme.Dark`'s, `mode` is `com.system76.CosmicTheme.Mode`,
+`shortcuts` are COSMIC's custom shortcuts, and `window_rules` is
+`com.system76.CosmicSettings.WindowRules`. The defaults in `configs/default.toml` are the maintainer's
 COSMIC settings, not COSMIC's stock ones. Unknown keys, and actions the
 shell has no counterpart for, fail the build.
 
@@ -790,7 +814,8 @@ shell has no counterpart for, fail the build.
 | `theme.active_hint` | `1` | `3` | Focus border width, px |
 | `theme.accent` | #8b8683 | blue | Focus border colour, as COSMIC's `{ red, green, blue }` from 0 to 1 |
 | `shortcuts` | see [Keys](#keys) | none | `"Super+Shift+space" = { System = "PlayPause" }`: keys in COSMIC's spelling, then `"Disable"`, `{ Spawn = "command line" }`, `{ System = ... }` (`Launcher`, `AppLibrary`, `Terminal`, `HomeFolder`, `LockScreen`, `LogOut`, `PlayPause`, `PlayNext`, `PlayPrev`, `Mute`, `VolumeRaise`, `VolumeLower`), or a window action (`Close`, `Maximize`, `ToggleTiling`, `ToggleWindowFloating`, `ToggleOrientation`, `Focus`/`Move` with a direction, `Workspace`/`MoveToWorkspace` with 1-9, `NextWorkspace`, `PreviousWorkspace`, `MoveToNextWorkspace`, `MoveToPreviousWorkspace`, `SwitchOutput`/`MoveToOutput` with a direction) |
-| `window_rules.tiling_exception_custom` | none | none | Windows that float although they'd tile: `[{ appid = "^LeagueClientUx$", title = "" }]`, both unanchored regexes as in COSMIC (`""` matches anything), `enabled = false` to keep one around unused. The app ID is the exe's name without `.exe`; `shell.log` names it for every window |
+| `mode.is_dark` | `true` | `true` | Windows' dark mode for apps and the system, set by the shell as it starts, before the apps the logon opens |
+| `window_rules.tiling_exception_custom` | Discord's updater | none | Windows that float although they'd tile: `[{ appid = "^LeagueClientUx$", title = "" }]`, both unanchored regexes as in COSMIC (`""` matches anything), `enabled = false` to keep one around unused. The app ID is the exe's name without `.exe`; `shell.log` names it for every window |
 
 Pixel sizes are scaled by the display's DPI. Keys are named as xkb keysyms
 or the character itself; punctuation other than period, comma and minus
