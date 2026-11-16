@@ -90,10 +90,13 @@ any that are missing.
 
 ### Arch / CachyOS (AUR)
 
-Not published yet; the PKGBUILD is in [`packaging/aur`](packaging/aur):
+Not on the AUR yet: new AUR accounts are closed for now (2026-11-16).
+Until it's published, build the PKGBUILD from this repo. Its signing
+dependency, osslsigncode, is itself on the AUR, so get that first:
 
 ```sh
-paru -S dfnstrate-git   # or yay, or makepkg -si in packaging/aur/dfnstrate-git
+paru -S osslsigncode    # or yay
+cd packaging/aur/dfnstrate-git && makepkg -si
 ```
 
 It pulls in what `build iso` needs; the rest are optional dependencies,
