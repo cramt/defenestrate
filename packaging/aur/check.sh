@@ -29,6 +29,9 @@ pacman -Syu --noconfirm --needed git namcap >/dev/null
 useradd -m builder
 echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
 install -d -o builder /build
+# osslsigncode, a makedepend, is only in the AUR, so pacman can't resolve
+# it; build it first as an AUR helper (yay, paru) would.
+su builder -c 'cd ~ && git clone -q https://aur.archlinux.org/osslsigncode.git && cd osslsigncode && makepkg -si --noconfirm' >/dev/null
 # makepkg's git clone --mirror can't read a bundle directly.
 git clone -q --bare /src.bundle /src.git
 chown -R builder /src.git
