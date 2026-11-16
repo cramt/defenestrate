@@ -1,6 +1,6 @@
 pkgbase = dfnstrate-git
 	pkgdesc = Builds a declarative Windows install from Microsoft's stock ISO, and flashes it
-	pkgver = 0.1.0.r31.gdd0a396
+	pkgver = 0.1.0.r48.ge07f2a2
 	pkgrel = 1
 	url = https://github.com/cramt/defenestrate
 	arch = x86_64
@@ -8,6 +8,8 @@ pkgbase = dfnstrate-git
 	makedepends = git
 	makedepends = rustup
 	makedepends = mingw-w64-gcc
+	makedepends = openssl
+	makedepends = osslsigncode
 	depends = libgcc
 	depends = glibc
 	depends = 7zip
