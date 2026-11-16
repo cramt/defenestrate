@@ -119,8 +119,10 @@ pub fn output_string(cmd: &mut Command) -> Result<String> {
 /// elsewhere, so errors are ignored.
 pub fn no_cow(path: &std::path::Path) {
     use std::os::fd::AsRawFd;
-    const FS_IOC_GETFLAGS: libc::c_ulong = 0x8008_6601;
-    const FS_IOC_SETFLAGS: libc::c_ulong = 0x4008_6602;
+    // libc::Ioctl: an unsigned long in glibc, an int in musl (the release
+    // binary). `as` keeps the bits either way.
+    const FS_IOC_GETFLAGS: libc::Ioctl = 0x8008_6601_u32 as libc::Ioctl;
+    const FS_IOC_SETFLAGS: libc::Ioctl = 0x4008_6602_u32 as libc::Ioctl;
     // The kernel reads and writes these flags as an int, whatever the ioctl
     // number claims.
     const FS_NOCOW_FL: libc::c_int = 0x0080_0000;

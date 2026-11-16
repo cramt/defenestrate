@@ -7,3 +7,9 @@ resolver = "3"
 
 [profile.release]
 lto = "thin"
+
+# What dist builds the release binaries with (dist-workspace.toml). Not
+# stripped: that saves ~0.5 MB of the 5.8 MB download, and the symbols are
+# what make a panic's backtrace say where.
+[profile.dist]
+inherits = "release"

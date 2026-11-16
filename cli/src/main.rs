@@ -18,6 +18,8 @@ mod reboot;
 mod reboot_to_linux;
 mod registry;
 mod render;
+#[cfg(feature = "self-update")]
+mod self_update;
 mod tasks;
 mod tools;
 mod unattend;
@@ -148,6 +150,10 @@ enum Cmd {
         #[command(flatten)]
         args: update::Args,
     },
+    /// Update dfnstrate itself to the latest GitHub release (installs from
+    /// the `curl | sh` installer only).
+    #[cfg(feature = "self-update")]
+    SelfUpdate(self_update::Args),
 }
 
 #[derive(Subcommand)]
@@ -233,6 +239,8 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Flash(args) => flash::run(&args),
         Cmd::Reboot(args) => reboot::run(&args),
         Cmd::Update { config, cache, args } => update::run(&config.load()?, &cache.open()?, &args),
+        #[cfg(feature = "self-update")]
+        Cmd::SelfUpdate(args) => self_update::run(&args),
     }
 }
 

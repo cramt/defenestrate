@@ -4,9 +4,13 @@ version = "0.1.0"
 edition = "2024"
 description = "Builds a declarative Windows install from Microsoft's stock ISO, and flashes it"
 license = "MIT"
+repository = "https://github.com/cramt/defenestrate"
 
 [dependencies]
 anyhow = "1"
+# self-update only. No default features: the GitHub source is all it needs
+# (github_releases is its only default), and blocking is the sync API.
+axoupdater = { version = "0.10", default-features = false, features = ["github_releases", "blocking"], optional = true }
 base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
 # offline: the protocol definitions bundled in the crate, not downloaded
@@ -24,3 +28,12 @@ toml = "0.8"
 ureq = { version = "2", features = ["json"] }
 xz2 = { version = "0.1", features = ["static"] }
 zstd = { version = "0.13", features = ["zstdmt"] }
+
+# Both on in the release binaries (dist-workspace.toml), off by default so a
+# plain `cargo build` needs no Windows cross toolchain.
+[features]
+# Fails the build unless DEFENESTRATE_SHELL_DIR is set (build.rs), so a
+# release can't quietly ship without the shell.
+builtin-shell = []
+# `dfnstrate self-update`, for installs from the release installer.
+self-update = ["dep:axoupdater"]

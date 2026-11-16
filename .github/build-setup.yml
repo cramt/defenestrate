@@ -1,0 +1,15 @@
+# Steps dist puts before its build in release.yml's build-local-artifacts
+# job (dist-workspace.toml: github-build-setup). They build the Windows shell
+# and sign its uiAccess binary with the flake's own derivation (nix/sign.nix),
+# the one the Nix package embeds: the runner's apt has neither a MinGW Rust
+# target nor the OpenSSL 3.4+ shell/sign.sh needs. The signing key is made
+# and deleted inside that derivation's sandboxed build dir; only the signed
+# exe reaches the store, and nothing from the store is uploaded.
+# DEFENESTRATE_SHELL_DIR then points dfnstrate's build.rs at it, and the
+# builtin-shell feature fails the build if that went missing.
+- name: Install Nix
+  uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+- name: Build and sign the shell
+  run: |
+    nix build .#shell --out-link "$RUNNER_TEMP/shell"
+    echo "DEFENESTRATE_SHELL_DIR=$RUNNER_TEMP/shell/bin" >> "$GITHUB_ENV"
