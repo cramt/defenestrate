@@ -37,10 +37,14 @@ let
   defaults = lib.importTOML ../configs/default.toml;
   all = [ defaults ] ++ layers;
 
-  # Every { url, hash } anywhere in the config is a file to fetch.
+  # Every { url, hash } anywhere in the config is a file to fetch. A tracked
+  # download with no pin is "newest when built", which a fixed-output
+  # derivation can't be.
   collect = v:
     if builtins.isAttrs v then
-      (if v ? url && v ? hash then [{ inherit (v) url hash; }] else [ ]) ++ lib.concatMap collect (builtins.attrValues v)
+      (if v ? url && v ? hash then [{ inherit (v) url hash; }]
+       else if v ? track then throw "defenestrate: ${builtins.toJSON v.track} is tracked but not pinned, which a Nix build needs; put it in a TOML config and run `dfnstrate pins <that file>`"
+       else [ ]) ++ lib.concatMap collect (builtins.attrValues v)
     else if builtins.isList v then lib.concatMap collect v
     else [ ];
 

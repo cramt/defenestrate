@@ -54,6 +54,14 @@ pub struct Config {
     #[serde(default)]
     pub apps: Vec<AppId>,
     pub gpu: Gpu,
+    /// Driver packages: archives 7-Zip opens (a .cab from the Microsoft
+    /// Update Catalog, say) with .inf files in them. Added to the image and
+    /// put in the driver store during specialize (pnputil), which also
+    /// installs each onto any matching device; one the build machine's VM
+    /// doesn't have is installed when Windows finds the device on the real
+    /// machine. Pinned, unlike `gpu`'s, and there with no network.
+    #[serde(default)]
+    pub drivers: Vec<FileSource>,
     #[serde(default)]
     pub appx: Appx,
     pub wsl: Wsl,
@@ -90,10 +98,10 @@ pub enum LinuxBootEntry {
 pub struct Wsl {
     /// The WSL MSI (github.com/microsoft/WSL releases), installed during
     /// setup so nothing is downloaded at first boot.
-    pub package: Fetched,
+    pub package: FileSource,
     /// A static x86_64 busybox: the whole userland of the small WSL distro
     /// that mounts the Linux install and runs its programs.
-    pub busybox: Fetched,
+    pub busybox: FileSource,
     pub linux: Option<Linux>,
 }
 
@@ -266,11 +274,14 @@ pub enum Shell {
 
 /// A file the build needs. Fetched ones are checked against their hash and
 /// cached by it, which is also how Nix hands them over: it fills the cache
-/// from fixed-output derivations.
+/// from fixed-output derivations. Tracked ones are whatever's newest when
+/// dfnstrate runs, which Nix can't do: `dfnstrate pins` turns them
+/// into Fetched ones.
 #[derive(Deserialize, Debug, Clone)]
 #[serde(untagged)]
 pub enum FileSource {
     Fetched(Fetched),
+    Tracked(Tracked),
     Local(Local),
 }
 
@@ -281,6 +292,18 @@ pub struct Fetched {
     pub hash: Sri,
     /// Path of the file wanted inside a .tar.xz.
     pub member: Option<String>,
+    /// What `dfnstrate pins` moves this pin along with. The build ignores
+    /// it (a pin is a pin) but parses it, so a malformed one fails there
+    /// too rather than only when pins runs, which reads the file itself.
+    #[allow(dead_code)]
+    pub track: Option<Track>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Tracked {
+    pub track: Track,
+    pub member: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -290,27 +313,47 @@ pub struct Local {
     pub member: Option<String>,
 }
 
+/// Where the newest version of a download is found.
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+#[serde(untagged)]
+pub enum Track {
+    /// The asset matching `asset` (`*` is any run of characters) of the
+    /// repo's latest release, prereleases left out.
+    Github { github: GithubRepo, asset: String },
+    /// The newest driver the Microsoft Update Catalog has for a hardware
+    /// ID, `VEN_1002&DEV_747E` say: the .cab from its search results,
+    /// Windows Server ones left out.
+    Catalog { catalog: CatalogQuery },
+}
+
+impl fmt::Display for Track {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::Github { github, asset } => write!(f, "github {github} {asset}"),
+            Self::Catalog { catalog } => write!(f, "catalog {catalog}"),
+        }
+    }
+}
+
 impl FileSource {
     pub fn member(&self) -> Option<&str> {
         match self {
             Self::Fetched(f) => f.member.as_deref(),
+            Self::Tracked(t) => t.member.as_deref(),
             Self::Local(l) => l.member.as_deref(),
         }
     }
+}
 
-    /// Name the file gets on Windows.
-    pub fn file_name(&self) -> Result<String> {
-        let full = match (self.member(), self) {
-            (Some(m), _) => m,
-            (None, Self::Fetched(f)) => f.url.split(['?', '#']).next().unwrap_or(&f.url),
-            (None, Self::Local(l)) => l.path.to_str().context("non-UTF-8 path")?,
-        };
-        let name = full.rsplit('/').next().unwrap_or(full);
-        if name.is_empty() || name.contains('\\') {
-            bail!("can't tell a file name from {full:?}");
-        }
-        Ok(name.to_owned())
+/// Name a file gets on Windows: the member's, or else the last part of
+/// where it came from (a URL or a path).
+pub fn file_name(member: Option<&str>, from: &str) -> Result<String> {
+    let full = member.unwrap_or_else(|| from.split(['?', '#']).next().unwrap_or(from));
+    let name = full.rsplit('/').next().unwrap_or(full);
+    if name.is_empty() || name.contains('\\') {
+        bail!("can't tell a file name from {full:?}");
     }
+    Ok(name.to_owned())
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -325,6 +368,7 @@ pub struct Appx {
 
 /// GPU drivers, installed by the apps task at the first real boot: the
 /// image is built on a VM's virtual GPU, so only then is the real one known.
+/// For a pinned driver that's there from the start, see `drivers`.
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Gpu {
@@ -406,7 +450,7 @@ pub enum RegValue {
 
 macro_rules! checked_string {
     ($name:ident, $what:literal, $check:expr) => {
-        #[derive(Deserialize, serde::Serialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        #[derive(Deserialize, serde::Serialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
         #[serde(try_from = "String", into = "String")]
         pub struct $name(String);
 
@@ -478,6 +522,15 @@ checked_string!(AbsPath, "an absolute path of plain components", |s| {
 // separated, as everywhere else in the config.
 checked_string!(ProfilePath, "a path under the user's profile (plain components separated by /)", |s| {
     s.split('/').all(|c| !c.is_empty() && c != "." && c != ".." && c.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)))
+});
+checked_string!(GithubRepo, "a GitHub repo (owner/name)", |s| {
+    let ok = |p: &str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b));
+    s.split_once('/').is_some_and(|(o, n)| ok(o) && ok(n))
+});
+// What goes into the catalog's search box; printable, since it's sent as a
+// query parameter and nothing else.
+checked_string!(CatalogQuery, "an Update Catalog search (a hardware ID like VEN_1002&DEV_747E)", |s| {
+    !s.trim().is_empty() && s.len() <= 200 && !s.chars().any(char::is_control)
 });
 checked_string!(FsType, "a filesystem type", |s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()));
 checked_string!(MountOption, "a mount option", |s| { !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.:=@/".contains(&b)) });

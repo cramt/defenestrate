@@ -43,6 +43,8 @@ values per hive. Every config is layered over the distro's own defaults,
 - [x] Provisioned AppX removal (`appx.remove`): deprovisioned during specialize, names checked against the image at build time. All 17 in the defaults removed in a `build image` run (from `specialize.log` on the image)
 - [x] Gaming defaults for the new user: mouse acceleration ("Enhance pointer precision") off, and the Sticky/Filter/Toggle Keys hotkeys that pop a dialog over the game off. Seen in the user's hive after a fresh `build image` booted in the VM: MouseSpeed/MouseThreshold1/MouseThreshold2 0/0/0, StickyKeys 506, Keyboard Response 122, ToggleKeys 58
 - [x] Windows apps (`apps`): winget IDs, unpinned, installed by winget at the first real boot from a logon task first logon registers. Seen in the VM under our shell, online: the script installed Firefox elevated, and an equivalent logon task fired at the next logon, installed 7-Zip and deleted itself. From a fresh `build image`: first logon registered the task, and it ran at the first real boot and removed itself (the VM config has no apps, so only the GPU pass below ran)
+  - Pinned drivers (`drivers`): .cabs from the Update Catalog (or any archive 7-Zip opens), added to the image and installed by pnputil at specialize. Seen in a `build image` for saturn: specialize added AMD's three packages to the driver store and removed the staged copy (pnputil exit 3010, "reboot to finish"). Binding to a real GPU not seen yet
+- [x] Tracked downloads and `dfnstrate pins` ([Pins](#pins)): GitHub release assets and Update Catalog drivers, resolved at build time without Nix, pinned in place for Nix. Run against the live catalog (it found the .cab pinned by hand) and GitHub (moved an unpinned font to the hash the defaults already had, comments kept); a `render` with an unpinned font downloaded it online and refused with `--offline`
   - GPU drivers (`gpu`): a Windows Update pass for display drivers at first boot, plus per-vendor winget lists picked by PCI vendor ID. Seen from a fresh `build image` in the VM, online: the pass found QEMU's VGA (vendor 1234), asked Windows Update, which had no display driver for it, and finished in 6 minutes. Not yet seen on real GPU hardware
 - [ ] WSL installed offline, and the machine's Linux install run through it (`wsl.linux`): its disks attached and mounted, its programs run chrooted as its user from a "Linux terminal" in the Start Menu
   - Files and secrets from the install copied into the Windows profile at logon (`wsl.linux.files`): `dfn pack` is in the flake check (a store symlink resolved, a group-only secret read), and the copy step ran under pwsh on Linux against a fake `wsl.exe` (bytes intact, directories replaced, a missing source failing alone). Not yet run on Windows
@@ -250,6 +252,46 @@ A full install in the VM takes about an hour on a loaded 8-core desktop
 with the VM disk on an HDD. Shell logs go to `%LOCALAPPDATA%\defenestrate\shell.log`.
 The ISO build takes a few minutes, mostly spent exporting the edition out of
 the 8 GB `install.wim`.
+
+### Pins
+
+A download in the config is one of three things:
+
+- **pinned**, `{ url, hash }`: that exact file, checked by hash;
+- **tracked**, `{ track = … }`: whatever's newest when dfnstrate runs, like
+  `fetch` finding the ISO's link, downloaded and cached by the hash it
+  turns out to have (and not downloaded again while its URL is the same);
+- **local**, `{ path }`: a file on disk.
+
+A track is `{ github = "owner/repo", asset = "name-*.zip" }`, the asset of
+the repo's latest release matching the pattern (`*` is any run of
+characters), or `{ catalog = "VEN_1002&DEV_747E" }`, the newest client
+driver the [Microsoft Update
+Catalog](https://www.catalog.update.microsoft.com) has for that hardware ID.
+
+Without Nix, a tracked download is all you need. A Nix build can't ask
+what's newest from its sandbox, so there a tracked download needs a pin
+next to it, and evaluation stops with a message if one doesn't have it.
+`dfnstrate pins FILE…` writes the pins: for every table with a `track` in
+those TOML files, it finds the newest version and, if the `url` there
+isn't it, downloads it and rewrites `url` and `hash` in place, comments
+and layout kept. `--check` only lists what's behind and fails if anything
+is. A Nix config keeps its pins in a TOML file next to its .nix modules
+(`mkDistro` takes both):
+
+```toml
+[[drivers]]  # AMD Radeon RX 7000
+track = { catalog = "VEN_1002&DEV_747E" }
+# written by `dfnstrate pins`:
+url = "https://catalog.s.download.windowsupdate.com/…/685e0c6c-…_dd87edd8….cab"
+hash = "sha256-kqC05JH1S2WA86xjzl2gt2XsjFsWYGTn5UjTF9561KM="
+```
+
+The defaults track their fonts and WSL (`dfnstrate pins
+configs/default.toml` in this repo moves them). The ISO has its own route,
+`fetch --update`, and busybox has nothing to track: busybox.net's static
+binaries stop at 1.35.0. Set `GITHUB_TOKEN` if you run into GitHub's 60
+unauthenticated requests an hour.
 
 ### Installing onto a disk without a USB stick
 
@@ -531,6 +573,36 @@ AMD's only package there is a driver for Azure VMs, and Intel's Driver &
 Support Assistant installs silently but then wants clicks in a browser to
 fetch anything. NVIDIA's Windows Update driver trails its own by a few
 weeks, so that's still the gap for NVIDIA machines.
+
+Windows Update only installs a display driver it would have installed by
+itself. On saturn (an RX 7000 card, `PCI\VEN_1002&DEV_747E`) it offered
+none at first boot, and the card stayed on the Microsoft Basic Display
+Adapter, though the Update Catalog has AMD's driver for it. So when you know
+the hardware, give it the driver with `drivers`: a list of archives 7-Zip
+opens with .inf files in them, as downloads ([Pins](#pins)). Tracking the
+catalog by hardware ID is the simple way: `{ track = { catalog =
+"VEN_1002&DEV_747E" } }`. A driver from the [Microsoft Update
+Catalog](https://www.catalog.update.microsoft.com) is a .cab on
+`catalog.s.download.windowsupdate.com`, which needs nothing but a download:
+
+```toml
+[[drivers]]  # AMD Radeon RX 7000 (Navi 3x), 32.0.21030.2001
+url = "https://catalog.s.download.windowsupdate.com/d/msdownload/update/driver/drvs/2025/12/685e0c6c-01eb-465c-b64a-3b0422280433_dd87edd852abb9957fc9b897a50154b5632bc642.cab"
+hash = "sha256-kqC05JH1S2WA86xjzl2gt2XsjFsWYGTn5UjTF9561KM="
+track = { catalog = "VEN_1002&DEV_747E" }  # what `dfnstrate pins` moves it along with
+```
+
+The hardware ID is in Device Manager, or `lspci -nn` on Linux:
+`VEN_1002&DEV_747E` from `[1002:747e]`. A catalog .cab's name ends in its
+SHA-1, which `sha1sum` checks against the download.
+
+`build iso` unpacks each one (failing on one with no .inf) and adds it to
+the image; specialize runs `pnputil /add-driver … /subdirs /install`, which
+puts it in the driver store and onto any device it matches, then deletes
+the copy. A device the build's VM doesn't have, which is every real GPU for
+`build image`, gets it when Windows first finds the device on the real
+machine. Windows Update then keeps it updated as usual. `update` can't add
+drivers, since only setup installs them.
 
 ### Linux terminal, through WSL
 

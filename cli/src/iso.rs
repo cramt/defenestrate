@@ -1,7 +1,7 @@
 //! Stock ISO + config → install ISO.
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
@@ -14,6 +14,8 @@ use crate::unattend::Variant;
 pub const TOOLS: &[tools::Tool] = &[SEVENZIP, WIMLIB, HIVEXREGEDIT, XORRISO];
 
 pub const ISO_NAME: &str = "defenestrate.iso";
+/// Under SETUP_DIR, where specialize.cmd looks for `drivers`.
+const DRIVERS_DIR: &str = "drivers";
 
 /// Builds `out/defenestrate.iso`. `work` needs ~25 GB and is left for the
 /// caller to clean.
@@ -52,8 +54,9 @@ pub fn build(config: &Config, variant: &Variant, source: &Path, cache: &Cache, w
     // security descriptor, which is why the registry isn't edited offline.
     // wimlib creates the parent directories, and adds a symlink as a link
     // (to a path Windows doesn't have), hence canonicalize.
+    let drivers = unpack_drivers(config, cache, work)?;
     eprintln!("adding the payload");
-    let commands = r
+    let mut commands = r
         .files
         .iter()
         .map(|f| {
@@ -61,6 +64,12 @@ pub fn build(config: &Config, variant: &Variant, source: &Path, cache: &Cache, w
             Ok(format!("add {} {}\n", quote(&source)?, quote(Path::new(&format!("/{}", f.dest)))?))
         })
         .collect::<Result<String>>()?;
+    // Here rather than in render's file list: `update` would only ever see
+    // these as missing, since specialize deletes them once they're in the
+    // driver store, and `render` has no use for gigabytes of drivers.
+    for (i, dir) in drivers.iter().enumerate() {
+        commands += &format!("add {} {}\n", quote(dir)?, quote(Path::new(&format!("/{}/{DRIVERS_DIR}/{i}", render::SETUP_DIR)))?);
+    }
     tools::run_with_input(WIMLIB.cmd().arg("update").arg(&install_wim).arg("1"), &commands)?;
 
     // A single-edition install.wim is still ~7.5 GB, over ISO9660's 4 GiB
@@ -99,6 +108,37 @@ pub fn build(config: &Config, variant: &Variant, source: &Path, cache: &Cache, w
             .arg(&iso),
     )?;
     Ok(())
+}
+
+/// Each of `drivers` unpacked under work/drivers/<n>. One with no .inf in
+/// it fails the build: at specialize it would be a silent no-op.
+fn unpack_drivers(config: &Config, cache: &Cache, work: &Path) -> Result<Vec<PathBuf>> {
+    let mut dirs = Vec::new();
+    for (i, source) in config.drivers.iter().enumerate() {
+        let archive = cache.materialize(source, work)?;
+        eprintln!("unpacking driver {}", archive.name);
+        let dir = work.join(DRIVERS_DIR).join(i.to_string());
+        tools::run(SEVENZIP.cmd().args(["x", "-y"]).arg(format!("-o{}", dir.display())).arg(&archive.path))?;
+        if !has_inf(&dir)? {
+            bail!("drivers: {} has no .inf in it; not a driver package?", archive.name);
+        }
+        dirs.push(std::fs::canonicalize(&dir)?);
+    }
+    Ok(dirs)
+}
+
+fn has_inf(dir: &Path) -> Result<bool> {
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            if has_inf(&path)? {
+                return Ok(true);
+            }
+        } else if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("inf")) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Merges each .reg into a scratch copy of the hive it targets. The copies

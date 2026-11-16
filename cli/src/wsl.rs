@@ -15,7 +15,7 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::cache::Cache;
-use crate::config::{Config, FileSource, Linux};
+use crate::config::{Config, Linux};
 use crate::render::{InstallFile, ReadAt};
 use crate::tasks::{self, AsUser, Logon, Task, Trigger};
 
@@ -29,7 +29,7 @@ pub fn render(config: &Config, cache: &Cache, work: &Path, dir: &Path) -> Result
     let wsl = &config.wsl;
     let out = dir.join("wsl");
     std::fs::create_dir_all(&out)?;
-    let mut files = vec![InstallFile::new(format!("{DIR}/wsl.msi"), cache.materialize(&FileSource::Fetched(wsl.package.clone()), work)?, ReadAt::Setup)];
+    let mut files = vec![InstallFile::new(format!("{DIR}/wsl.msi"), cache.materialize(&wsl.package, work)?.path, ReadAt::Setup)];
     let mut write = |name: &str, data: &[u8], read: ReadAt| -> Result<()> {
         std::fs::write(out.join(name), data)?;
         files.push(InstallFile::new(format!("{DIR}/{name}"), out.join(name), read));
@@ -38,7 +38,7 @@ pub fn render(config: &Config, cache: &Cache, work: &Path, dir: &Path) -> Result
     write("wsl-install.cmd", crate::render::crlf(include_str!("../assets/wsl-install.cmd")).as_bytes(), ReadAt::Setup)?;
     let Some(linux) = &wsl.linux else { return Ok(files) };
 
-    let busybox = std::fs::read(cache.materialize(&FileSource::Fetched(wsl.busybox.clone()), work)?)?;
+    let busybox = std::fs::read(cache.materialize(&wsl.busybox, work)?.path)?;
     write("rootfs.tar", &rootfs(&busybox, linux)?, ReadAt::EveryLogon)?;
     write("wsl-logon.ps1", include_bytes!("../assets/wsl-logon.ps1"), ReadAt::EveryLogon)?;
     let disks: Vec<&str> = linux.disks.iter().map(|g| g.as_str()).collect();

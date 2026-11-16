@@ -14,6 +14,7 @@ mod flash;
 mod gpt;
 mod image;
 mod iso;
+mod pins;
 mod reboot;
 mod reboot_to_linux;
 mod registry;
@@ -22,6 +23,7 @@ mod render;
 mod self_update;
 mod tasks;
 mod tools;
+mod track;
 mod unattend;
 mod update;
 mod vm;
@@ -117,6 +119,16 @@ enum Cmd {
         #[command(flatten)]
         args: fetch::Args,
     },
+    /// Move every download that says what it tracks (`track`) to its newest
+    /// version, rewriting url and hash in the given TOML files. Only needed
+    /// for Nix, or to pin: without one, a tracked download is resolved at
+    /// build time.
+    Pins {
+        #[command(flatten)]
+        cache: CacheArgs,
+        #[command(flatten)]
+        args: pins::Args,
+    },
     /// Build install media.
     #[command(subcommand)]
     Build(BuildCmd),
@@ -198,6 +210,7 @@ fn run(cli: Cli) -> Result<()> {
             let pin = config::load_iso(&config.configs, !config.no_defaults)?;
             fetch::run(&pin, &cache.open()?, &args)
         }
+        Cmd::Pins { cache, args } => pins::run(&args, &cache.open()?),
         Cmd::Build(BuildCmd::Iso { build, for_image }) => {
             let config = build.config.load()?;
             let cache = build.cache.open()?;

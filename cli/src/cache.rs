@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 
-use crate::config::{FileSource, Sri};
+use crate::config::{self, FileSource, Sri};
+use crate::track;
 
 pub struct Cache {
     pub dir: PathBuf,
@@ -143,25 +144,61 @@ impl Cache {
         Ok(dest)
     }
 
-    /// The file a source names, as a path on disk. Members of archives are
-    /// unpacked into `work`.
-    pub fn materialize(&self, source: &FileSource, work: &Path) -> Result<PathBuf> {
-        let whole = match source {
-            FileSource::Fetched(f) => self.get(&f.url, &f.hash)?,
+    /// The file a source names, as a path on disk, and the name it gets on
+    /// Windows. Members of archives are unpacked into `work`.
+    pub fn materialize(&self, source: &FileSource, work: &Path) -> Result<Materialized> {
+        let (whole, from) = match source {
+            FileSource::Fetched(f) => (self.get(&f.url, &f.hash)?, f.url.clone()),
+            FileSource::Tracked(t) => {
+                if self.offline {
+                    bail!("{} isn't pinned, so it can't be built with --offline; pin it with `dfnstrate pins`", t.track);
+                }
+                let url = track::resolve(&t.track)?;
+                eprintln!("{} is {url}", t.track);
+                (self.get_unpinned(&url)?.0, url)
+            }
             FileSource::Local(l) => {
                 if !l.path.exists() {
                     bail!("{} doesn't exist", l.path.display());
                 }
-                l.path.clone()
+                (l.path.clone(), l.path.to_str().context("non-UTF-8 path")?.to_owned())
             }
         };
-        let Some(member) = source.member() else { return Ok(whole) };
+        let name = config::file_name(source.member(), &from)?;
+        let Some(member) = source.member() else { return Ok(Materialized { path: whole, name }) };
         let dest_dir = work.join("members");
         std::fs::create_dir_all(&dest_dir)?;
-        let dest = dest_dir.join(source.file_name()?);
+        let dest = dest_dir.join(&name);
         extract_member(&whole, member, &dest).with_context(|| format!("{member} from {}", whole.display()))?;
-        Ok(dest)
+        Ok(Materialized { path: dest, name })
     }
+
+    /// A URL with no pin, downloaded once: release and catalog URLs name
+    /// one version of a file, so what a URL hashed to is remembered and the
+    /// file reused while it's still in the cache.
+    pub fn get_unpinned(&self, url: &str) -> Result<(PathBuf, Sri)> {
+        let index = self.dir.join("urls").join(hex(&Sha256::digest(url.as_bytes())));
+        if let Some(hash) = std::fs::read_to_string(&index).ok().and_then(|h| Sri::try_from(h.trim().to_owned()).ok()) {
+            if let Some(p) = self.lookup(&hash) {
+                return Ok((p, hash));
+            }
+        }
+        let got = self.download(url)?;
+        let hash = got.hash.clone();
+        let path = self.keep(got)?;
+        std::fs::create_dir_all(index.parent().unwrap())?;
+        std::fs::write(&index, hash.to_string())?;
+        Ok((path, hash))
+    }
+}
+
+pub struct Materialized {
+    pub path: PathBuf,
+    pub name: String,
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 pub struct Downloaded {

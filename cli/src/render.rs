@@ -139,9 +139,9 @@ pub fn render(config: &Config, variant: &Variant, cache: &Cache, work: &Path, di
     let mut files = Vec::new();
     let mut fonts = Vec::new();
     for source in &config.fonts {
-        let name = source.file_name()?;
-        files.push(InstallFile::new(format!("Windows/Fonts/{name}"), cache.materialize(source, work)?, ReadAt::EveryLogon));
-        fonts.push(name);
+        let font = cache.materialize(source, work)?;
+        files.push(InstallFile::new(format!("Windows/Fonts/{}", font.name), font.path, ReadAt::EveryLogon));
+        fonts.push(font.name);
     }
 
     let (shell_command, shell_cert) = match &config.shell {
@@ -152,9 +152,9 @@ pub fn render(config: &Config, variant: &Variant, cache: &Cache, work: &Path, di
         }
         // Someone else's shell, or ours as a single exe: no uiAccess.
         Shell::Exe(source) => {
-            let name = source.file_name()?;
-            files.push(InstallFile::new(format!("{SHELL_DIR}/{name}"), cache.materialize(source, work)?, ReadAt::EveryLogon));
-            (program_files(&name), None)
+            let exe = cache.materialize(source, work)?;
+            files.push(InstallFile::new(format!("{SHELL_DIR}/{}", exe.name), exe.path, ReadAt::EveryLogon));
+            (program_files(&exe.name), None)
         }
     };
     // Read at each start of the shell, like the exe. Only ours reads it, but
