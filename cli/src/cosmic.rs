@@ -1,9 +1,10 @@
 //! The shell's COSMIC settings (`cosmic` in the config), under cosmic-comp's
 //! own names, so a COSMIC user's settings carry over key for key:
 //! `compositor` is com.system76.CosmicComp, `theme` the bits of
-//! com.system76.CosmicTheme.Dark the shell draws with, and `shortcuts` the
+//! com.system76.CosmicTheme.Dark the shell draws with, `shortcuts` the
 //! custom shortcuts of com.system76.CosmicSettings.Shortcuts, layered over
-//! COSMIC's default bindings as COSMIC layers them.
+//! COSMIC's default bindings as COSMIC layers them, and `window_rules`
+//! com.system76.CosmicSettings.WindowRules.
 //!
 //! Only what the shell does is accepted: an unknown key, or an action the
 //! shell has no counterpart for, fails the build rather than doing nothing on
@@ -22,6 +23,52 @@ pub struct Cosmic {
     pub theme: Theme,
     #[serde(default)]
     pub shortcuts: Shortcuts,
+    #[serde(default)]
+    pub window_rules: WindowRules,
+}
+
+#[derive(Deserialize, Debug, Clone, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WindowRules {
+    /// Windows that float although the shell would tile them.
+    #[serde(default)]
+    pub tiling_exception_custom: Vec<ApplicationException>,
+}
+
+/// COSMIC's form: both unanchored regexes, so "" matches anything. On
+/// Windows the app ID is the exe's name without `.exe`, e.g.
+/// "LeagueClientUx"; the shell's log names it for every window it sees.
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ApplicationException {
+    pub appid: Pattern,
+    pub title: Pattern,
+    #[serde(default = "enabled", skip_serializing)]
+    pub enabled: bool,
+}
+
+fn enabled() -> bool {
+    true
+}
+
+/// A regex the shell's regex-lite accepts, so a bad one fails the build
+/// rather than leaving the shell on its defaults.
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
+#[serde(try_from = "String", into = "String")]
+pub struct Pattern(String);
+
+impl TryFrom<String> for Pattern {
+    type Error = String;
+    fn try_from(s: String) -> Result<Self, String> {
+        regex_lite::Regex::new(&s).map_err(|e| format!("{s:?}: {e}"))?;
+        Ok(Pattern(s))
+    }
+}
+
+impl From<Pattern> for String {
+    fn from(p: Pattern) -> String {
+        p.0
+    }
 }
 
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,6 +370,10 @@ pub struct ShellSettings {
     pub gaps: Gaps,
     pub active_hint: Option<ActiveHint>,
     pub shortcuts: Vec<Shortcut>,
+    /// Only the enabled ones.
+    pub tiling_exceptions: Vec<ApplicationException>,
+    /// Not COSMIC's: the config's `displays`.
+    pub displays: Vec<crate::config::DisplayMode>,
 }
 
 #[derive(Serialize, Debug, PartialEq)]
@@ -349,7 +400,7 @@ pub struct Shortcut {
 }
 
 impl Cosmic {
-    pub fn shell_settings(&self) -> ShellSettings {
+    pub fn shell_settings(&self, displays: &[crate::config::DisplayMode]) -> ShellSettings {
         let c = &self.compositor;
         let t = &self.theme;
         ShellSettings {
@@ -361,11 +412,13 @@ impl Cosmic {
             gaps: Gaps { outer: t.gaps.0, inner: t.gaps.1 },
             active_hint: (c.active_hint && t.active_hint > 0).then_some(ActiveHint { thickness: t.active_hint, colour: t.accent.bytes() }),
             shortcuts: self.shortcuts.0.iter().map(|(&keys, action)| Shortcut { keys, action: action.clone() }).collect(),
+            tiling_exceptions: self.window_rules.tiling_exception_custom.iter().filter(|e| e.enabled).cloned().collect(),
+            displays: displays.to_vec(),
         }
     }
 
-    pub fn render(&self) -> String {
-        let mut json = serde_json::to_string_pretty(&self.shell_settings()).expect("plain data");
+    pub fn render(&self, displays: &[crate::config::DisplayMode]) -> String {
+        let mut json = serde_json::to_string_pretty(&self.shell_settings(displays)).expect("plain data");
         json.push('\n');
         json
     }
@@ -428,6 +481,17 @@ mod tests {
     }
 
     #[test]
+    fn tiling_exceptions_render_only_when_enabled_and_valid() {
+        let rules = |body: &str| toml::from_str::<WindowRules>(body);
+        let r = rules("tiling_exception_custom = [{ appid = \"^LeagueClientUx$\", title = \"\" }, { appid = \"x\", title = \"\", enabled = false }]").unwrap();
+        let shown: Vec<_> = r.tiling_exception_custom.iter().filter(|e| e.enabled).collect();
+        assert_eq!(shown.len(), 1);
+        assert_eq!(serde_json::to_value(shown[0]).unwrap(), serde_json::json!({ "appid": "^LeagueClientUx$", "title": "" }));
+        assert!(rules("tiling_exception_custom = [{ appid = \"(\", title = \"\" }]").is_err());
+        assert!(rules("tiling_exception_custom = [{ appid = \"a\" }]").is_err(), "COSMIC always has a title");
+    }
+
+    #[test]
     fn active_hint_off_either_way() {
         let mut c: Cosmic = toml::from_str(
             r#"
@@ -446,11 +510,11 @@ mod tests {
             "#,
         )
         .unwrap();
-        let s = c.shell_settings();
+        let s = c.shell_settings(&[]);
         assert_eq!((s.active_hint, s.focus_follows_cursor), (None, None));
         c.compositor.active_hint = true;
-        assert_eq!(c.shell_settings().active_hint, Some(ActiveHint { thickness: 3, colour: [99, 176, 227] }));
+        assert_eq!(c.shell_settings(&[]).active_hint, Some(ActiveHint { thickness: 3, colour: [99, 176, 227] }));
         c.theme.active_hint = 0;
-        assert_eq!(c.shell_settings().active_hint, None);
+        assert_eq!(c.shell_settings(&[]).active_hint, None);
     }
 }

@@ -160,7 +160,7 @@ pub fn render(config: &Config, variant: &Variant, cache: &Cache, work: &Path, di
     // Read at each start of the shell, like the exe. Only ours reads it, but
     // an `exe` shell is usually ours, built some other way.
     if !matches!(config.shell, Shell::Command(_)) {
-        std::fs::write(dir.join(SHELL_SETTINGS), config.cosmic.render())?;
+        std::fs::write(dir.join(SHELL_SETTINGS), config.cosmic.render(&config.displays))?;
         files.push(InstallFile::new(format!("{SHELL_DIR}/{SHELL_SETTINGS}"), dir.join(SHELL_SETTINGS), ReadAt::EveryLogon));
     }
 

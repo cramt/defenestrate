@@ -10,9 +10,11 @@ use std::sync::OnceLock;
 
 use serde::Deserialize;
 
+use crate::display::DisplayMode;
+
 pub const FILE: &str = "shell.json";
 
-#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
     pub autotile: bool,
@@ -23,7 +25,55 @@ pub struct Settings {
     pub gaps: Gaps,
     pub active_hint: Option<ActiveHint>,
     pub shortcuts: Vec<Shortcut>,
+    /// COSMIC's custom tiling exceptions: windows that float although
+    /// they'd tile (classify.rs).
+    pub tiling_exceptions: Vec<TilingException>,
+    /// Not COSMIC's: the config's `displays`, display.rs.
+    pub displays: Vec<DisplayMode>,
 }
+
+/// Floats windows whose app ID and title both match, as COSMIC's
+/// `tiling_exception_custom` does: unanchored regexes, so "" matches
+/// anything. The app ID here is the exe's name without `.exe`.
+#[derive(Deserialize, Debug, Clone)]
+#[serde(try_from = "RawException")]
+pub struct TilingException {
+    appid: regex_lite::Regex,
+    title: regex_lite::Regex,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawException {
+    appid: String,
+    title: String,
+}
+
+impl TryFrom<RawException> for TilingException {
+    type Error = String;
+    fn try_from(raw: RawException) -> Result<Self, String> {
+        TilingException::new(&raw.appid, &raw.title)
+    }
+}
+
+impl TilingException {
+    pub fn new(appid: &str, title: &str) -> Result<Self, String> {
+        let compile = |re: &str| regex_lite::Regex::new(re).map_err(|e| format!("tiling exception {re:?}: {e}"));
+        Ok(TilingException { appid: compile(appid)?, title: compile(title)? })
+    }
+
+    pub fn matches(&self, app: &str, title: &str) -> bool {
+        self.appid.is_match(app) && self.title.is_match(title)
+    }
+}
+
+impl PartialEq for TilingException {
+    fn eq(&self, other: &Self) -> bool {
+        (self.appid.as_str(), self.title.as_str()) == (other.appid.as_str(), other.title.as_str())
+    }
+}
+
+impl Eq for TilingException {}
 
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TileBehavior {
@@ -139,6 +189,8 @@ impl Default for Settings {
             // COSMIC's default accent, #63b1e4, as the drop preview has it.
             active_hint: Some(ActiveHint { thickness: 3, colour: [0x63, 0xB1, 0xE4] }),
             shortcuts: Vec::new(),
+            tiling_exceptions: Vec::new(),
+            displays: Vec::new(),
         }
     }
 }
@@ -148,6 +200,11 @@ impl Settings {
         let s: Settings = serde_json::from_str(json).map_err(|e| e.to_string())?;
         if s.active_hint.is_some_and(|h| h.thickness == 0) {
             return Err("active_hint.thickness is 0; no hint is null".into());
+        }
+        for d in &s.displays {
+            if d.width == 0 || d.height == 0 || !(d.refresh.is_finite() && d.refresh > 0.0) {
+                return Err(format!("display mode {d:?} can't be set"));
+            }
         }
         for sc in &s.shortcuts {
             if let Action::Workspace(n) | Action::MoveToWorkspace(n) = sc.action
@@ -203,6 +260,8 @@ mod tests {
         assert_eq!(s.shortcut(super_(b'D')), Some(&Action::System(System::Launcher)));
         assert_eq!(s.shortcut(Keys { shift: true, ..super_(0x20) }), Some(&Action::System(System::PlayPause)));
         assert_eq!(s.shortcut(super_(b'Q')), None, "unbound here: COSMIC's default applies");
+        assert_eq!(s.tiling_exceptions, Vec::new());
+        assert_eq!(s.displays, Vec::new());
     }
 
     #[test]
@@ -210,5 +269,12 @@ mod tests {
         assert!(Settings::parse(&RENDERED.replacen("\"autotile\"", "\"autotiles\"", 1)).is_err());
         assert!(Settings::parse(&RENDERED.replacen("\"Disable\"", "\"ZoomIn\"", 1)).is_err());
         assert!(Settings::parse(&RENDERED.replacen("\"thickness\": 1", "\"thickness\": 0", 1)).is_err());
+        let mode = r#""displays": [{"model": "49M2C8900", "serial": null, "width": 5120, "height": 1440, "refresh": 240.49}]"#;
+        let with_mode = Settings::parse(&RENDERED.replacen("\"displays\": []", mode, 1)).unwrap();
+        assert_eq!(with_mode.displays.len(), 1, "what cli/src/config.rs's DisplayMode renders to");
+        assert!(Settings::parse(&RENDERED.replacen("\"displays\": []", &mode.replace("5120", "0"), 1)).is_err());
+        let bad_regex = RENDERED.replacen("\"tiling_exceptions\": []", "\"tiling_exceptions\": [{\"appid\": \"(\", \"title\": \"\"}]", 1);
+        assert_ne!(bad_regex, RENDERED);
+        assert!(Settings::parse(&bad_regex).is_err());
     }
 }

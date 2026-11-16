@@ -10,6 +10,7 @@
 //! plugged back into the same port. WM_DISPLAYCHANGE reads them again.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::ffi::c_void;
 use std::time::{Duration, Instant};
 
@@ -22,7 +23,10 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_INFORMATION_CLASS, TOKEN_QUERY, TokenElevation, TokenUIAccess};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION};
+use windows::Win32::System::Threading::{
+    GetCurrentProcess, GetCurrentProcessId, OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    QueryFullProcessImageNameW,
+};
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, INPUT, INPUT_MOUSE, SendInput, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON};
 use windows::Win32::UI::Shell::{QUNS_RUNNING_D3D_FULL_SCREEN, SHQueryUserNotificationState};
@@ -33,17 +37,18 @@ use windows::Win32::UI::WindowsAndMessaging::{
     EVENT_SYSTEM_MOVESIZESTART, EnumWindows, GA_ROOT,
     GetForegroundWindow, HWND_BOTTOM,
     GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClientRect, GetPropW, GetSystemMetrics, GetWindow, GetWindowLongPtrW,
-    GetWindowRect, GetWindowTextLengthW, GetWindowThreadProcessId, HWND_TOPMOST, IsHungAppWindow, IsIconic, IsWindow,
+    GetClassNameW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, HWND_TOPMOST, IsHungAppWindow, IsIconic, IsWindow,
     IsWindowVisible, IsZoomed, KillTimer,
     LWA_ALPHA, PostMessageW, RegisterClassW, RemovePropW, SM_CXSCREEN, SM_CYSCREEN, SPI_SETWORKAREA, SW_HIDE, SW_RESTORE,
     SW_SHOWNA, SW_SHOWNOACTIVATE, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
     SWP_NOZORDER, SWP_SHOWWINDOW, SetForegroundWindow, SetLayeredWindowAttributes, SetPropW, SetTimer, SetWindowLongPtrW,
     SetWindowPos, ShowWindowAsync, SystemParametersInfoW, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP, WM_CLOSE,
-    WNDCLASSW, WS_CAPTION, WS_CHILD, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+    WNDCLASSW, WS_CAPTION, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
     WS_POPUP, WS_THICKFRAME, WindowFromPoint,
 };
-use windows::core::{BOOL, PCWSTR, w};
+use windows::core::{BOOL, PCWSTR, PWSTR, w};
 
+use crate::classify::{Facts, Verdict, classify};
 use crate::keys::{Button, Drag};
 use crate::motion::{Animator, Pace, Scene};
 use crate::follow::{Follow, Timer};
@@ -142,6 +147,8 @@ thread_local! {
     static MOVING: Cell<bool> = const { Cell::new(false) };
     static FOLLOW: RefCell<Follow<HWND>> = RefCell::new(Follow::new());
     static MONITORS: RefCell<Vec<Monitor>> = const { RefCell::new(Vec::new()) };
+    /// Windows whose verdict is in the log already.
+    static LOGGED: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
 }
 
 #[derive(Clone)]
@@ -150,6 +157,11 @@ struct Monitor {
     rect: Rect,
     dpi: u32,
     primary: bool,
+    /// The display adapter driving it, for the log: "Microsoft Basic Display
+    /// Adapter" there means the GPU's driver isn't in (yet).
+    adapter: String,
+    /// The adapter output, \\.\DISPLAYn, which display modes are set on.
+    device: String,
 }
 
 /// Every monitor, the primary first: it's where an unplugged monitor's
@@ -163,7 +175,7 @@ fn monitors() -> Vec<Monitor> {
     if found.is_empty() {
         log("EnumDisplayMonitors found nothing; using the primary screen's size");
         let rect = unsafe { Rect { left: 0, top: 0, right: GetSystemMetrics(SM_CXSCREEN), bottom: GetSystemMetrics(SM_CYSCREEN) } };
-        found.push(Monitor { id: OutputId("primary".into()), rect, dpi: 96, primary: true });
+        found.push(Monitor { id: OutputId("primary".into()), rect, dpi: 96, primary: true, adapter: "?".into(), device: String::new() });
     }
     found
 }
@@ -185,13 +197,35 @@ unsafe extern "system" fn found_monitor(m: HMONITOR, _: HDC, _: *mut RECT, out: 
     let _ = unsafe { GetDpiForMonitor(m, MDT_EFFECTIVE_DPI, &mut x, &mut y) };
     // No taskbar or other appbar reserves any of it: tile the whole monitor.
     let r = info.monitorInfo.rcMonitor;
+    let adapter = adapter_of(&device).unwrap_or_else(|| "?".into());
     unsafe { &mut *(out.0 as *mut Vec<Monitor>) }.push(Monitor {
-        id: OutputId(path.unwrap_or(device)),
+        id: OutputId(path.unwrap_or_else(|| device.clone())),
         rect: Rect { left: r.left, top: r.top, right: r.right, bottom: r.bottom },
         dpi: x,
         primary: info.monitorInfo.dwFlags & MONITORINFOF_PRIMARY != 0,
+        adapter,
+        device,
     });
     true.into()
+}
+
+/// The name of the adapter whose output is `device` (\\.\DISPLAYn).
+fn adapter_of(device: &str) -> Option<String> {
+    let wide = |a: &[u16]| String::from_utf16_lossy(&a[..a.iter().position(|&c| c == 0).unwrap_or(a.len())]);
+    (0..).map_while(|i| {
+        let mut dd = DISPLAY_DEVICEW { cb: size_of::<DISPLAY_DEVICEW>() as u32, ..Default::default() };
+        unsafe { EnumDisplayDevicesW(PCWSTR::null(), i, &mut dd, 0) }.as_bool().then_some(dd)
+    })
+    .find(|dd| wide(&dd.DeviceName) == device)
+    .map(|dd| wide(&dd.DeviceString))
+}
+
+/// Sets the configured modes. A monitor with no interface path (only its
+/// \\.\DISPLAYn) has no EDID to match by, and is left as it is.
+fn set_modes(list: &[Monitor]) {
+    for m in list.iter().filter(|m| m.id.0.starts_with(r"\\?\")) {
+        crate::modes::apply(&m.device, &m.id.0);
+    }
 }
 
 fn screens(list: &[Monitor]) -> Screens {
@@ -300,6 +334,8 @@ pub fn start(events_to: HWND) {
     REACH.set(reach);
     let found = monitors();
     log(&format!("monitors: {}", describe(&found)));
+    // Its WM_DISPLAYCHANGE lays out the tiles again at the new size.
+    set_modes(&found);
     reset_work_area(&found);
     // One size for every monitor: the primary's, which is first.
     let dpi = found.first().map_or(96, |m| m.dpi);
@@ -393,15 +429,23 @@ pub fn on_event(event: u32, w: HWND) {
         _ => {}
     }
     update(|wm| match event {
-        EVENT_OBJECT_DESTROY => Some(wm.remove(w)),
+        EVENT_OBJECT_DESTROY => {
+            // Handles get reused; the next window with this one is new.
+            LOGGED.with_borrow_mut(|seen| seen.remove(&(w.0 as usize)));
+            Some(wm.remove(w))
+        }
         EVENT_OBJECT_SHOW | EVENT_OBJECT_UNCLOAKED | EVENT_SYSTEM_MINIMIZEEND => {
             if wm.is_minimized(w) {
                 on_screen(w).then(|| wm.restored(w))
             } else if wm.manages(w) {
                 // Ours to show is shown already; this one showed itself.
                 if on_screen(w) { wm.raised(w) } else { None }
+            } else if on_screen(w) {
+                let verdict = verdict(w);
+                log_verdict(w, verdict);
+                (verdict == Verdict::Tile).then(|| wm.add_new(w))
             } else {
-                (manageable(w) && on_screen(w)).then(|| wm.add_new(w))
+                None
             }
         }
         // Managed windows on other workspaces are hidden by us; only a
@@ -474,6 +518,7 @@ pub fn activate(w: HWND) {
 pub fn screen_changed() {
     let found = monitors();
     log(&format!("monitors changed: {}", describe(&found)));
+    set_modes(&found);
     reset_work_area(&found);
     let list = screens(&found);
     MONITORS.set(found);
@@ -484,7 +529,7 @@ pub fn screen_changed() {
 }
 
 fn describe(list: &[Monitor]) -> String {
-    list.iter().map(|m| format!("{} {:?} at {} dpi", m.id.0, m.rect, m.dpi)).collect::<Vec<_>>().join(", ")
+    list.iter().map(|m| format!("{} {:?} at {} dpi on {}", m.id.0, m.rect, m.dpi, m.adapter)).collect::<Vec<_>>().join(", ")
 }
 
 /// A shell that sets the work area owns it; the previous shell (or the bar
@@ -617,36 +662,87 @@ fn app_window(w: HWND) -> bool {
     }
 }
 
-/// Windows that tile: real, resizable, unowned app windows, possibly
-/// minimized. Dialogs, popups and tool windows float where they open.
+/// Windows that tile (classify.rs), possibly minimized; the rest float
+/// where they open.
 fn manageable(w: HWND) -> bool {
+    visible(w) && verdict(w) == Verdict::Tile
+}
+
+fn verdict(w: HWND) -> Verdict {
     unsafe {
-        if !visible(w) || GetAncestor(w, GA_ROOT) != w {
-            return false;
-        }
-        if GetWindow(w, GW_OWNER).is_ok_and(|owner| !owner.is_invalid()) {
-            return false;
-        }
         let style = GetWindowLongPtrW(w, GWL_STYLE) as u32;
-        let ex = GetWindowLongPtrW(w, GWL_EXSTYLE) as u32;
-        if style & WS_THICKFRAME.0 == 0 || style & WS_CHILD.0 != 0 || ex & (WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) != 0 {
-            return false;
-        }
+        let ex_style = GetWindowLongPtrW(w, GWL_EXSTYLE) as u32;
         let mut pid = 0;
         GetWindowThreadProcessId(w, Some(&mut pid));
-        if pid == 0 || pid == GetCurrentProcessId() {
-            return false;
+        let process = (pid != 0).then(|| OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()).flatten();
+        let app = process.and_then(exe_stem);
+        let out_of_reach = REACH.get() == Reach::SameLevel && process.is_some_and(is_elevated);
+        if let Some(p) = process {
+            let _ = CloseHandle(p);
         }
-        // A window the shell can't move would sit on top of the tiles.
-        if REACH.get() == Reach::SameLevel {
-            let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return false };
-            let elevated = is_elevated(process);
-            let _ = CloseHandle(process);
-            if elevated {
-                return false;
-            }
-        }
-        true
+        let title = window_text(w);
+        let facts = Facts {
+            root: GetAncestor(w, GA_ROOT) == w,
+            owned: GetWindow(w, GW_OWNER).is_ok_and(|owner| !owner.is_invalid()),
+            style,
+            ex_style,
+            app: app.as_deref(),
+            title: &title,
+            ours: pid == GetCurrentProcessId(),
+            out_of_reach,
+        };
+        classify(&facts, &settings::get().tiling_exceptions)
+    }
+}
+
+/// The exe's file name without `.exe`: what tiling exceptions match as the
+/// app ID.
+fn exe_stem(process: HANDLE) -> Option<String> {
+    let mut buf = [0u16; 1024];
+    let mut len = buf.len() as u32;
+    unsafe { QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len) }.ok()?;
+    let path = String::from_utf16_lossy(&buf[..len as usize]);
+    let name = path.rsplit('\\').next()?;
+    Some(name.strip_suffix(".exe").or_else(|| name.strip_suffix(".EXE")).unwrap_or(name).to_owned())
+}
+
+fn window_text(w: HWND) -> String {
+    let mut buf = [0u16; 512];
+    let n = unsafe { GetWindowTextW(w, &mut buf) };
+    String::from_utf16_lossy(&buf[..n.max(0) as usize])
+}
+
+fn class_name(w: HWND) -> String {
+    let mut buf = [0u16; 256];
+    let n = unsafe { GetClassNameW(w, &mut buf) };
+    String::from_utf16_lossy(&buf[..n.max(0) as usize])
+}
+
+/// One line per window the shell sees appear and doesn't already manage,
+/// with why it tiled or not, so a window that tiles wrongly can be told
+/// apart from one the shell never heard of. Each window once.
+fn log_verdict(w: HWND, verdict: Verdict) {
+    if !verdict.worth_logging() || !LOGGED.with_borrow_mut(|seen| seen.insert(w.0 as usize)) {
+        return;
+    }
+    unsafe {
+        let style = GetWindowLongPtrW(w, GWL_STYLE) as u32;
+        let ex_style = GetWindowLongPtrW(w, GWL_EXSTYLE) as u32;
+        let owner = GetWindow(w, GW_OWNER).map(|o| o.0 as usize).unwrap_or(0);
+        let mut pid = 0;
+        GetWindowThreadProcessId(w, Some(&mut pid));
+        let app = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok().and_then(|p| {
+            let name = exe_stem(p);
+            let _ = CloseHandle(p);
+            name
+        });
+        log(&format!(
+            "window {:#x}: app {} class {:?} title {:?} style {style:#010x} exstyle {ex_style:#010x} owner {owner:#x}: {verdict}",
+            w.0 as usize,
+            app.as_deref().unwrap_or("?"),
+            class_name(w),
+            window_text(w),
+        ));
     }
 }
 

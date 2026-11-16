@@ -6,7 +6,9 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 #![cfg_attr(not(windows), allow(dead_code))]
 
+mod classify;
 mod cycle;
+mod display;
 mod follow;
 mod fuzzy;
 mod motion;
@@ -17,6 +19,8 @@ mod wm;
 #[cfg(windows)]
 mod desktop;
 #[cfg(windows)]
+mod env;
+#[cfg(windows)]
 mod handoff;
 #[cfg(windows)]
 mod hint;
@@ -24,6 +28,8 @@ mod hint;
 mod keys;
 #[cfg(windows)]
 mod launcher;
+#[cfg(windows)]
+mod modes;
 #[cfg(windows)]
 mod overlay;
 #[cfg(windows)]
@@ -79,16 +85,17 @@ mod windows_main {
         OUT_TT_PRECIS,
     };
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::System::SystemInformation::GetLocalTime;
     use windows::Win32::System::Shutdown::{EWX_LOGOFF, ExitWindowsEx, LockWorkStation, SHUTDOWN_REASON};
     use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem, SetProcessDpiAwarenessContext};
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, MSG, PostQuitMessage, RegisterClassW, TranslateMessage,
-        WM_DESTROY, WM_DISPLAYCHANGE, WM_ENDSESSION, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW, WS_POPUP,
+        WM_DESTROY, WM_DISPLAYCHANGE, WM_ENDSESSION, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW, WS_POPUP,
     };
     use windows::core::{PCWSTR, PWSTR, Result, w};
 
     use crate::keys::{self, Action, WM_ACTION};
-    use crate::{desktop, launcher, settings, switcher};
+    use crate::{desktop, env, launcher, settings, switcher};
 
     // In 96 DPI pixels; scaled to the DPI of the monitor it's drawn on.
     const FONT_HEIGHT: i32 = 18;
@@ -163,7 +170,13 @@ mod windows_main {
         };
         let _ = std::fs::create_dir_all(&dir);
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("shell.log")) {
-            let _ = writeln!(f, "{line}");
+            // Local time, as apps.log has it, so the two line up.
+            let t = unsafe { GetLocalTime() };
+            let _ = writeln!(
+                f,
+                "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03} {line}",
+                t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, t.wMilliseconds
+            );
         }
     }
 
@@ -175,6 +188,7 @@ mod windows_main {
                 log(&format!("becoming DPI aware failed: {e}"));
             }
             DPI.set(GetDpiForSystem() as i32);
+            env::log_path();
 
             // Before the hook thread, which reads the shortcuts.
             let json = std::env::current_exe().ok().and_then(|exe| std::fs::read_to_string(exe.with_file_name(settings::FILE)).ok());
@@ -305,6 +319,10 @@ mod windows_main {
             }
             WM_DISPLAYCHANGE => {
                 desktop::screen_changed();
+                LRESULT(0)
+            }
+            WM_SETTINGCHANGE if env::is_environment(lparam.0) => {
+                env::reload();
                 LRESULT(0)
             }
             WM_ENDSESSION | WM_DESTROY => {

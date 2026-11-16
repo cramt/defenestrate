@@ -22,20 +22,45 @@ function Log([string]$msg) {
 }
 
 # Start-Process -Wait has no timeout, and an installer stuck on a dialog
-# nobody sees would hold up everything after it forever.
-function Invoke-Winget([string]$winget, [string]$arguments) {
+# nobody sees would hold up everything after it forever. winget's own log
+# and its output go to winget\<id>.log and winget\<id>.out.log: the exit
+# code alone says nothing about why an installer failed.
+function Invoke-Winget([string]$winget, [string]$id) {
+    $logs = Join-Path $state 'winget'
+    New-Item -ItemType Directory -Force -Path $logs | Out-Null
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $winget
-    $psi.Arguments = $arguments
+    $psi.Arguments = "install --id `"$id`" --exact --source winget --silent --accept-package-agreements --accept-source-agreements --disable-interactivity --verbose-logs --log `"$(Join-Path $logs "$id.log")`""
     $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
     $p = [System.Diagnostics.Process]::Start($psi)
-    if (-not $p.WaitForExit(30 * 60 * 1000)) {
-        $p.Kill()
-        throw 'still running after 30 minutes, killed it'
-    }
+    # Both read at once: a full pipe on the one not being read would stall winget.
+    $out = $p.StandardOutput.ReadToEndAsync()
+    $err = $p.StandardError.ReadToEndAsync()
+    $finished = $p.WaitForExit(30 * 60 * 1000)
+    if (-not $finished) { $p.Kill() }
+    Set-Content -LiteralPath (Join-Path $logs "$id.out.log") -Value ($out.Result + $err.Result)
+    if (-not $finished) { throw 'still running after 30 minutes, killed it' }
     # 0x8A15002B: already installed, e.g. a rerun after the install worked
     # but the done file didn't get written.
-    if (@(0, -1978335189) -notcontains $p.ExitCode) { throw ('exit code 0x{0:X8}' -f $p.ExitCode) }
+    if (@(0, -1978335189) -notcontains $p.ExitCode) { throw ('exit code 0x{0:X8}, see winget\{1}.log' -f $p.ExitCode, $id) }
+}
+
+# What explorer does with a PATH an installer changed, and the shell does
+# too (shell/src/env.rs): it reloads the environment on this broadcast.
+# Installers mostly send it themselves; this covers the ones that don't.
+function Send-EnvironmentChanged {
+    if (-not ('Defenestrate.Broadcast' -as [type])) {
+        Add-Type -Namespace Defenestrate -Name Broadcast -MemberDefinition @'
+[DllImport("user32.dll", CharSet = CharSet.Unicode)]
+public static extern System.IntPtr SendMessageTimeout(System.IntPtr hWnd, uint msg, System.UIntPtr wParam, string lParam, uint flags, uint timeout, out System.UIntPtr result);
+'@
+    }
+    $result = [System.UIntPtr]::Zero
+    # HWND_BROADCAST, WM_SETTINGCHANGE, SMTO_ABORTIFHUNG: a hung window
+    # mustn't hold up the installs.
+    [void][Defenestrate.Broadcast]::SendMessageTimeout([System.IntPtr]0xffff, 0x1A, [System.UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$result)
 }
 
 # The PCI vendor IDs of the machine's display controllers (PCI class 03),
@@ -105,11 +130,18 @@ try {
     $done = @()
     if (Test-Path -LiteralPath $doneFile) { $done = @(Get-Content -LiteralPath $doneFile) }
     $pending = @($ids | Where-Object { $done -notcontains $_ })
-    Log "starting, $($pending.Count) of $($ids.Count) to install (GPU vendors: $($gpus -join ', '))"
+    $elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    Log "starting as $([Security.Principal.WindowsIdentity]::GetCurrent().Name) (elevated: $elevated), $($pending.Count) of $($ids.Count) to install (GPU vendors: $($gpus -join ', '))"
 
     # winget needs the network and its own registration, and neither is a
     # given right at logon on a fresh machine, so keep trying for a while.
     $deadline = (Get-Date).AddMinutes(60)
+    # Waiting covers a network or winget that isn't up yet; an installer
+    # that failed three times will fail the same way a fourth, and retrying
+    # it every minute only fills the log. The next logon tries again.
+    $maxFailures = 3
+    $failures = @{}
+    $givenUp = @()
     while ($pending.Count -gt 0 -and (Get-Date) -lt $deadline) {
         $winget = Find-Winget
         if (-not $winget -and @($pending | Where-Object { $_ -ne $wuItem }).Count -gt 0) {
@@ -121,23 +153,30 @@ try {
         foreach ($id in $pending) {
             Log "$id"
             try {
-                if ($id -eq $wuItem) { Install-DisplayDrivers } else { Invoke-Winget $winget "install --id `"$id`" --exact --source winget --silent --accept-package-agreements --accept-source-agreements --disable-interactivity" }
+                if ($id -eq $wuItem) { Install-DisplayDrivers } else { Invoke-Winget $winget $id }
                 Add-Content -LiteralPath $doneFile -Value $id
                 Log "${id}: installed"
+                Send-EnvironmentChanged
             } catch {
-                Log "${id}: failed ($_), retrying"
-                $left += $id
+                $failures[$id] = 1 + $failures[$id]
+                if ($failures[$id] -lt $maxFailures) {
+                    Log "${id}: failed ($_), retrying"
+                    $left += $id
+                } else {
+                    Log "${id}: failed ($_), $maxFailures times; giving up until the next logon"
+                    $givenUp += $id
+                }
             }
         }
         $pending = $left
         if ($pending.Count -gt 0) { Start-Sleep -Seconds 60 }
     }
 
-    if ($pending.Count -eq 0) {
+    if ($pending.Count -eq 0 -and $givenUp.Count -eq 0) {
         schtasks.exe /delete /tn $taskName /f | Out-Null
         Log 'all installed, task removed'
     } else {
-        Log "not installed: $($pending -join ', '); trying again at the next logon"
+        Log "not installed: $((@($pending) + @($givenUp)) -join ', '); trying again at the next logon"
     }
 } catch {
     Log "FAILED: $_"
