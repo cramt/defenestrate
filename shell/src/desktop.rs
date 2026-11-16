@@ -374,7 +374,12 @@ pub fn start(events_to: HWND) {
     // EnumWindows goes top of the z-order down; adding bottom-up leaves
     // the topmost window focused, as it was.
     for w in existing.into_iter().rev() {
-        if manageable(w) {
+        if !visible(w) {
+            continue;
+        }
+        let verdict = verdict(w);
+        log_verdict(w, verdict);
+        if verdict == Verdict::Tile {
             if unsafe { IsIconic(w) }.as_bool() {
                 WM.with_borrow_mut(|wm| wm.as_mut().map(|wm| wm.add_minimized(w)));
             } else {
@@ -662,12 +667,8 @@ fn app_window(w: HWND) -> bool {
     }
 }
 
-/// Windows that tile (classify.rs), possibly minimized; the rest float
-/// where they open.
-fn manageable(w: HWND) -> bool {
-    visible(w) && verdict(w) == Verdict::Tile
-}
-
+/// Whether a visible window tiles (classify.rs); the rest float where they
+/// open.
 fn verdict(w: HWND) -> Verdict {
     unsafe {
         let style = GetWindowLongPtrW(w, GWL_STYLE) as u32;
@@ -676,7 +677,9 @@ fn verdict(w: HWND) -> Verdict {
         GetWindowThreadProcessId(w, Some(&mut pid));
         let process = (pid != 0).then(|| OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()).flatten();
         let app = process.and_then(exe_stem);
-        let out_of_reach = REACH.get() == Reach::SameLevel && process.is_some_and(is_elevated);
+        // As before window rules: without uiAccess, a process the shell can't
+        // open is taken to be out of reach too.
+        let out_of_reach = REACH.get() == Reach::SameLevel && process.is_none_or(is_elevated);
         if let Some(p) = process {
             let _ = CloseHandle(p);
         }

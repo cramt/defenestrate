@@ -28,11 +28,13 @@ pub struct Facts<'a> {
     pub style: u32,
     pub ex_style: u32,
     /// The exe's name without `.exe`, Windows' nearest thing to an app ID.
-    /// None when its process can't be opened.
+    /// None when its process can't be opened (a protected one, say, as
+    /// anti-cheat makes games); then no tiling exception can match it.
     pub app: Option<&'a str>,
     pub title: &'a str,
     pub ours: bool,
-    /// Elevated, while the shell runs without uiAccess and so can't move it.
+    /// Elevated, or a process the shell can't even open, while the shell
+    /// runs without uiAccess and so may not be able to move it.
     pub out_of_reach: bool,
 }
 
@@ -52,7 +54,6 @@ pub enum Why {
     /// Neither sizable nor minimizable.
     Dialog,
     Ours,
-    UnknownProcess,
     OutOfReach,
     /// Matched `tiling_exception_custom[n]`.
     Exception(usize),
@@ -81,8 +82,7 @@ impl fmt::Display for Verdict {
             Why::NoActivate => f.write_str("WS_EX_NOACTIVATE"),
             Why::Dialog => f.write_str("no WS_THICKFRAME or WS_MINIMIZEBOX"),
             Why::Ours => f.write_str("the shell's own"),
-            Why::UnknownProcess => f.write_str("process unknown"),
-            Why::OutOfReach => f.write_str("elevated, and the shell has no uiAccess"),
+            Why::OutOfReach => f.write_str("elevated or unopenable, and the shell has no uiAccess"),
             Why::Exception(n) => write!(f, "tiling_exception_custom[{n}]"),
         }
     }
@@ -108,7 +108,6 @@ pub fn classify(w: &Facts, exceptions: &[TilingException]) -> Verdict {
     if w.ours {
         return float(Why::Ours);
     }
-    let Some(app) = w.app else { return float(Why::UnknownProcess) };
     // A window the shell can't move would sit on top of the tiles.
     if w.out_of_reach {
         return float(Why::OutOfReach);
@@ -116,7 +115,7 @@ pub fn classify(w: &Facts, exceptions: &[TilingException]) -> Verdict {
     if w.style & (WS_THICKFRAME | WS_MINIMIZEBOX) == 0 {
         return float(Why::Dialog);
     }
-    if let Some(n) = exceptions.iter().position(|e| e.matches(app, w.title)) {
+    if let Some(n) = w.app.and_then(|app| exceptions.iter().position(|e| e.matches(app, w.title))) {
         return float(Why::Exception(n));
     }
     Verdict::Tile
@@ -160,6 +159,16 @@ mod tests {
         let lobby = Facts { app: Some("LeagueClientUx"), title: "League of Legends", ..facts(0x1402_0000, 0) };
         assert_eq!(classify(&lobby, &ex), Verdict::Float(Why::Exception(1)));
         assert_eq!(classify(&facts(0x1402_0000, 0), &ex), Verdict::Tile);
+    }
+
+    /// Tiled before window rules existed, with uiAccess: that the shell
+    /// can't name the process mustn't change it.
+    #[test]
+    fn unopenable_processes_still_tile() {
+        let protected = Facts { app: None, ..facts(0x14CF_0000, 0) };
+        assert_eq!(classify(&protected, &[TilingException::new("", "").unwrap()]), Verdict::Tile);
+        let without_ui_access = Facts { out_of_reach: true, ..protected };
+        assert_eq!(classify(&without_ui_access, &[]), Verdict::Float(Why::OutOfReach));
     }
 
     #[test]
