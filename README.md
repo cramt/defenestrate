@@ -59,6 +59,99 @@ values per hive. Every config is layered over the distro's own defaults,
   - Seen in a VM, Linux running from the 1 TB disk it flashed: Linux's partitions hashed identically before and after, and after two Windows boots; Windows booted under Secure Boot to the shell on a 921 GiB C:, and Linux booted again afterwards. Not run on real hardware. Windows' first boot moves itself first in BootOrder (both layouts), which the startup task above undoes, and `update` doesn't support this layout
   - Run end to end from a fresh `build image`: Linux's root and data partitions untouched, Windows to the shell under Secure Boot, Linux booting by default afterwards, and `dfnstrate reboot --no-reboot` picking Windows without `--entry`, both with dfnstrate's entry and Windows' own on the one ESP and with only Windows' left
 - [x] `flash` puts the Windows boot manager this machine's Secure Boot trusts on Windows' ESP ([Secure Boot and Windows' boot manager](#secure-boot-and-windows-boot-manager)). Seen in the VM on firmware whose db has only the 2011 Microsoft CAs: without it, Secure Boot refuses the image's boot manager and nothing boots; with it, Windows boots, and Windows Update then adds the 2023 CA to db and moves itself to the 2023 boot manager over two reboots
+- [ ] Releases ([Install](#install)): a statically linked x86_64 binary with the shell built in, a `curl | sh` installer and `dfnstrate self-update`, built by dist in GitHub Actions on a version tag. No version is tagged yet
+
+## Install
+
+Every way below gives the same `dfnstrate`, with the Windows shell built in.
+
+### Release installer
+
+On any x86_64 Linux distro, once a release is out (none is tagged yet):
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/cramt/defenestrate/releases/latest/download/dfnstrate-installer.sh | sh
+```
+
+It puts one statically linked binary (musl, so no glibc version to match)
+in `~/.local/bin` (or `$XDG_BIN_HOME`), and adds that to `PATH` in your
+shell's profile if it isn't there yet. A specific release's installer is at
+`releases/download/v<version>/dfnstrate-installer.sh`. Update with:
+
+```sh
+dfnstrate self-update           # --check only says whether there's a newer one
+```
+
+The binary is all it installs. dfnstrate drives a lot of other programs
+(QEMU, wimlib, ntfs-3g...), and those come from your distro, per the table
+below. `dfnstrate doctor` lists what this machine is missing, and every
+command checks for its own tools before starting and names the package for
+any that are missing.
+
+### Arch / CachyOS (AUR)
+
+Not published yet; the PKGBUILD is in [`packaging/aur`](packaging/aur):
+
+```sh
+paru -S dfnstrate-git   # or yay, or makepkg -si in packaging/aur/dfnstrate-git
+```
+
+It pulls in what `build iso` needs; the rest are optional dependencies,
+per the table below.
+
+### Nix
+
+The flake's package has every tool, the Secure Boot firmware and Chromium
+wrapped in, so there's nothing else to install:
+
+```sh
+nix run github:cramt/defenestrate -- doctor
+nix profile install github:cramt/defenestrate   # or packages.x86_64-linux.default in your config
+```
+
+See [With Nix](#with-nix) for building as derivations.
+
+### From source
+
+Stable Rust, plus the MinGW cross toolchain once, since the shell is a
+Windows binary:
+
+```sh
+# Arch / CachyOS: sudo pacman -S rustup mingw-w64-gcc
+rustup target add x86_64-pc-windows-gnu
+# openssl 3.4 or later, and osslsigncode (Arch: from the AUR)
+cargo build --release --manifest-path shell/Cargo.toml --target x86_64-pc-windows-gnu
+shell/sign.sh shell/target/x86_64-pc-windows-gnu/release shell-signed
+DEFENESTRATE_SHELL_DIR=$PWD/shell-signed cargo install --path cli
+```
+
+The shell crate builds two binaries, a launcher and the uiAccess shell it
+starts. `sign.sh` copies both to `shell-signed/` and signs the second with a
+certificate made just for that build, then deletes the private key; see
+[Elevated windows](#elevated-windows). Without `DEFENESTRATE_SHELL_DIR`,
+dfnstrate builds without the shell, and `shell = "builtin"` configs fail
+until it's pointed at one; `--features builtin-shell` turns that into a
+build failure instead, as the release build does.
+
+### What it drives
+
+Outside of Nix, these come from the distro. Each command checks for its
+own before starting and names what's missing; `dfnstrate doctor` checks
+them all.
+
+| Command | Arch packages | Debian / Ubuntu packages |
+| --- | --- | --- |
+| `fetch` (and `build` without `--iso`) | `chromium` (or Chrome) | `chromium` (or Chrome) |
+| `build iso` | `7zip wimlib hivex libisoburn` | `7zip wimtools libwin-hivex-perl xorriso` |
+| `build image`, `vm` | the above, `qemu-desktop swtpm edk2-ovmf mtools sleuthkit util-linux` | the above, `qemu-system-x86 qemu-utils swtpm swtpm-tools ovmf mtools sleuthkit util-linux` |
+| `flash` | `util-linux ntfs-3g efibootmgr mtools sudo` | `util-linux ntfs-3g efibootmgr mtools sudo` |
+| `update` | `util-linux ntfs-3g hivex sudo` | `util-linux ntfs-3g libwin-hivex-perl sudo` |
+| `reboot` | `efibootmgr systemd sudo` | `efibootmgr systemd sudo` |
+
+`build image` and `vm` also need access to `/dev/kvm`. `build image` alone
+runs headless, so Arch's `qemu-base` is enough for it. Debian's `7zip` is
+in bookworm and later; older releases only have `p7zip-full`, whose `7z`
+also works.
 
 ## Usage
 
@@ -100,46 +193,7 @@ stick; `installTarget` is only for `flash`.
 
 ### Without Nix
 
-On Arch / CachyOS, from the AUR (pending publication, not there yet; the
-PKGBUILD is in [`packaging/aur`](packaging/aur)):
-
-```sh
-paru -S dfnstrate-git   # or yay, or makepkg -si in packaging/aur/dfnstrate-git
-```
-
-It pulls in what `build iso` needs; the rest are optional dependencies,
-per the table below.
-
-Elsewhere, build dfnstrate (stable Rust) with the shell compiled in. The shell is a
-Windows binary, so it needs the MinGW cross toolchain once:
-
-```sh
-# Arch / CachyOS: sudo pacman -S rustup mingw-w64-gcc
-rustup target add x86_64-pc-windows-gnu
-# openssl, and osslsigncode (Arch: from the AUR)
-cargo build --release --manifest-path shell/Cargo.toml --target x86_64-pc-windows-gnu
-shell/sign.sh shell/target/x86_64-pc-windows-gnu/release shell-signed
-DEFENESTRATE_SHELL_DIR=$PWD/shell-signed cargo install --path cli
-```
-
-The shell crate builds two binaries, a launcher and the uiAccess shell it
-starts. `sign.sh` copies both to `shell-signed/` and signs the second with a
-certificate made just for that build, then deletes the private key; see
-[Elevated windows](#elevated-windows).
-
-The programs it drives, by command. Each command checks for its own before
-starting and names what's missing:
-
-| Command | Needs (Arch packages) |
-| --- | --- |
-| `fetch` (and `build` without `--iso`) | `chromium` (or Chrome) |
-| `build iso` | `7zip wimlib hivex libisoburn` |
-| `build image`, `vm` | the above, `qemu-desktop swtpm edk2-ovmf mtools sleuthkit util-linux`, and access to `/dev/kvm` (`build image` alone runs headless, so `qemu-base` is enough) |
-| `flash` | `util-linux ntfs-3g efibootmgr mtools sudo` |
-| `update` | `util-linux ntfs-3g hivex sudo` |
-| `reboot` | `efibootmgr systemd sudo` |
-
-Then:
+With dfnstrate and the tools above installed ([Install](#install)):
 
 ```sh
 dfnstrate build iso -c my-machine.toml -o out/iso       # USB stick ISO

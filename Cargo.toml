@@ -7,3 +7,9 @@ resolver = "3"
 
 [profile.release]
 lto = "thin"
+
+# The release binaries' (dist-workspace.toml). Without debuginfo, a third
+# the size; symbol names stay, so panics' backtraces still say where.
+[profile.dist]
+inherits = "release"
+strip = "debuginfo"

@@ -1,7 +1,8 @@
 // Compiles the Windows shell into dfnstrate when DEFENESTRATE_SHELL_DIR
 // points at shell/sign.sh's output, so `shell = "builtin"` works from a
 // single binary. The Nix package always sets it; a plain `cargo build`
-// doesn't have a Windows cross toolchain to make one, so it's optional.
+// doesn't have a Windows cross toolchain to make one, so it's optional,
+// unless the builtin-shell feature (on in release builds) asks for it.
 //
 // A directory, not one exe: the shell is a launcher plus the signed uiAccess
 // binary it starts (shell/src/handoff.rs), and they only work as a pair.
@@ -28,5 +29,7 @@ fn main() {
             println!("cargo::rerun-if-changed={}", from.display());
         }
         println!("cargo::rustc-cfg=dfnstrate_builtin_shell");
+    } else if std::env::var_os("CARGO_FEATURE_BUILTIN_SHELL").is_some() {
+        panic!("the builtin-shell feature needs DEFENESTRATE_SHELL_DIR: shell/sign.sh's output directory (README)");
     }
 }
