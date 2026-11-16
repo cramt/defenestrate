@@ -57,9 +57,6 @@ pkgs.vmTools.runInLinuxVM (pkgs.runCommand "dfn-test"
     # The "Linux terminal": the user's login shell, here fed a command.
     [ "$(echo 'id -u' | dfn shell)" = 1000 ]
 
-    dfn apps | tee apps
-    grep -q '^firefox.desktop	Firefox' apps || grep -qi 'firefox' apps
-
     dfn run firefox --version | tee version
     grep -q 'Mozilla Firefox' version
 
@@ -70,5 +67,5 @@ pkgs.vmTools.runInLinuxVM (pkgs.runCommand "dfn-test"
     [ "$(inside /bin/busybox cat /linux/etc/resolv.conf)" = "nameserver 192.0.2.1" ]
 
     mkdir $out
-    cp apps version env $out/
+    cp version env $out/
   '')

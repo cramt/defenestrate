@@ -6,8 +6,6 @@
 # the same binary with the same profile as when Linux is booted.
 #
 #   dfn mount          mount the install at /linux (idempotent)
-#   dfn apps           list its desktop entries: <id> TAB <name>
-#   dfn launch <id>    run a desktop entry
 #   dfn run <cmd>...   run a command as the user, through a login shell
 #   dfn shell          the user's own login shell (the "Linux terminal")
 #
@@ -176,39 +174,6 @@ session() {
 		/run/current-system/sw/bin/bash -lc "cd ~; $cmd" dfn "$@"
 }
 
-# Desktop entries the user would see in a launcher: everything on
-# XDG_DATA_DIRS (which the login shell sets from the profiles), first one of
-# each id wins, minus hidden ones and terminal programs.
-APPS='
-for dir in ${XDG_DATA_HOME:-$HOME/.local/share} $(echo "${XDG_DATA_DIRS:-}" | tr : " "); do
-	for f in "$dir"/applications/*.desktop; do
-		[ -f "$f" ] && echo "$(basename "$f")	$f"
-	done
-done | awk -F "\t" '"'"'!seen[$1]++ { print $2 }'"'"' | while read -r f; do
-	awk -F= -v f="$f" '"'"'
-		/^\[/ { main = ($0 == "[Desktop Entry]") }
-		main && $1 == "Name" && name == "" { name = substr($0, 6) }
-		main && $1 == "Type" { type = $2 }
-		main && ($1 == "NoDisplay" || $1 == "Hidden") && $2 == "true" { hide = 1 }
-		main && $1 == "Terminal" && $2 == "true" { hide = 1 }
-		END { if (type == "Application" && !hide && name != "") { n = split(f, p, "/"); print p[n] "\t" name } }
-	'"'"' "$f"
-done
-'
-
-# Exec= of desktop entry $1, field codes (%u, %F, …) dropped, run through the
-# shell, which takes care of its quoting.
-LAUNCH='
-id=$1
-for dir in ${XDG_DATA_HOME:-$HOME/.local/share} $(echo "${XDG_DATA_DIRS:-}" | tr : " "); do
-	f=$dir/applications/$id
-	[ -f "$f" ] && break
-done
-[ -f "$f" ] || { echo "dfn: no desktop entry $id" >&2; exit 1; }
-exec=$(awk -F= '"'"'/^\[/ { main = ($0 == "[Desktop Entry]") } main && $1 == "Exec" { print substr($0, 6); exit }'"'"' "$f" | sed "s/ *%[fFuUdDnNickvm]//g")
-eval "exec $exec"
-'
-
 case ${1:-} in
 _enter)
 	shift
@@ -220,16 +185,6 @@ _session)
 	;;
 mount)
 	do_mount
-	;;
-apps)
-	do_mount
-	as_user "$APPS"
-	;;
-launch)
-	[ $# -eq 2 ] || { echo "usage: dfn launch <desktop id>" >&2; exit 2; }
-	do_mount
-	wait_for_wslg
-	as_user "$LAUNCH" "$2"
 	;;
 run)
 	shift
@@ -244,7 +199,7 @@ shell)
 	as_user 'exec "$1" -l' "$(user_field 7)"
 	;;
 *)
-	echo "usage: dfn mount | apps | launch <desktop id> | run <command> [args] | shell" >&2
+	echo "usage: dfn mount | run <command> [args] | shell" >&2
 	exit 2
 	;;
 esac

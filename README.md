@@ -44,7 +44,7 @@ values per hive. Every config is layered over the distro's own defaults,
 - [x] Gaming defaults for the new user: mouse acceleration ("Enhance pointer precision") off, and the Sticky/Filter/Toggle Keys hotkeys that pop a dialog over the game off. Seen in the user's hive after a fresh `build image` booted in the VM: MouseSpeed/MouseThreshold1/MouseThreshold2 0/0/0, StickyKeys 506, Keyboard Response 122, ToggleKeys 58
 - [x] Windows apps (`apps`): winget IDs, unpinned, installed by winget at the first real boot from a logon task first logon registers. Seen in the VM under our shell, online: the script installed Firefox elevated, and an equivalent logon task fired at the next logon, installed 7-Zip and deleted itself. From a fresh `build image`: first logon registered the task, and it ran at the first real boot and removed itself (the VM config has no apps, so only the GPU pass below ran)
   - GPU drivers (`gpu`): a Windows Update pass for display drivers at first boot, plus per-vendor winget lists picked by PCI vendor ID. Seen from a fresh `build image` in the VM, online: the pass found QEMU's VGA (vendor 1234), asked Windows Update, which had no display driver for it, and finished in 6 minutes. Not yet seen on real GPU hardware
-- [ ] WSL installed offline, and the machine's Linux install run through it (`wsl.linux`): its disks attached and mounted, its apps in the Start Menu, run chrooted as its user
+- [ ] WSL installed offline, and the machine's Linux install run through it (`wsl.linux`): its disks attached and mounted, its programs run chrooted as its user from a "Linux terminal" in the Start Menu
   - Seen in a VM (Windows nested in KVM, a saturn-shaped btrfs test install as a second disk, `nix build .#test-linux-disk`): WSL installs from the image, the logon task imports the distro, attaches the disk by GPT GUID, mounts it and puts its Firefox in the Start Menu; the launcher starts it, and Firefox runs from the install as its user, with its profile in the install's home. dfn's half is also a flake check (`checks.x86_64-linux.dfn`)
   - Linux GUI windows are a non-goal. WSLg's viewer (msrdc) only connects while a real explorer runs as the shell: a dump of it under our shell shows its connection thread never starting, and faking explorer's documented surface (Shell_TrayWnd and its appbar/tray messages, the shell window, the shell-ready events, TaskbarCreated) doesn't change that. Running explorer hidden underneath works, but this Windows exists to be a console for kernel-anticheat games, so explorer stays out. The experiment is on branch `t3/wslg-windows-under-shell`
   - Terminal programs work: Start Menu → "Linux terminal" (`dfn shell`) opens the user's login shell from the install, as the user, in their home
@@ -528,11 +528,11 @@ Support Assistant installs silently but then wants clicks in a browser to
 fetch anything. NVIDIA's Windows Update driver trails its own by a few
 weeks, so that's still the gap for NVIDIA machines.
 
-### Linux apps, through WSL
+### Linux terminal, through WSL
 
-There's no Windows app management. Windows gets WSL, and on a dual-boot
-machine the apps are the Linux install's own: the same Firefox binary,
-profile, bookmarks and logins.
+Windows gets WSL, and on a dual-boot machine a terminal into the Linux
+install itself: its own shell, tools, dotfiles and home directory. Only
+terminal programs: WSLg's windows don't show under the shell (see Status).
 
 WSL's MSI is pinned in `configs/default.toml` and installed at first logon
 from the image, so it needs no network. With `wsl.linux` set, first logon
@@ -550,13 +550,13 @@ each logon it:
    NixOS mounts its `fileSystems`, by `LABEL=` or `UUID=` because device
    names differ inside WSL, then binds `/proc`, `/dev`, WSLg's sockets and
    WSL's DNS into it, and gives it a fresh `/run` with `current-system`;
-4. writes a Start Menu shortcut under Programs\Linux for every desktop entry
-   the user would see on Linux. Each one runs `wslg.exe … dfn launch <id>`,
-   which chroots into the install and runs the entry's command as the user
-   through a login shell, so the profiles' environment applies.
+4. writes the Start Menu shortcut Programs\Linux\Linux terminal, which runs
+   `dfn shell`: it chroots into the install and opens the user's login
+   shell as the user, in their home, so the profiles' environment applies.
+   The install's GUI apps get no shortcuts, and any left in that folder by older versions
+   are removed.
 
-The shell's launcher lists the Start Menu, so Linux apps are a Super-tap
-away. Logs go to `%LOCALAPPDATA%\defenestrate\wsl.log`.
+Logs go to `%LOCALAPPDATA%\defenestrate\wsl.log`.
 
 Only one OS runs at a time on a dual boot, so sharing the home directory is
 safe, as long as Linux was shut down rather than hibernated.

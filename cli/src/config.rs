@@ -98,8 +98,8 @@ pub struct Wsl {
 }
 
 /// The machine's Linux install, run from Windows: its disks are handed to
-/// WSL, mounted like NixOS's fileSystems, and its apps run chrooted in it
-/// as `user`, showing up in the Start Menu.
+/// WSL, mounted like NixOS's fileSystems, and its programs run chrooted in
+/// it as `user`, from the Start Menu's "Linux terminal".
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Linux {

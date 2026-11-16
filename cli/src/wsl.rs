@@ -49,7 +49,7 @@ pub fn render(config: &Config, cache: &Cache, work: &Path, dir: &Path) -> Result
     write(
         "task.xml",
         &tasks::xml(&Task {
-            description: "Attaches and mounts the Linux install in WSL, and lists its apps in the Start Menu. Log: %LOCALAPPDATA%\\defenestrate\\wsl.log",
+            description: "Attaches and mounts the Linux install in WSL, and keeps the Linux terminal in the Start Menu. Log: %LOCALAPPDATA%\\defenestrate\\wsl.log",
             // Elevated, for `wsl --mount`, and S4U: in session 0, so no window
             // of it (elevated windows starve the shell's keyboard hook) and no
             // stored password.

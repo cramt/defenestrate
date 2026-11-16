@@ -6,7 +6,7 @@
 #   - attaches the install's disks to WSL (`wsl --mount --bare` needs admin,
 #     which is why this is a task rather than something the shell does),
 #   - mounts the install inside WSL (dfn mount),
-#   - keeps one Start Menu shortcut per Linux app, under Programs\Linux.
+#   - keeps the "Linux terminal" Start Menu shortcut, under Programs\Linux.
 # Log: %LOCALAPPDATA%\defenestrate\wsl.log
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
@@ -21,7 +21,6 @@ function Log([string]$msg) {
 $env:WSL_UTF8 = '1'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 $wsl = Join-Path $env:ProgramFiles 'WSL\wsl.exe'
-$wslg = Join-Path $env:ProgramFiles 'WSL\wslg.exe'
 $distro = 'defenestrate'
 $config = Get-Content -Raw (Join-Path $here 'wsl.json') | ConvertFrom-Json
 
@@ -77,26 +76,14 @@ try {
     # within seconds, mounts and all, so every launch mounts again.
     Wsl @('-d', $distro, '--cd', '/', '--exec', '/defenestrate/dfn', 'mount') | Out-Null
 
-    # One shortcut per desktop entry the Linux user would see. The shell's
-    # launcher lists the Start Menu, so they're launchable from there.
+    # Only the terminal: WSLg's windows never show under our shell (README,
+    # "Linux GUI windows are a non-goal"), so GUI apps would be dead entries.
+    # Anything else in the folder, like the per-app shortcuts older versions
+    # wrote, is removed below.
     $menu = Join-Path ([Environment]::GetFolderPath('Programs')) 'Linux'
     New-Item -ItemType Directory -Force -Path $menu | Out-Null
     $shell = New-Object -ComObject WScript.Shell
     $wanted = @{}
-    foreach ($line in (Wsl @('-d', $distro, '--cd', '/', '--exec', '/defenestrate/dfn', 'apps'))) {
-        $id, $name = "$line" -split "`t", 2
-        if (-not $name) { continue }
-        $file = ($name -replace '[<>:"/\\|?*]', '_') + '.lnk'
-        if ($wanted.ContainsKey($file)) { continue }
-        $wanted[$file] = $true
-        $lnk = $shell.CreateShortcut((Join-Path $menu $file))
-        # wslg.exe rather than wsl.exe: no console window. It has no --exec;
-        # --shell-type none is the same.
-        $lnk.TargetPath = $wslg
-        $lnk.Arguments = "-d $distro --cd / --shell-type none -- /defenestrate/dfn launch $id"
-        $lnk.Description = "$name (Linux)"
-        $lnk.Save()
-    }
     # The user's login shell in a console, for terminal programs (which have
     # no desktop entry to show up as).
     $file = 'Linux terminal.lnk'
@@ -107,7 +94,7 @@ try {
     $lnk.Description = 'Login shell of the Linux install'
     $lnk.Save()
     Get-ChildItem $menu -Filter *.lnk | Where-Object { -not $wanted.ContainsKey($_.Name) } | Remove-Item
-    Log "$($wanted.Count) Linux apps in the Start Menu"
+    Log 'Linux terminal in the Start Menu'
 } catch {
     Log "failed: $_"
     exit 1
