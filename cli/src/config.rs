@@ -109,6 +109,16 @@ pub struct Linux {
     pub disks: Vec<Guid>,
     /// Mounted in order; the first must be "/".
     pub mounts: Vec<Mount>,
+    /// Copied from the install into the Windows user's profile at every
+    /// logon, replacing what's there: destination under %USERPROFILE% ->
+    /// absolute path in the install. Files or directories; symlinks are
+    /// followed inside the install, so home-manager's links into the Nix
+    /// store work. Read as root, so this is also how rendered secrets get
+    /// over: they land with the profile's ACL (the user, SYSTEM and
+    /// Administrators). Destinations dropped from here are deleted at the
+    /// next logon.
+    #[serde(default)]
+    pub files: BTreeMap<ProfilePath, AbsPath>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -464,6 +474,11 @@ checked_string!(AbsPath, "an absolute path of plain components", |s| {
             && !s.ends_with('/')
             && s[1..].split('/').all(|c| !c.is_empty() && c != "." && c != ".." && c.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))))
 });
+// Relative to the profile and plain, so it can't reach outside it; `/`
+// separated, as everywhere else in the config.
+checked_string!(ProfilePath, "a path under the user's profile (plain components separated by /)", |s| {
+    s.split('/').all(|c| !c.is_empty() && c != "." && c != ".." && c.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)))
+});
 checked_string!(FsType, "a filesystem type", |s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()));
 checked_string!(MountOption, "a mount option", |s| { !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.:=@/".contains(&b)) });
 
@@ -627,6 +642,17 @@ impl Config {
             if linux.disks.is_empty() {
                 bail!("config: wsl.linux.disks: name at least the disk \"/\" is on");
             }
+            // Windows paths ignore case. One inside another (or the same one
+            // twice) would be overwritten or deleted by it, depending on the
+            // order they're copied in. Sorted, a path's descendants come
+            // right after it.
+            let mut dests: Vec<String> = linux.files.keys().map(|d| d.as_str().to_ascii_lowercase()).collect();
+            dests.sort();
+            for pair in dests.windows(2) {
+                if pair[1] == pair[0] || pair[1].starts_with(&format!("{}/", pair[0])) {
+                    bail!("config: wsl.linux.files: {:?} and {:?} overlap (Windows ignores case)", pair[0], pair[1]);
+                }
+            }
         }
         for (hive, keys) in [("software", &self.registry.software), ("system", &self.registry.system), ("defaultUser", &self.registry.default_user)] {
             for (key, values) in keys {
@@ -680,6 +706,33 @@ mod tests {
             t.remove("gpu");
             merge(&mut t, toml::from_str(&format!("[user]\nname = \"x\"\n{bad}")).unwrap());
             assert!(toml::Value::Table(t).try_into::<Config>().is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn linux_files_stay_in_the_profile_and_dont_overlap() {
+        let config = |files: &str| -> Result<Config> {
+            let mut t: toml::Table = toml::from_str(DEFAULTS).unwrap();
+            let linux = format!("[user]\nname = \"x\"\n[wsl.linux]\nuser = \"x\"\ndisks = [\"fba1d9d1-1150-4352-9ef6-83f00f0f27e8\"]\nmounts = [{{ device = \"LABEL=root\", target = \"/\", fsType = \"btrfs\" }}]\n[wsl.linux.files]\n{files}");
+            merge(&mut t, toml::from_str(&linux).unwrap());
+            let config: Config = toml::Value::Table(t).try_into()?;
+            config.check()?;
+            Ok(config)
+        };
+        let ok = config("\".claude/CLAUDE.md\" = \"/home/x/.claude/CLAUDE.md\"\n\".claude/skills\" = \"/home/x/.claude/skills\"").unwrap();
+        assert_eq!(ok.wsl.linux.unwrap().files.len(), 2);
+        for bad in [
+            "\"../escape\" = \"/a\"",
+            "\"/abs\" = \"/a\"",
+            "\"C:/abs\" = \"/a\"",
+            "\"a\\\\b\" = \"/a\"",
+            "\"a//b\" = \"/a\"",
+            "\"a\" = \"relative\"",
+            "\".claude\" = \"/a\"\n\".claude/x\" = \"/b\"",
+            "\".claude\" = \"/a\"\n\".Claude/x\" = \"/b\"",
+            "\"key\" = \"/a\"\n\"KEY\" = \"/b\"",
+        ] {
+            assert!(config(bad).is_err(), "{bad}");
         }
     }
 

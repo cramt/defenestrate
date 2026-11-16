@@ -7,7 +7,7 @@
 //!   rootfs.tar       the defenestrate distro: busybox, dfn, the mount list;
 //!                    re-imported at the next logon whenever it changes
 //!   wsl-logon.ps1    run at every logon by the defenestrate-wsl task
-//!   wsl.json         the disks it attaches
+//!   wsl.json         the disks it attaches, the files it copies over
 //!   task.xml         that task
 
 use std::path::Path;
@@ -42,14 +42,15 @@ pub fn render(config: &Config, cache: &Cache, work: &Path, dir: &Path) -> Result
     write("rootfs.tar", &rootfs(&busybox, linux)?, ReadAt::EveryLogon)?;
     write("wsl-logon.ps1", include_bytes!("../assets/wsl-logon.ps1"), ReadAt::EveryLogon)?;
     let disks: Vec<&str> = linux.disks.iter().map(|g| g.as_str()).collect();
-    write("wsl.json", serde_json::to_string(&serde_json::json!({ "disks": disks }))?.as_bytes(), ReadAt::EveryLogon)?;
+    let copies: Vec<_> = linux.files.iter().map(|(to, from)| serde_json::json!({ "to": to, "from": from })).collect();
+    write("wsl.json", serde_json::to_string(&serde_json::json!({ "disks": disks, "files": copies }))?.as_bytes(), ReadAt::EveryLogon)?;
 
     let user = config.user.name.as_str();
     // Registered once, at first logon.
     write(
         "task.xml",
         &tasks::xml(&Task {
-            description: "Attaches and mounts the Linux install in WSL, and keeps the Linux terminal in the Start Menu. Log: %LOCALAPPDATA%\\defenestrate\\wsl.log",
+            description: "Attaches and mounts the Linux install in WSL, copies the configured files from it, and keeps the Linux terminal in the Start Menu. Log: %LOCALAPPDATA%\\defenestrate\\wsl.log",
             // Elevated, for `wsl --mount`, and S4U: in session 0, so no window
             // of it (elevated windows starve the shell's keyboard hook) and no
             // stored password.

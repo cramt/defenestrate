@@ -6,6 +6,7 @@
 #   - attaches the install's disks to WSL (`wsl --mount --bare` needs admin,
 #     which is why this is a task rather than something the shell does),
 #   - mounts the install inside WSL (dfn mount),
+#   - copies wsl.linux.files from the install into the user's profile,
 #   - keeps the "Linux terminal" Start Menu shortcut, under Programs\Linux.
 # Log: %LOCALAPPDATA%\defenestrate\wsl.log
 $ErrorActionPreference = 'Stop'
@@ -34,6 +35,35 @@ function Wsl([string[]]$arguments, [switch]$AllowFailure) {
     foreach ($line in $out) { if ($line.Trim()) { Log "  $line" } }
     if ($code -ne 0 -and -not $AllowFailure) { throw "wsl $($arguments -join ' ') exited with $code" }
     return $out
+}
+
+# The install's $from into the profile at $to, replacing what's there. As a
+# tar stream (dfn pack): PowerShell decodes a native command's output as
+# text, which would mangle bytes and can't carry a directory anyway.
+function Copy-FromLinux([string]$from, [string]$to) {
+    $tmp = Join-Path $state ('copy-' + [guid]::NewGuid())
+    New-Item -ItemType Directory -Path $tmp | Out-Null
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo $wsl
+        $psi.Arguments = "-d $distro --cd / --exec /defenestrate/dfn pack `"$from`""
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $p = [System.Diagnostics.Process]::Start($psi)
+        $stderr = $p.StandardError.ReadToEndAsync()
+        $tar = [System.IO.File]::Create("$tmp.tar")
+        try { $p.StandardOutput.BaseStream.CopyTo($tar) } finally { $tar.Close() }
+        $p.WaitForExit()
+        if ($p.ExitCode -ne 0) { throw "dfn pack exited with $($p.ExitCode): $($stderr.Result.Trim())" }
+        & (Join-Path $env:SystemRoot 'System32\tar.exe') -xf "$tmp.tar" -C $tmp
+        if ($LASTEXITCODE -ne 0) { throw "tar.exe couldn't unpack it ($LASTEXITCODE)" }
+        $dest = Join-Path $env:USERPROFILE $to
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dest) | Out-Null
+        if (Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Recurse -Force }
+        Move-Item -LiteralPath (Join-Path $tmp ($from -split '/')[-1]) -Destination $dest
+    } finally {
+        Remove-Item -LiteralPath $tmp, "$tmp.tar" -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 try {
@@ -95,6 +125,29 @@ try {
     $lnk.Save()
     Get-ChildItem $menu -Filter *.lnk | Where-Object { -not $wanted.ContainsKey($_.Name) } | Remove-Item
     Log 'Linux terminal in the Start Menu'
+
+    # One failing (a secret Linux hasn't rendered yet) leaves its last copy
+    # and doesn't hold up the rest.
+    $copied = Join-Path $state 'linux-files.txt'
+    $wantedFiles = @($config.files | ForEach-Object { $_.to })
+    foreach ($f in @($config.files)) {
+        try {
+            Copy-FromLinux $f.from $f.to
+            Log "copied $($f.from) to ~\$($f.to)"
+        } catch {
+            Log "couldn't copy $($f.from) to ~\$($f.to): $_"
+        }
+    }
+    # What earlier logons copied that the config no longer names.
+    if (Test-Path -LiteralPath $copied) {
+        foreach ($old in (Get-Content -LiteralPath $copied)) {
+            if ($old -and $wantedFiles -notcontains $old) {
+                Remove-Item -LiteralPath (Join-Path $env:USERPROFILE $old) -Recurse -Force -ErrorAction SilentlyContinue
+                Log "removed ~\$old, no longer configured"
+            }
+        }
+    }
+    Set-Content -LiteralPath $copied -Value $wantedFiles
 } catch {
     Log "failed: $_"
     exit 1

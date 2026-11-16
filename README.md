@@ -45,6 +45,7 @@ values per hive. Every config is layered over the distro's own defaults,
 - [x] Windows apps (`apps`): winget IDs, unpinned, installed by winget at the first real boot from a logon task first logon registers. Seen in the VM under our shell, online: the script installed Firefox elevated, and an equivalent logon task fired at the next logon, installed 7-Zip and deleted itself. From a fresh `build image`: first logon registered the task, and it ran at the first real boot and removed itself (the VM config has no apps, so only the GPU pass below ran)
   - GPU drivers (`gpu`): a Windows Update pass for display drivers at first boot, plus per-vendor winget lists picked by PCI vendor ID. Seen from a fresh `build image` in the VM, online: the pass found QEMU's VGA (vendor 1234), asked Windows Update, which had no display driver for it, and finished in 6 minutes. Not yet seen on real GPU hardware
 - [ ] WSL installed offline, and the machine's Linux install run through it (`wsl.linux`): its disks attached and mounted, its programs run chrooted as its user from a "Linux terminal" in the Start Menu
+  - Files and secrets from the install copied into the Windows profile at logon (`wsl.linux.files`): `dfn pack` is in the flake check (a store symlink resolved, a group-only secret read), and the copy step ran under pwsh on Linux against a fake `wsl.exe` (bytes intact, directories replaced, a missing source failing alone). Not yet run on Windows
   - Seen in a VM (Windows nested in KVM, a saturn-shaped btrfs test install as a second disk, `nix build .#test-linux-disk`): WSL installs from the image, the logon task imports the distro, attaches the disk by GPT GUID, mounts it and puts its Firefox in the Start Menu; the launcher starts it, and Firefox runs from the install as its user, with its profile in the install's home. dfn's half is also a flake check (`checks.x86_64-linux.dfn`)
   - Linux GUI windows are a non-goal. WSLg's viewer (msrdc) only connects while a real explorer runs as the shell: a dump of it under our shell shows its connection thread never starting, and faking explorer's documented surface (Shell_TrayWnd and its appbar/tray messages, the shell window, the shell-ready events, TaskbarCreated) doesn't change that. Running explorer hidden underneath works, but this Windows exists to be a console for kernel-anticheat games, so explorer stays out. The experiment is on branch `t3/wslg-windows-under-shell`
   - Terminal programs work: Start Menu → "Linux terminal" (`dfn shell`) opens the user's login shell from the install, as the user, in their home
@@ -184,6 +185,9 @@ mounts = [
   { device = "LABEL=nvme-pool", target = "/nix", fsType = "btrfs", options = ["subvol=@nix"] },
   { device = "LABEL=nvme-pool", target = "/home", fsType = "btrfs", options = ["subvol=@home"] },
 ]
+
+[wsl.linux.files]                      # copied into %USERPROFILE% at every logon; see below
+".claude/pool-key" = "/var/lib/op-secrets/cliProxyApiKey"
 
 [registry.defaultUser.'Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced']
 HideFileExt.dword = 0
@@ -553,8 +557,18 @@ each logon it:
 4. writes the Start Menu shortcut Programs\Linux\Linux terminal, which runs
    `dfn shell`: it chroots into the install and opens the user's login
    shell as the user, in their home, so the profiles' environment applies.
-   The install's GUI apps get no shortcuts, and any left in that folder by older versions
-   are removed.
+   The install's GUI apps get no shortcuts, and any left in that folder by
+   older versions are removed;
+5. copies `wsl.linux.files` into the user's profile, each a destination
+   under `%USERPROFILE%` mapped to a file or directory in the install.
+   `dfn pack` tars it up as root inside the install, so symlinks into the
+   Nix store resolve and rendered secrets (`/var/lib/op-secrets`, say) can
+   be read; the logon task unpacks it over whatever was there. The copies
+   get the profile's ACL: the user, SYSTEM and Administrators. One that
+   fails keeps its last copy, and one dropped from the config is deleted.
+   This is how config and secrets from Linux reach Windows programs without
+   anything secret going into the image, and they're as fresh as Linux's
+   last render.
 
 Logs go to `%LOCALAPPDATA%\defenestrate\wsl.log`.
 

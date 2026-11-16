@@ -6,6 +6,7 @@
 # the same binary with the same profile as when Linux is booted.
 #
 #   dfn mount          mount the install at /linux (idempotent)
+#   dfn pack <path>    a tar of the install's <path> on stdout, symlinks followed
 #   dfn run <cmd>...   run a command as the user, through a login shell
 #   dfn shell          the user's own login shell (the "Linux terminal")
 #
@@ -186,6 +187,14 @@ _session)
 mount)
 	do_mount
 	;;
+pack)
+	[ $# -eq 2 ] || { echo "usage: dfn pack <path>" >&2; exit 2; }
+	do_mount
+	# Chrooted, so absolute symlinks (home-manager's into the store) resolve
+	# inside the install; -h follows them. As root: rendered secrets aren't
+	# the user's to read.
+	exec $bb chroot "$ROOT" /run/defenestrate/busybox tar -ch -C "$($bb dirname "$2")" "$($bb basename "$2")"
+	;;
 run)
 	shift
 	[ $# -ge 1 ] || { echo "usage: dfn run <command> [args]" >&2; exit 2; }
@@ -199,7 +208,7 @@ shell)
 	as_user 'exec "$1" -l' "$(user_field 7)"
 	;;
 *)
-	echo "usage: dfn mount | run <command> [args] | shell" >&2
+	echo "usage: dfn mount | pack <path> | run <command> [args] | shell" >&2
 	exit 2
 	;;
 esac

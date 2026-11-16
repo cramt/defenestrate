@@ -57,6 +57,16 @@ pkgs.vmTools.runInLinuxVM (pkgs.runCommand "dfn-test"
     # The "Linux terminal": the user's login shell, here fed a command.
     [ "$(echo 'id -u' | dfn shell)" = 1000 ]
 
+    # What the logon task copies over: symlinks into the store resolved
+    # inside the install (os-release is /etc/static/… -> /nix/store/…), and
+    # a secret read as root.
+    mkdir packed
+    dfn pack /etc/os-release | tar -C packed -x
+    [ -f packed/os-release ] && grep -q '^ID=nixos' packed/os-release
+    dfn pack /var/lib/test-secret | tar -C packed -x
+    [ "$(cat packed/test-secret/key)" = s3cret ]
+    if dfn pack /no/such/path > /dev/null; then echo "pack of a missing path succeeded"; exit 1; fi
+
     dfn run firefox --version | tee version
     grep -q 'Mozilla Firefox' version
 
