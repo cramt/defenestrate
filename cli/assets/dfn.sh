@@ -44,7 +44,19 @@ bind() {
 	$bb mount --bind "$1" "$2"
 }
 
+# One at a time: the logon task's first wsl call starts the instance, whose
+# boot command (dfn boot) then mounts at the same moment as the task's own
+# dfn mount. Both saw /linux unmounted, and the loser's mount failed with
+# EBUSY (saturn, 2026-11-17). The lock goes before anything long-lived (dfn
+# shell) is exec'd with the descriptor still open.
 do_mount() {
+	exec 9>/tmp/dfn-mount.lock
+	$bb flock 9
+	mount_all
+	exec 9>&-
+}
+
+mount_all() {
 	mounts
 	bind /proc "$ROOT/proc"
 	bind /sys "$ROOT/sys"

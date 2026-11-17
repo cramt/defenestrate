@@ -41,8 +41,14 @@ pkgs.vmTools.runInLinuxVM (pkgs.runCommand "dfn-test"
     dfn() { inside /defenestrate/dfn "$@"; }
 
     # wsl.conf's boot command, as the instance starts: the disks are
-    # attached, so it mounts the install.
-    dfn boot
+    # attached, so it mounts the install. The logon task's dfn mount runs at
+    # the same moment (its wsl call is what started the instance); unlocked,
+    # the second mount of /linux failed with EBUSY. Extra mounts make the
+    # race likelier to show.
+    dfn boot &
+    pids=$!
+    for _ in 1 2 3 4; do dfn mount & pids="$pids $!"; done
+    for p in $pids; do wait $p || { echo "a concurrent dfn mount failed"; exit 1; }; done
     inside /bin/busybox grep -q ' /linux ' /proc/mounts || { inside /bin/busybox cat /tmp/dfn-boot.log; exit 1; }
     # WSL's second mount namespace (elevated or not, whichever came second):
     # a bare unshare(2) of the first, propagation untouched, as its init
