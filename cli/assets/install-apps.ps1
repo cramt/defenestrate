@@ -43,7 +43,7 @@ function Invoke-Winget([string]$winget, [string]$id) {
     $scope = if ($Limited) { ' --scope user' } else { '' }
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $winget
-    $psi.Arguments = "install --id `"$id`" --exact --source winget --silent --accept-package-agreements --accept-source-agreements --disable-interactivity --verbose-logs$scope"
+    $psi.Arguments = "install --id `"$id`" --exact --source winget --silent --accept-package-agreements --accept-source-agreements --disable-interactivity --verbose-logs --no-upgrade$scope"
     $psi.UseShellExecute = $false
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
@@ -57,9 +57,12 @@ function Invoke-Winget([string]$winget, [string]$id) {
     Set-Content -LiteralPath (Join-Path $logs "$name.out.log") -Value ($out.Result + $err.Result)
     Copy-WingetLog $started (Join-Path $logs "$name.log")
     if (-not $finished) { throw 'still running after 30 minutes, killed it' }
-    # 0x8A15002B: already installed, e.g. a rerun after the install worked
-    # but the done file didn't get written.
-    if (@(0, -1978335189) -notcontains $p.ExitCode) { throw ('exit code 0x{0:X8}, see winget\{1}.log' -f $p.ExitCode, $name) }
+    # 0x8A150061 (with --no-upgrade) and 0x8A15002B: already installed, e.g.
+    # an installer that reported failure after installing (Discord's did).
+    # Without --no-upgrade winget upgraded it at every logon instead, and
+    # Squirrel's setup crashes upgrading a running Discord, with a dialog.
+    # The apps update themselves; this only puts them there.
+    if (@(0, -1978335135, -1978335189) -notcontains $p.ExitCode) { throw ('exit code 0x{0:X8}, see winget\{1}.log' -f $p.ExitCode, $name) }
 }
 
 # winget ignores --log here (1.26.509, saturn): its log only ever lands in
