@@ -227,6 +227,14 @@ fn verify(config: &Config, disk: &Path) -> Result<()> {
         }
         Ok(inode.to_owned())
     };
+    if !config.updates.is_empty() {
+        let inode = find("/Windows/Setup/defenestrate/updates.log").context("setup's WinPE never ran updates.cmd")?;
+        let log = String::from_utf8_lossy(&tools::output(ICAT.cmd().arg("-o").arg(windows.to_string()).arg(disk).arg(&inode))?).into_owned();
+        eprint!("updates.log:\n{log}");
+        if !log.lines().any(|l| l.trim() == "all installed") {
+            bail!("the updates didn't go in (updates.log above; DISM's own logs are dism-*.log next to it)");
+        }
+    }
     let inode = find("/Windows/Setup/defenestrate/firstlogon.log").context("setup didn't finish: first logon never ran (or C: isn't readable NTFS)")?;
     let log = tools::output(ICAT.cmd().arg("-o").arg(windows.to_string()).arg(disk).arg(&inode))?;
     let log = String::from_utf8_lossy(&log);

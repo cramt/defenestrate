@@ -29,6 +29,15 @@ name = "Windows11_Client_x64_en-us_26300_9457.iso"
 hash = "sha256-vUMH3zK8ivM7OczssRdK6zRThmMPiaK4bHpONrVeplA="
 language = "English (United States)"
 
+# The ISO's build as it is now: its newest cumulative update, added to the
+# image before Windows first starts (README, "Updates"). The title names the
+# ISO's version, so moving the ISO to a new version moves this with it.
+# `dfnstrate pins configs/default.toml` moves it to next month's.
+[[updates]]
+track = { update = "Cumulative Update for Windows 11, version 26H2 for x64-based Systems" }
+url = "https://catalog.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/5775e69a-9a06-44b1-9b51-4bb89c81f212/public/windows11.0-kb5132061-x64_aedc878e9e078df2ec7e2cfb98dd5b21831cdbcc.msu"
+hash = "sha256-iWak6iA1GcDggtwRk1gLcj7IbiG9cgCayXgegBSueYs="
+
 # WSL, installed offline during setup. A machine's Linux install, if it has
 # one, goes in wsl.linux (see README). busybox.net stopped publishing static
 # binaries at 1.35.0, so that one has nothing to track.

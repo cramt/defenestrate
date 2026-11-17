@@ -71,11 +71,13 @@ let
     '';
 
   cacheKey = hash: lib.replaceStrings [ "/" "+" ] [ "_" "-" ] hash;
-  fetched = lib.listToAttrs (map (s: lib.nameValuePair (cacheKey s.hash) (pkgs.fetchurl s)) (collect all));
+  fetchAll = layers: lib.listToAttrs (map (s: lib.nameValuePair (cacheKey s.hash) (pkgs.fetchurl s)) (collect layers));
+  fetched = fetchAll all;
   cache = pkgs.linkFarm "dfnstrate-cache" (fetched // { ${cacheKey iso.hash} = isoSource; });
-  # For render and update, which never read the ISO: fetching it takes a
-  # browser and 7 GB.
-  isoFreeCache = pkgs.linkFarm "dfnstrate-cache" fetched;
+  # For render and update, which never read the ISO (fetching it takes a
+  # browser and 7 GB), nor what only the ISO build adds to it: updates are
+  # gigabytes each.
+  isoFreeCache = pkgs.linkFarm "dfnstrate-cache" (fetchAll (map (l: removeAttrs l [ "updates" ]) all));
 
   runWith = c: args: "dfnstrate ${args} ${configArgs} --cache ${c} --offline";
   run = runWith cache;

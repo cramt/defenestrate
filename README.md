@@ -42,7 +42,8 @@ values per hive. Every config is layered over the distro's own defaults,
 - [ ] Shell: system tray, notifications, COSMIC's stacking and swap mode
 - [x] Autostart without explorer: the Run keys, HKCU RunOnce and Startup folders as explorer runs them, Task Manager's toggles honoured, once per logon, then the config's `autostart` lines. Unit-tested only (the toggle bytes, RunOnce prefixes); not run on Windows yet
 - [x] Provisioned AppX removal (`appx.remove`): deprovisioned during specialize, names checked against the image at build time. All 17 in the defaults removed in a `build image` run (from `specialize.log` on the image)
-- [x] No automatic Windows updates (`NoAutoUpdate` policy): an install is rebuilt and reflashed, not patched in place, so the image's patch level is the ISO's. Not seen yet: Windows leaving the policy alone over weeks
+- [x] No automatic Windows updates (`NoAutoUpdate` policy): an install is rebuilt and reflashed, not patched in place. Not seen yet: Windows leaving the policy alone over weeks
+- [ ] Updates baked into the image ([Windows updates](#windows-updates)): the newest cumulative update, tracked in the Update Catalog, added by DISM in setup's WinPE before Windows first starts. Unit-tested (catalog parsing); not yet seen in a `build image` run
 - [x] Gaming defaults for the new user: mouse acceleration ("Enhance pointer precision") off, and the Sticky/Filter/Toggle Keys hotkeys that pop a dialog over the game off. Seen in the user's hive after a fresh `build image` booted in the VM: MouseSpeed/MouseThreshold1/MouseThreshold2 0/0/0, StickyKeys 506, Keyboard Response 122, ToggleKeys 58
 - [x] Windows apps (`apps`): winget IDs, unpinned, installed by winget at the first real boot from a logon task first logon registers. Seen in the VM under our shell, online: the script installed Firefox elevated, and an equivalent logon task fired at the next logon, installed 7-Zip and deleted itself. From a fresh `build image`: first logon registered the task, and it ran at the first real boot and removed itself (the VM config has no apps, so only the GPU pass below ran)
   - Pinned drivers (`drivers`): .cabs from the Update Catalog (or any archive 7-Zip opens), added to the image and installed by pnputil at specialize. Seen in a `build image` for saturn: specialize added AMD's three packages to the driver store and removed the staged copy (pnputil exit 3010, "reboot to finish"). Binding to a real GPU not seen yet
@@ -472,6 +473,35 @@ edits the SOFTWARE hive (with hivex, in place like the files): the new
 certificate goes into the machine's Root store before the new shell is
 written, and the previous build's comes out after.
 
+### Windows updates
+
+Windows Update doesn't patch an install in place: the default config turns
+automatic updates off. Updates go into the image instead, so a reflash is
+both the update and the way back to a known state. `updates` lists .msu
+files, which setup's WinPE adds with DISM to the freshly applied image
+before Windows first starts, in the listed order. Specialize, OOBE and the
+first logon then all run on the updated system, so the machine's first boot
+has no "Working on updates" step. The defaults track the newest cumulative
+update for the ISO's version:
+
+```toml
+[[updates]]
+track = { update = "Cumulative Update for Windows 11, version 26H2 for x64-based Systems" }
+```
+
+The track picks the newest non-preview update whose title contains that
+text, and its own .msu. Since 24H2, the catalog lists a checkpoint update
+(KB5043080) alongside each cumulative one. Recent ISOs are past it, so it's
+left out. An ISO older than a checkpoint needs it as an `updates` entry of
+its own, before the cumulative one. DISM's "not applicable" counts as done.
+
+`dfnstrate pins` moves the pin to next month's update. Then rebuild and
+flash. `update` can't apply one: Windows can only be serviced by Windows.
+`build image` reads `updates.log` off the image and fails when an update
+didn't go in. DISM's own logs are next to it, in
+`C:\Windows\Setup\defenestrate`. A cumulative update is over 4 GiB, so an
+ISO with one no longer copies onto a FAT32 stick as it is.
+
 ### Switching between Linux and Windows
 
 Linux is the firmware's default and Windows boots only when asked to.
@@ -884,6 +914,9 @@ under `registry.defaultUser`).
    session needs explorer and falls over without it.
 5. `boot.wim` gets the answer file and a `winpeshl.ini` that forces legacy
    setup, because the 24H2+ setup drops the specialize/oobeSystem passes.
+   With `updates`, setup runs with `/noreboot`, and `updates.cmd` adds the
+   .msu files from the ISO's `defenestrate\updates` to the applied image
+   with DISM before rebooting into specialize.
 6. `install.wim` is split into `install.swm` parts under 4 GiB and xorriso
    writes a plain ISO9660 image. The single-edition image is 7.5 GB, and the
    first attempt (one big file in a UDF image from cdrtools' mkisofs) left

@@ -72,6 +72,12 @@ pub struct Config {
     /// machine. Pinned, unlike `gpu`'s, and there with no network.
     #[serde(default)]
     pub drivers: Vec<FileSource>,
+    /// Windows updates (.msu from the Update Catalog), added in this order
+    /// to the applied image by DISM in setup's WinPE, before Windows first
+    /// starts (iso.rs). The image's patch level is the ISO's plus these;
+    /// Windows Update itself is off (configs/default.toml).
+    #[serde(default)]
+    pub updates: Vec<FileSource>,
     #[serde(default)]
     pub appx: Appx,
     pub wsl: Wsl,
@@ -334,6 +340,11 @@ pub enum Track {
     /// ID, `VEN_1002&DEV_747E` say: the .cab from its search results,
     /// Windows Server ones left out.
     Catalog { catalog: CatalogQuery },
+    /// The newest non-preview update in the Microsoft Update Catalog whose
+    /// title contains this ("Cumulative Update for Windows 11, version 26H2
+    /// for x64-based Systems"): its .msu named after the title's KB, leaving
+    /// out the checkpoint updates the catalog lists alongside it.
+    Update { update: CatalogQuery },
 }
 
 impl fmt::Display for Track {
@@ -341,6 +352,7 @@ impl fmt::Display for Track {
         match self {
             Self::Github { github, asset } => write!(f, "github {github} {asset}"),
             Self::Catalog { catalog } => write!(f, "catalog {catalog}"),
+            Self::Update { update } => write!(f, "update {update}"),
         }
     }
 }
@@ -577,7 +589,7 @@ checked_string!(GithubRepo, "a GitHub repo (owner/name)", |s| {
 });
 // What goes into the catalog's search box; printable, since it's sent as a
 // query parameter and nothing else.
-checked_string!(CatalogQuery, "an Update Catalog search (a hardware ID like VEN_1002&DEV_747E)", |s| {
+checked_string!(CatalogQuery, "an Update Catalog search (a hardware ID like VEN_1002&DEV_747E, or an update's title)", |s| {
     !s.trim().is_empty() && s.len() <= 200 && !s.chars().any(char::is_control)
 });
 checked_string!(FsType, "a filesystem type", |s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()));

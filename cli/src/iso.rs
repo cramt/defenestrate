@@ -16,6 +16,8 @@ pub const TOOLS: &[tools::Tool] = &[SEVENZIP, WIMLIB, HIVEXREGEDIT, XORRISO];
 pub const ISO_NAME: &str = "defenestrate.iso";
 /// Under SETUP_DIR, where specialize.cmd looks for `drivers`.
 const DRIVERS_DIR: &str = "drivers";
+/// On the ISO, where updates.cmd looks for `updates`.
+const UPDATES_DIR: &str = "defenestrate/updates";
 
 /// Builds `out/defenestrate.iso`. `work` needs ~25 GB and is left for the
 /// caller to clean.
@@ -87,12 +89,36 @@ pub fn build(config: &Config, variant: &Variant, source: &Path, cache: &Cache, w
     // specialize and oobeSystem passes of an answer file. WinPE runs whatever
     // winpeshl.ini says instead of its default, so point it at legacy setup
     // with the answer file baked into boot.wim (image 2 is the setup image).
+    //
+    // With `updates`, setup stops after applying the image (/noreboot) and
+    // updates.cmd adds them to it offline before Windows ever starts, which
+    // is how an updated image is made: specialize, OOBE and first logon then
+    // run on the updated system, with nothing left for a first boot to do.
+    // Windows can't be serviced from Linux, hence WinPE.
+    let updates = config
+        .updates
+        .iter()
+        .enumerate()
+        .map(|(i, source)| {
+            let file = cache.materialize(source, work)?;
+            // dir /on order is install order.
+            Ok((format!("{UPDATES_DIR}/{i:02}-{}", file.name), std::fs::canonicalize(&file.path)?))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let winpeshl = work.join("winpeshl.ini");
-    std::fs::write(&winpeshl, "[LaunchApps]\r\n%SYSTEMDRIVE%\\sources\\setup.exe, /legacy /unattend:%SYSTEMDRIVE%\\autounattend.xml\r\n")?;
-    tools::run_with_input(
-        WIMLIB.cmd().arg("update").arg(iso.join("sources/boot.wim")).arg("2"),
-        &format!("add {} /autounattend.xml\nadd {} /Windows/System32/winpeshl.ini\n", quote(&r.dir.join("autounattend.xml"))?, quote(&winpeshl)?),
-    )?;
+    let updates_cmd = work.join("updates.cmd");
+    let mut boot_wim = format!("add {} /autounattend.xml\nadd {} /Windows/System32/winpeshl.ini\n", quote(&r.dir.join("autounattend.xml"))?, quote(&winpeshl)?);
+    if updates.is_empty() {
+        std::fs::write(&winpeshl, "[LaunchApps]\r\n%SYSTEMDRIVE%\\sources\\setup.exe, /legacy /unattend:%SYSTEMDRIVE%\\autounattend.xml\r\n")?;
+    } else {
+        std::fs::write(
+            &winpeshl,
+            "[LaunchApps]\r\n%SYSTEMDRIVE%\\sources\\setup.exe, /legacy /noreboot /unattend:%SYSTEMDRIVE%\\autounattend.xml\r\n%SYSTEMROOT%\\System32\\cmd.exe, /c %SYSTEMROOT%\\System32\\defenestrate-updates.cmd\r\n",
+        )?;
+        std::fs::write(&updates_cmd, render::crlf(include_str!("../assets/updates.cmd")))?;
+        boot_wim += &format!("add {} /Windows/System32/defenestrate-updates.cmd\n", quote(&updates_cmd)?);
+    }
+    tools::run_with_input(WIMLIB.cmd().arg("update").arg(iso.join("sources/boot.wim")).arg("2"), &boot_wim)?;
 
     eprintln!("writing {ISO_NAME}");
     let efi_boot = if variant.boot_prompt { "efisys.bin" } else { "efisys_noprompt.bin" };
@@ -105,7 +131,12 @@ pub fn build(config: &Config, variant: &Variant, source: &Path, cache: &Cache, w
             .args(["-eltorito-alt-boot", "-e", &format!("efi/microsoft/boot/{efi_boot}"), "-no-emul-boot"])
             .arg("-o")
             .arg(out.join(ISO_NAME))
-            .arg(&iso),
+            // Grafted from the cache rather than copied: they're gigabytes.
+            // A cumulative update is over FAT32's 4 GiB, so an ISO with
+            // updates no longer copies onto a FAT32 stick as is.
+            .arg("-graft-points")
+            .arg(&iso)
+            .args(updates.iter().map(|(at, from)| format!("{at}={}", from.display()))),
     )?;
     Ok(())
 }
