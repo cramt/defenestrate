@@ -150,6 +150,12 @@ title = "^Discord Updater$"
 'Policies\Microsoft\Windows\CloudContent'.DisableWindowsConsumerFeatures.dword = 1
 # Recall.
 'Policies\Microsoft\Windows\WindowsAI'.DisableAIDataAnalysis.dword = 1
+# No automatic updates: the install is rebuilt and reflashed from Linux, not
+# patched in place, and an update staged in the background installs during
+# the next restart, which on a dual boot machine is the reboot to Linux
+# (saturn sat at "Working on updates" on its way out). The first boot's
+# display-driver pass asks Windows Update itself, which this doesn't stop.
+'Policies\Microsoft\Windows\WindowsUpdate\AU'.NoAutoUpdate.dword = 1
 'Policies\Microsoft\Windows\WindowsUpdate\AU'.NoAutoRebootWithLoggedOnUsers.dword = 1
 # The shell has uiAccess (shell/build.rs): it can send input to and read the
 # input of any window on the user's desktop, elevated ones included. UAC's
