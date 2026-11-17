@@ -16,8 +16,10 @@ pub const TOOLS: &[tools::Tool] = &[SEVENZIP, WIMLIB, HIVEXREGEDIT, XORRISO];
 pub const ISO_NAME: &str = "defenestrate.iso";
 /// Under SETUP_DIR, where specialize.cmd looks for `drivers`.
 const DRIVERS_DIR: &str = "drivers";
-/// On the ISO, where updates.cmd looks for `updates`.
-const UPDATES_DIR: &str = "defenestrate/updates";
+/// On the ISO, where updates.cmd looks for `updates`. At the root, named to
+/// sort after sources/: xorriso writes files in path order, and anything
+/// before boot.wim pushes it along (see check_boot_files).
+const UPDATES_DIR: &str = "updates";
 
 /// Builds `out/defenestrate.iso`. `work` needs ~25 GB and is left for the
 /// caller to clean.
@@ -138,7 +140,37 @@ pub fn build(config: &Config, variant: &Variant, source: &Path, cache: &Cache, w
             .arg(&iso)
             .args(updates.iter().map(|(at, from)| format!("{at}={}", from.display()))),
     )?;
+    check_boot_files(&out.join(ISO_NAME))
+}
+
+/// Windows Boot Manager can't read a boot file that ends past 4 GiB into
+/// the CD. With a 4.7 GB update laid out before boot.wim, a VM booting the
+/// ISO reset every minute without starting WinPE. Setup's own reads, from
+/// install.swm, aren't affected.
+fn check_boot_files(iso: &Path) -> Result<()> {
+    let report = tools::output_string(XORRISO.cmd().arg("-indev").arg(iso).args(["-find", "/", "-type", "f", "-exec", "report_lba", "--"]))?;
+    let late = late_boot_files(&report);
+    if !late.is_empty() {
+        bail!("{} has boot files past 4 GiB, which Windows Boot Manager can't read: {}", iso.display(), late.join(", "));
+    }
     Ok(())
+}
+
+/// The boot files in xorriso's report_lba output that end past 4 GiB.
+fn late_boot_files(report: &str) -> Vec<String> {
+    const LIMIT: u64 = (1 << 32) / 2048;
+    report
+        .lines()
+        .filter_map(|l| l.strip_prefix("File data lba:"))
+        .filter_map(|l| {
+            let fields: Vec<&str> = l.splitn(5, ',').map(str::trim).collect();
+            let [_, start, blocks, _, path] = fields[..] else { return None };
+            let path = path.trim_matches('\'');
+            let boot = path.starts_with("/boot/") || path.starts_with("/efi/") || path.starts_with("/bootmgr") || path == "/sources/boot.wim";
+            let end = start.parse::<u64>().ok()? + blocks.parse::<u64>().ok()?;
+            (boot && end > LIMIT).then(|| path.to_owned())
+        })
+        .collect()
 }
 
 /// Each of `drivers` unpacked under work/drivers/<n>. One with no .inf in
@@ -250,4 +282,27 @@ fn walk(dir: &Path) -> Result<Vec<std::path::PathBuf>> {
         i += 1;
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_boot_files_past_4_gib() {
+        // From the ISO whose VM reset every minute (2026-11-17), trimmed.
+        let report = "Report layout: xt , Startlba ,   Blocks , Filesize , ISO image path
+File data lba:  0 ,    11859 ,      232 ,   473364 , '/bootmgr'
+File data lba:  0 ,    13591 ,  2097151 , 4730812571 , '/defenestrate/updates/00-windows11.0-kb5132061-x64.msu'
+File data lba:  1 ,  2110742 ,   212817 , 4730812571 , '/defenestrate/updates/00-windows11.0-kb5132061-x64.msu'
+File data lba:  0 ,  2326123 ,      720 ,  1474560 , '/efi/microsoft/boot/efisys.bin'
+File data lba:  0 ,  2340426 ,   299749 , 613885050 , '/sources/boot.wim'
+File data lba:  0 ,  2660888 ,  1942836 , 3978927310 , '/sources/install.swm'";
+        assert_eq!(late_boot_files(report), ["/efi/microsoft/boot/efisys.bin", "/sources/boot.wim"]);
+        // The working layout: install.swm may run past 4 GiB, setup reads it.
+        let fine = "File data lba:  0 ,    30454 ,   299749 , 613883931 , '/sources/boot.wim'
+File data lba:  0 ,   350916 ,  1942833 , 3978921184 , '/sources/install.swm'
+File data lba:  0 ,  2300000 ,  2097151 , 4730812571 , '/updates/00-windows11.0-kb5132061-x64.msu'";
+        assert!(late_boot_files(fine).is_empty());
+    }
 }

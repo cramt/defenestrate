@@ -9,7 +9,8 @@ setlocal enabledelayedexpansion
 set media=
 set target=
 for %%d in (C D E F G H I J K L M N O P Q R S T U V W Y Z) do (
-  if not defined media if exist %%d:\defenestrate\updates\ set media=%%d:
+  rem The install media: updates\ next to sources\boot.wim.
+  if not defined media if exist %%d:\updates\ if exist %%d:\sources\boot.wim set media=%%d:
   rem Our payload, so never WinPE's own X:.
   if not defined target if exist %%d:\Windows\Setup\defenestrate\ set target=%%d:
 )
@@ -20,7 +21,7 @@ if not defined target (
 )
 set log=%target%\Windows\Setup\defenestrate\updates.log
 if not defined media (
-  echo no defenestrate\updates on any drive>>"%log%"
+  echo no install media with updates\ on any drive>>"%log%"
   wpeutil shutdown
   exit /b 1
 )
@@ -29,9 +30,9 @@ rem WinPE's own scratch space is a 32 MB RAM disk; a cumulative update
 rem needs gigabytes.
 set scratch=%target%\defenestrate-dism
 mkdir "%scratch%"
-for /f "delims=" %%f in ('dir /b /on "%media%\defenestrate\updates\*.msu"') do (
+for /f "delims=" %%f in ('dir /b /on "%media%\updates\*.msu"') do (
   echo %%f>>"%log%"
-  dism /English /Image:%target%\ /Add-Package /PackagePath:"%media%\defenestrate\updates\%%f" /ScratchDir:"%scratch%" /LogPath:"%target%\Windows\Setup\defenestrate\dism-%%~nf.log" >>"%log%" 2>&1
+  dism /English /Image:%target%\ /Add-Package /PackagePath:"%media%\updates\%%f" /ScratchDir:"%scratch%" /LogPath:"%target%\Windows\Setup\defenestrate\dism-%%~nf.log" >>"%log%" 2>&1
   set code=!errorlevel!
   rem 0x800F081E: not applicable, e.g. a checkpoint the ISO is already past.
   if "!code!"=="-2146498530" (

@@ -915,8 +915,11 @@ under `registry.defaultUser`).
 5. `boot.wim` gets the answer file and a `winpeshl.ini` that forces legacy
    setup, because the 24H2+ setup drops the specialize/oobeSystem passes.
    With `updates`, setup runs with `/noreboot`, and `updates.cmd` adds the
-   .msu files from the ISO's `defenestrate\updates` to the applied image
-   with DISM before rebooting into specialize.
+   .msu files from the ISO's `updates` folder to the applied image
+   with DISM before rebooting into specialize. The folder sorts after
+   `sources`, because xorriso lays files out in path order and Windows Boot
+   Manager can't read a `boot.wim` that ends past 4 GiB into the CD. The
+   build checks where the boot files landed.
 6. `install.wim` is split into `install.swm` parts under 4 GiB and xorriso
    writes a plain ISO9660 image. The single-edition image is 7.5 GB, and the
    first attempt (one big file in a UDF image from cdrtools' mkisofs) left
