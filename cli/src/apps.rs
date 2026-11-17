@@ -14,7 +14,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::config::{AppId, Config};
-use crate::render::{InstallFile, ReadAt};
+use crate::render::{IfMissing, InstallFile, ReadAt};
 use crate::tasks::{self, AsUser, Logon, RunLevel, Task, Trigger};
 
 pub const DIR: &str = "Windows/Setup/defenestrate/apps";
@@ -100,6 +100,9 @@ pub fn render(config: &Config, dir: &Path) -> Result<Vec<InstallFile>> {
         })?,
         ReadAt::EveryLogon,
     )?;
+    // Since the script registers it, it needs nothing but to exist, so
+    // `update` can create it on an install from before it was added.
+    files.last_mut().expect("just written").if_missing = IfMissing::CreateLike(format!("{DIR}/install-apps.ps1"));
     Ok(files)
 }
 

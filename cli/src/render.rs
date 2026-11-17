@@ -160,7 +160,7 @@ pub fn render(config: &Config, variant: &Variant, cache: &Cache, work: &Path, di
     // Read at each start of the shell, like the exe. Only ours reads it, but
     // an `exe` shell is usually ours, built some other way.
     if !matches!(config.shell, Shell::Command(_)) {
-        std::fs::write(dir.join(SHELL_SETTINGS), config.cosmic.render(&config.displays))?;
+        std::fs::write(dir.join(SHELL_SETTINGS), config.cosmic.render(&config.displays, &config.autostart))?;
         files.push(InstallFile::new(format!("{SHELL_DIR}/{SHELL_SETTINGS}"), dir.join(SHELL_SETTINGS), ReadAt::EveryLogon));
     }
 
@@ -328,6 +328,9 @@ mod tests {
         for f in &r.files {
             assert!(f.source.is_file(), "{} has no source", f.dest);
         }
+        // install-apps.ps1 registers it, so an install from before it existed gets it from `update`.
+        let limited = r.files.iter().find(|f| f.dest == format!("{s}/apps/limited-task.xml")).unwrap();
+        assert_eq!(limited.if_missing, IfMissing::CreateLike(format!("{s}/apps/install-apps.ps1")));
         assert_eq!(std::fs::read(&r.files.iter().find(|f| f.dest.ends_with("wsl.msi")).unwrap().source).unwrap(), b"package");
         let shell_reg = std::fs::read_to_string(d.join("out/reg/ascii/shell.reg")).unwrap();
         assert!(shell_reg.contains(r#""Shell"="\"C:\\Program Files\\defenestrate\\my-shell.exe\"""#), "{shell_reg}");
