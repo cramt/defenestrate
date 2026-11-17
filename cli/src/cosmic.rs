@@ -384,6 +384,8 @@ pub struct ShellSettings {
     /// Not COSMIC's: the config's `displays`.
     pub displays: Vec<crate::config::DisplayMode>,
     pub dark: bool,
+    /// Not COSMIC's: the config's `autostart`.
+    pub autostart: Vec<String>,
 }
 
 #[derive(Serialize, Debug, PartialEq)]
@@ -410,7 +412,7 @@ pub struct Shortcut {
 }
 
 impl Cosmic {
-    pub fn shell_settings(&self, displays: &[crate::config::DisplayMode]) -> ShellSettings {
+    pub fn shell_settings(&self, displays: &[crate::config::DisplayMode], autostart: &[String]) -> ShellSettings {
         let c = &self.compositor;
         let t = &self.theme;
         ShellSettings {
@@ -425,11 +427,12 @@ impl Cosmic {
             tiling_exceptions: self.window_rules.tiling_exception_custom.iter().filter(|e| e.enabled).cloned().collect(),
             displays: displays.to_vec(),
             dark: self.mode.is_dark,
+            autostart: autostart.to_vec(),
         }
     }
 
-    pub fn render(&self, displays: &[crate::config::DisplayMode]) -> String {
-        let mut json = serde_json::to_string_pretty(&self.shell_settings(displays)).expect("plain data");
+    pub fn render(&self, displays: &[crate::config::DisplayMode], autostart: &[String]) -> String {
+        let mut json = serde_json::to_string_pretty(&self.shell_settings(displays, autostart)).expect("plain data");
         json.push('\n');
         json
     }
@@ -523,12 +526,12 @@ mod tests {
             "#,
         )
         .unwrap();
-        let s = c.shell_settings(&[]);
+        let s = c.shell_settings(&[], &[]);
         assert_eq!((s.active_hint, s.focus_follows_cursor), (None, None));
         assert!(!s.dark);
         c.compositor.active_hint = true;
-        assert_eq!(c.shell_settings(&[]).active_hint, Some(ActiveHint { thickness: 3, colour: [99, 176, 227] }));
+        assert_eq!(c.shell_settings(&[], &[]).active_hint, Some(ActiveHint { thickness: 3, colour: [99, 176, 227] }));
         c.theme.active_hint = 0;
-        assert_eq!(c.shell_settings(&[]).active_hint, None);
+        assert_eq!(c.shell_settings(&[], &[]).active_hint, None);
     }
 }

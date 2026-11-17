@@ -48,6 +48,11 @@ pub struct Config {
     /// monitor. Only with the built-in shell.
     #[serde(default)]
     pub displays: Vec<DisplayMode>,
+    /// Command lines the shell runs once per logon, after the Run keys and
+    /// Startup folders it runs as explorer would. Only with the built-in
+    /// shell; carried in shell.json, so `update` brings changes.
+    #[serde(default)]
+    pub autostart: Vec<String>,
     /// TrueType/OpenType files installed for everyone into C:\Windows\Fonts.
     /// File names must be new there: an existing file can't be replaced
     /// safely (see the README on ACLs).

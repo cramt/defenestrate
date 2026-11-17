@@ -182,6 +182,11 @@ fn walk(dir: &Path, out: &mut Vec<App>) {
     }
 }
 
+/// A file as explorer opens it, a shortcut's target and all (autostart.rs).
+pub fn open(path: &Path) {
+    launch(Launch::Shortcut(path.to_path_buf()));
+}
+
 /// Through ShellExecuteEx, as explorer opens things: a shortcut's target,
 /// arguments and working directory come from the shortcut itself. Typed
 /// lines go to `start`, which resolves URLs, PATH lookups and arguments the

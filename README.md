@@ -40,6 +40,7 @@ values per hive. Every config is layered over the distro's own defaults,
 - [x] Iosevka Nerd Font Mono installed system-wide (`fonts`, fetched from the Nerd Fonts release) and used by the shell and every console. Windows 11 hands consoles to Windows Terminal once it's registered, which ignores console fonts, so the default terminal is pinned to conhost
 - [x] libcosmic builds for Windows from Linux (`nix build .#cosmic-bar-prototype`); not run on Windows yet
 - [ ] Shell: system tray, notifications, COSMIC's stacking and swap mode
+- [x] Autostart without explorer: the Run keys, HKCU RunOnce and Startup folders as explorer runs them, Task Manager's toggles honoured, once per logon, then the config's `autostart` lines. Unit-tested only (the toggle bytes, RunOnce prefixes); not run on Windows yet
 - [x] Provisioned AppX removal (`appx.remove`): deprovisioned during specialize, names checked against the image at build time. All 17 in the defaults removed in a `build image` run (from `specialize.log` on the image)
 - [x] Gaming defaults for the new user: mouse acceleration ("Enhance pointer precision") off, and the Sticky/Filter/Toggle Keys hotkeys that pop a dialog over the game off. Seen in the user's hive after a fresh `build image` booted in the VM: MouseSpeed/MouseThreshold1/MouseThreshold2 0/0/0, StickyKeys 506, Keyboard Response 122, ToggleKeys 58
 - [x] Windows apps (`apps`): winget IDs, unpinned, installed by winget at the first real boot from a logon task first logon registers. Seen in the VM under our shell, online: the script installed Firefox elevated, and an equivalent logon task fired at the next logon, installed 7-Zip and deleted itself. From a fresh `build image`: first logon registered the task, and it ran at the first real boot and removed itself (the VM config has no apps, so only the GPU pass below ran)
@@ -840,6 +841,21 @@ refresh = 240.49           # Hz; the nearest whole one the monitor offers
 Model and serial are the last two words of the name Linux compositors give
 the monitor (`wlr-randr`, `cosmic-randr list`), so a Linux config's monitor
 list can feed this directly.
+
+Without explorer, nothing runs what's meant to start with Windows, so the
+shell does it, once per logon (a shell restarted after a crash doesn't start
+it all again): the Run keys (HKLM, its 32-bit view, HKCU), HKCU's RunOnce
+(each value deleted before it runs, or after with a `!` prefix), then the
+common and the user's Startup folder. Anything switched off in Task
+Manager's Startup tab stays off. HKLM's RunOnce isn't run, since deleting
+its values takes an administrator. Then `autostart`'s own lines, run as a
+`Spawn` shortcut runs them (a command line, no shell, in the user's home):
+
+```toml
+autostart = ['"C:\Program Files\Mozilla Firefox\firefox.exe"']
+```
+
+`shell.log` has an `autostart (...)` line for each thing started or skipped.
 
 `dfnstrate` writes these to `C:\Program Files\defenestrate\shell.json`,
 which the shell reads when it starts, and `update` rewrites it. An install

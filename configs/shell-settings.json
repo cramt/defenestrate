@@ -105,5 +105,6 @@
     }
   ],
   "displays": [],
-  "dark": true
+  "dark": true,
+  "autostart": []
 }

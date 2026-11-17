@@ -6,6 +6,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 #![cfg_attr(not(windows), allow(dead_code))]
 
+mod autostart;
 mod classify;
 mod cycle;
 mod display;
@@ -43,7 +44,7 @@ fn main() {
 }
 
 #[cfg(windows)]
-use windows_main::{font, log, scaled, scaled_at, use_dpi};
+use windows_main::{font, log, scaled, scaled_at, spawn_line, use_dpi};
 
 #[cfg(windows)]
 fn main() {
@@ -97,7 +98,7 @@ mod windows_main {
     use windows::core::{PCWSTR, PWSTR, Result, w};
 
     use crate::keys::{self, Action, WM_ACTION};
-    use crate::{desktop, env, launcher, settings, switcher, theme};
+    use crate::{autostart, desktop, env, launcher, settings, switcher, theme};
 
     // In 96 DPI pixels; scaled to the DPI of the monitor it's drawn on.
     const FONT_HEIGHT: i32 = 18;
@@ -223,6 +224,8 @@ mod windows_main {
             }
             desktop::start(main);
             log("managing windows");
+            // After the desktop, so what starts opens into the tiling.
+            autostart::start();
 
             let mut msg = MSG::default();
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -247,7 +250,7 @@ mod windows_main {
 
     /// A configured Spawn: the command line as Windows parses one, program
     /// first, like a shortcut's target, rather than split by a shell.
-    fn spawn_line(line: &str) {
+    pub fn spawn_line(line: &str) {
         let mut wide: Vec<u16> = line.encode_utf16().chain([0]).collect();
         let home: Option<Vec<u16>> = std::env::var_os("USERPROFILE").map(|h| h.encode_wide().chain([0]).collect());
         let startup = STARTUPINFOW { cb: size_of::<STARTUPINFOW>() as u32, ..Default::default() };

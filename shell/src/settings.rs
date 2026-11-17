@@ -32,6 +32,9 @@ pub struct Settings {
     pub displays: Vec<DisplayMode>,
     /// COSMIC's Mode is_dark: Windows' dark mode (theme.rs).
     pub dark: bool,
+    /// Not COSMIC's: the config's `autostart`, command lines run once per
+    /// logon after what explorer would start (autostart.rs).
+    pub autostart: Vec<String>,
 }
 
 /// Floats windows whose app ID and title both match, as COSMIC's
@@ -194,6 +197,7 @@ impl Default for Settings {
             tiling_exceptions: Vec::new(),
             displays: Vec::new(),
             dark: true,
+            autostart: Vec::new(),
         }
     }
 }
@@ -268,6 +272,7 @@ mod tests {
         assert!(!s.tiling_exceptions[0].matches("Discord", "Discord"));
         assert_eq!(s.displays, Vec::new());
         assert!(s.dark);
+        assert_eq!(s.autostart, Vec::<String>::new());
     }
 
     #[test]
