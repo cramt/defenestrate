@@ -675,9 +675,11 @@ each logon it:
    WSL's DNS into it, and gives it a fresh `/run` with `current-system`.
    It also adds the Linux user to the distro's passwd with the install's
    uid: they're the distro's default user (`wsl.conf`), so what Windows
-   writes into the install over `\\wsl$` is theirs, not root's. WSL reads
-   the default user as the distro starts, so after a fresh import the task
-   restarts it once;
+   writes into the install over `\\wsl$` is theirs, not root's. `\\wsl$`
+   takes the default user as the instance starts, so an instance that
+   started before the user was in passwd (a fresh import) serves it as
+   root: adding the user leaves `/defenestrate/user-added`, and the task
+   restarts the distro once when it finds it;
 5. writes the Start Menu shortcut Programs\Linux\Linux terminal, which runs
    `dfn shell`: it chroots into the install and opens the user's login
    shell as the user, in their home, so the profiles' environment applies.

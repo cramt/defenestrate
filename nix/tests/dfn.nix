@@ -65,10 +65,15 @@ pkgs.vmTools.runInLinuxVM (pkgs.runCommand "dfn-test"
     inside /bin/busybox grep -q ' /linux/tmp/probe ' /proc/mounts || { echo "a mount in WSL's other namespace didn't propagate"; exit 1; }
     kill $second
 
+    # Adding the user left the marker the logon task restarts the instance
+    # on (\\wsl$ takes its user as the instance starts); the task removes it.
+    inside /bin/busybox test -e /defenestrate/user-added || { echo "no user-added marker after the first mount"; exit 1; }
+    inside /bin/busybox rm /defenestrate/user-added
     dfn mount
     dfn mount # again: idempotent, as every logon runs it
     # The Linux user, by the install's uid, once: wsl.conf's default user.
     [ "$(inside /bin/busybox grep -c '^user:x:1000:' /etc/passwd)" = 1 ]
+    if inside /bin/busybox test -e /defenestrate/user-added; then echo "user-added again with the user already in passwd: every logon would restart"; exit 1; fi
     inside /bin/busybox grep -q '^default = user$' /etc/wsl.conf
 
     uid=$(dfn run id -u)

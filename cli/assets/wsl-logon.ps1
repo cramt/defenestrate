@@ -143,12 +143,15 @@ try {
     Wsl @('-d', $distro, '-u', 'root', '--cd', '/', '--exec', '/defenestrate/dfn', 'mount') | Out-Null
     # The distro's default user is the Linux user, so what Windows writes over
     # \\wsl$ is theirs rather than root's. Its uid is the install's, which dfn
-    # mount just copied into the distro's passwd; WSL looks the user up only
-    # when the instance starts, so a first start (a fresh import) needs one
-    # more.
-    $uid = (Wsl @('-d', $distro, '--cd', '/', '--exec', '/bin/busybox', 'id', '-u') -AllowFailure | Select-Object -Last 1)
-    if ("$uid".Trim() -eq '0') {
-        Log "restarting the $distro distro so it runs as the Linux user"
+    # mount copies into the distro's passwd, leaving /defenestrate/user-added
+    # when it does. \\wsl$ takes its user once, as the instance starts, so an
+    # instance that started before that (a fresh import) serves it as root
+    # until restarted. Not `id -u`: a launch looks the default user up anew,
+    # so it said 1000 while \\wsl$ wrote as root (saturn, 2026-11-19).
+    $added = Wsl @('-d', $distro, '-u', 'root', '--cd', '/', '--exec', '/bin/busybox', 'sh', '-c', 'test -e /defenestrate/user-added && echo added || true')
+    if ($added | Where-Object { "$_".Trim() -eq 'added' }) {
+        Log "restarting the $distro distro so \\wsl$ runs as the Linux user"
+        Wsl @('-d', $distro, '-u', 'root', '--cd', '/', '--exec', '/bin/busybox', 'rm', '/defenestrate/user-added') | Out-Null
         Wsl @('--terminate', $distro) -AllowFailure | Out-Null
         Wsl @('-d', $distro, '-u', 'root', '--cd', '/', '--exec', '/defenestrate/dfn', 'mount') | Out-Null
     }

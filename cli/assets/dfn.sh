@@ -79,8 +79,14 @@ mount_all() {
 	fi
 	# The Linux user, by the install's uid, so wsl.conf can make them the
 	# distro's default user: what Windows writes over \\wsl$ is then theirs.
+	# WSL picks \\wsl$'s user once, as the instance starts, so this instance
+	# serves it as root until it's restarted (launches look the default user
+	# up each time, so `id -u` can't tell). The marker is how the logon task
+	# knows to restart it; on the rootfs, so a task that died before
+	# restarting still does it at the next logon.
 	if ! $bb grep -q "^$USER_NAME:" /etc/passwd; then
 		echo "$USER_NAME:x:$(user_field 3):$(user_field 4)::/:/bin/sh" >>/etc/passwd
+		$bb touch /defenestrate/user-added
 	fi
 	# What _session runs on inside the install. Copied every time so an
 	# updated dfn takes effect without a remount.
