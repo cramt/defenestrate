@@ -126,6 +126,25 @@ function Get-GpuVendors {
 # What Windows Update would install for the GPUs by itself sooner or later,
 # now. BrowseOnly ones are the "optional updates" it wouldn't.
 function Install-DisplayDrivers {
+    # The defaults keep Windows Update's drivers out (configs/default.toml),
+    # which would hide the ones asked for here too: lifted for this search
+    # only, and put back however it ends.
+    $lifted = @(
+        @{ Key = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'ExcludeWUDriversInQualityUpdate' },
+        @{ Key = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Device Metadata'; Name = 'PreventDeviceMetadataFromNetwork' }
+    )
+    foreach ($p in $lifted) {
+        $p.Value = (Get-ItemProperty -LiteralPath $p.Key -Name $p.Name -ErrorAction SilentlyContinue).($p.Name)
+        if ($null -ne $p.Value) { Remove-ItemProperty -LiteralPath $p.Key -Name $p.Name }
+    }
+    try { Install-WuDisplayDrivers } finally {
+        foreach ($p in $lifted) {
+            if ($null -ne $p.Value) { Set-ItemProperty -LiteralPath $p.Key -Name $p.Name -Type DWord -Value $p.Value }
+        }
+    }
+}
+
+function Install-WuDisplayDrivers {
     $session = New-Object -ComObject Microsoft.Update.Session
     $found = $session.CreateUpdateSearcher().Search("IsInstalled=0 and Type='Driver'").Updates
     $updates = New-Object -ComObject Microsoft.Update.UpdateColl

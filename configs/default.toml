@@ -166,6 +166,19 @@ title = "^Discord Updater$"
 # display-driver pass asks Windows Update itself, which this doesn't stop.
 'Policies\Microsoft\Windows\WindowsUpdate\AU'.NoAutoUpdate.dword = 1
 'Policies\Microsoft\Windows\WindowsUpdate\AU'.NoAutoRebootWithLoggedOnUsers.dword = 1
+# Nor drivers, which NoAutoUpdate doesn't cover: PnP's own retrieval
+# (Device Driver Retrieval Client in the update history) installed a dozen
+# vendor packages at saturn's first logon, one of them MSI's "System Driver
+# Update", a software component that put an installer app on the desktop,
+# and left RebootRequired behind (2026-11-19). Drivers the image wants are
+# pinned (`drivers`); the display-driver pass lifts the two Windows Update
+# ones for its own search (install-apps.ps1). Reports differ on which of
+# these Windows 11 honours, so all of them.
+'Policies\Microsoft\Windows\WindowsUpdate'.ExcludeWUDriversInQualityUpdate.dword = 1
+'Policies\Microsoft\Windows\Device Metadata'.PreventDeviceMetadataFromNetwork.dword = 1
+'Policies\Microsoft\Windows\DriverSearching'.SearchOrderConfig.dword = 0
+'Policies\Microsoft\Windows\DriverSearching'.DontSearchWindowsUpdate.dword = 1
+'Microsoft\Windows\CurrentVersion\DriverSearching'.SearchOrderConfig.dword = 0
 # The shell has uiAccess (shell/build.rs): it can send input to and read the
 # input of any window on the user's desktop, elevated ones included. UAC's
 # prompts stay out of its reach only because they're drawn on the secure
