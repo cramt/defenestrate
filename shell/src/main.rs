@@ -44,7 +44,7 @@ fn main() {
 }
 
 #[cfg(windows)]
-use windows_main::{font, log, scaled, scaled_at, spawn_line, use_dpi};
+use windows_main::{font, log, scaled, scaled_at, start_line, use_dpi};
 
 #[cfg(windows)]
 fn main() {
@@ -80,7 +80,7 @@ mod windows_main {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
 
-    use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, LRESULT, WPARAM};
     use windows::Win32::System::Threading::{CreateProcessW, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTUPINFOW};
     use windows::Win32::UI::Input::KeyboardAndMouse::{INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY};
     use windows::Win32::Graphics::Gdi::{
@@ -251,6 +251,17 @@ mod windows_main {
     /// A configured Spawn: the command line as Windows parses one, program
     /// first, like a shortcut's target, rather than split by a shell.
     pub fn spawn_line(line: &str) {
+        if let Some(p) = start_line(line) {
+            unsafe {
+                let _ = CloseHandle(p);
+            }
+        }
+    }
+
+    /// spawn_line, keeping the process handle for the caller to watch and
+    /// close; the pid goes in the log, so a launch can be told apart from
+    /// one that never happened.
+    pub fn start_line(line: &str) -> Option<HANDLE> {
         let mut wide: Vec<u16> = line.encode_utf16().chain([0]).collect();
         let home: Option<Vec<u16>> = std::env::var_os("USERPROFILE").map(|h| h.encode_wide().chain([0]).collect());
         let startup = STARTUPINFOW { cb: size_of::<STARTUPINFOW>() as u32, ..Default::default() };
@@ -262,9 +273,13 @@ mod windows_main {
         match started {
             Ok(()) => unsafe {
                 let _ = CloseHandle(info.hThread);
-                let _ = CloseHandle(info.hProcess);
+                log(&format!("started {line:?}: pid {}", info.dwProcessId));
+                Some(info.hProcess)
             },
-            Err(e) => log(&format!("starting {line:?} failed: {e}")),
+            Err(e) => {
+                log(&format!("starting {line:?} failed: {e}"));
+                None
+            }
         }
     }
 

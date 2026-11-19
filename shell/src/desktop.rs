@@ -684,6 +684,7 @@ fn verdict(w: HWND) -> Verdict {
             let _ = CloseHandle(p);
         }
         let title = window_text(w);
+        let class = class_name(w);
         let facts = Facts {
             root: GetAncestor(w, GA_ROOT) == w,
             owned: GetWindow(w, GW_OWNER).is_ok_and(|owner| !owner.is_invalid()),
@@ -691,6 +692,7 @@ fn verdict(w: HWND) -> Verdict {
             ex_style,
             app: app.as_deref(),
             title: &title,
+            class: &class,
             ours: pid == GetCurrentProcessId(),
             out_of_reach,
         };

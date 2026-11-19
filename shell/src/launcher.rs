@@ -6,7 +6,7 @@
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, CloseHandle, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateSolidBrush, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DeleteObject,
     DrawTextW, EndPaint, FillRect, InvalidateRect, PAINTSTRUCT, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
@@ -19,7 +19,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_CHAR, WM_KEYDOWN, WM_PAINT, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx};
-use windows::Win32::UI::Shell::{SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW};
+use windows::Win32::UI::Shell::{SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
+use windows::Win32::System::Threading::GetProcessId;
 use windows::core::{HSTRING, PCWSTR, Result, w};
 
 use crate::{desktop, font, fuzzy, log, scaled, use_dpi};
@@ -206,7 +207,7 @@ fn launch(what: Launch) {
             cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
             // Done before returning, as this thread ends right after; errors
             // go to the log, not a dialog.
-            fMask: SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC,
+            fMask: SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC | SEE_MASK_NOCLOSEPROCESS,
             lpFile: PCWSTR(file.as_ptr()),
             lpParameters: pcwstr(&params),
             lpDirectory: pcwstr(&home),
@@ -216,8 +217,17 @@ fn launch(what: Launch) {
         unsafe {
             // ShellExecuteEx wants COM, single-threaded, as its docs say.
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-            if let Err(e) = ShellExecuteExW(&mut info) {
-                log(&format!("launching {target:?} failed: {e}"));
+            // Launches are logged: whether the launcher opened Firefox on
+            // saturn (2026-11-19) couldn't be told from the logs. No process
+            // is what a single-instance app handing off, or a URL going to
+            // a running browser, gives.
+            match ShellExecuteExW(&mut info) {
+                Err(e) => log(&format!("launching {target:?} failed: {e}")),
+                Ok(()) if info.hProcess.is_invalid() => log(&format!("launched {target:?}: no new process")),
+                Ok(()) => {
+                    log(&format!("launched {target:?}: pid {}", GetProcessId(info.hProcess)));
+                    let _ = CloseHandle(info.hProcess);
+                }
             }
         }
     });

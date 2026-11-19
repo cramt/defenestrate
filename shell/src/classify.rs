@@ -33,6 +33,7 @@ pub struct Facts<'a> {
     /// anti-cheat makes games); then no tiling exception can match it.
     pub app: Option<&'a str>,
     pub title: &'a str,
+    pub class: &'a str,
     pub ours: bool,
     /// Elevated, or a process the shell can't even open, while the shell
     /// runs without uiAccess and so may not be able to move it.
@@ -49,6 +50,11 @@ pub enum Verdict {
 pub enum Why {
     NotRoot,
     Child,
+    /// The stand-in Windows shows for a window that stopped responding
+    /// (class `Ghost`), which goes when the app answers again. Tiling it
+    /// made a second tile for the same app, and placing it failed with
+    /// "Access is denied" (Discord, saturn 2026-11-19).
+    Ghost,
     Owned,
     ToolWindow,
     NoActivate,
@@ -81,6 +87,7 @@ impl fmt::Display for Verdict {
         match why {
             Why::NotRoot => f.write_str("not a top-level window"),
             Why::Child => f.write_str("WS_CHILD"),
+            Why::Ghost => f.write_str("a hung window's ghost"),
             Why::Owned => f.write_str("owned"),
             Why::ToolWindow => f.write_str("WS_EX_TOOLWINDOW"),
             Why::NoActivate => f.write_str("WS_EX_NOACTIVATE"),
@@ -100,6 +107,9 @@ pub fn classify(w: &Facts, exceptions: &[TilingException]) -> Verdict {
     }
     if w.style & WS_CHILD != 0 {
         return float(Why::Child);
+    }
+    if w.class == "Ghost" {
+        return float(Why::Ghost);
     }
     if w.owned {
         return float(Why::Owned);
@@ -134,7 +144,7 @@ mod tests {
     use super::*;
 
     fn facts(style: u32, ex_style: u32) -> Facts<'static> {
-        Facts { root: true, owned: false, style, ex_style, app: Some("app"), title: "t", ours: false, out_of_reach: false }
+        Facts { root: true, owned: false, style, ex_style, app: Some("app"), title: "t", class: "C", ours: false, out_of_reach: false }
     }
 
     /// Captured on saturn, 2026-11-16 (windows-bugs.md #5).
@@ -150,6 +160,14 @@ mod tests {
     #[test]
     fn topmost_splashes_float() {
         assert_eq!(classify(&facts(0x160f_0000, 0x000c_0108), &[]), Verdict::Float(Why::Topmost));
+    }
+
+    /// Discord's ghost while it hung, saturn 2026-11-19: sizable, with a
+    /// process the shell can't open, which tiled.
+    #[test]
+    fn a_hung_windows_ghost_floats() {
+        let ghost = Facts { app: None, class: "Ghost", title: "discord.com/app - Discord", ..facts(0x14CF_0000, 0) };
+        assert_eq!(classify(&ghost, &[]), Verdict::Float(Why::Ghost));
     }
 
     #[test]

@@ -42,7 +42,8 @@ pub use sys::start;
 mod sys {
     use std::path::PathBuf;
 
-    use windows::Win32::Foundation::{ERROR_MORE_DATA, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS};
+    use windows::Win32::Foundation::{CloseHandle, ERROR_MORE_DATA, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, HANDLE, WAIT_OBJECT_0};
+    use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
     use windows::Win32::System::Com::CoTaskMemFree;
     use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
     use windows::Win32::System::Registry::{
@@ -54,7 +55,7 @@ mod sys {
     use windows::core::{GUID, HSTRING, PCWSTR, PWSTR, w};
 
     use super::{Delete, approved, run_once, startup_file};
-    use crate::{launcher, log, settings, spawn_line};
+    use crate::{launcher, log, settings, start_line};
 
     const RUN: PCWSTR = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
     const RUN_32: PCWSTR = w!(r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run");
@@ -71,19 +72,40 @@ mod sys {
         // in a Startup folder mustn't hold up the message loop.
         std::thread::spawn(|| {
             // Explorer's order: machine, then user; Run keys, then folders.
-            run_key(HKEY_LOCAL_MACHINE, RUN, "HKLM Run", "Run");
-            run_key(HKEY_LOCAL_MACHINE, RUN_32, "HKLM Run (32-bit)", "Run32");
-            run_key(HKEY_CURRENT_USER, RUN, "HKCU Run", "Run");
+            let mut started = Vec::new();
+            run_key(HKEY_LOCAL_MACHINE, RUN, "HKLM Run", "Run", &mut started);
+            run_key(HKEY_LOCAL_MACHINE, RUN_32, "HKLM Run (32-bit)", "Run32", &mut started);
+            run_key(HKEY_CURRENT_USER, RUN, "HKCU Run", "Run", &mut started);
             // HKLM's RunOnce needs an administrator to delete its values,
             // which the shell isn't; installers that use it reboot anyway.
-            user_run_once();
+            user_run_once(&mut started);
             folder(&FOLDERID_CommonStartup, HKEY_LOCAL_MACHINE, "common Startup");
             folder(&FOLDERID_Startup, HKEY_CURRENT_USER, "Startup");
             for line in &settings::get().autostart {
                 log(&format!("autostart (config): {line}"));
-                spawn_line(line);
+                started.extend(start_line(line).map(|p| (line.clone(), p)));
             }
+            report_early_exits(started);
         });
+    }
+
+    /// Run key programs that quit right away (SecurityHealthSystray didn't
+    /// run on saturn, 2026-11-19, and nothing said why): an exit code beats
+    /// guessing. Many of them hand off to a running instance and exit 0,
+    /// which is fine, so only the code is logged, not a verdict.
+    fn report_early_exits(started: Vec<(String, HANDLE)>) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        for (line, p) in started {
+            let left = deadline.saturating_duration_since(std::time::Instant::now()).as_millis() as u32;
+            unsafe {
+                if WaitForSingleObject(p, left) == WAIT_OBJECT_0 {
+                    let mut code = 0;
+                    let _ = GetExitCodeProcess(p, &mut code);
+                    log(&format!("autostart: {line:?} exited within 10 s, code {code:#x}"));
+                }
+                let _ = CloseHandle(p);
+            }
+        }
     }
 
     /// A volatile key goes when the user's hive unloads at logoff, so
@@ -115,7 +137,7 @@ mod sys {
         disposition == REG_CREATED_NEW_KEY
     }
 
-    fn run_key(root: HKEY, path: PCWSTR, what: &str, approval: &str) {
+    fn run_key(root: HKEY, path: PCWSTR, what: &str, approval: &str, started: &mut Vec<(String, HANDLE)>) {
         let Some(key) = open(root, path, KEY_QUERY_VALUE) else { return };
         for (name, line) in command_values(key) {
             if !approved(approval_value(root, approval, &name).as_deref()) {
@@ -123,12 +145,12 @@ mod sys {
                 continue;
             }
             log(&format!("autostart ({what}): {name}: {line}"));
-            spawn_line(&line);
+            started.extend(start_line(&line).map(|p| (line, p)));
         }
         close(key);
     }
 
-    fn user_run_once() {
+    fn user_run_once(started: &mut Vec<(String, HANDLE)>) {
         let Some(key) = open(HKEY_CURRENT_USER, RUN_ONCE, KEY_QUERY_VALUE | KEY_SET_VALUE) else { return };
         for (name, line) in command_values(key) {
             let when = run_once(&name);
@@ -142,7 +164,7 @@ mod sys {
                 delete();
             }
             log(&format!("autostart (HKCU RunOnce): {name}: {line}"));
-            spawn_line(&line);
+            started.extend(start_line(&line).map(|p| (line.clone(), p)));
             if when == Delete::After {
                 delete();
             }
@@ -165,6 +187,9 @@ mod sys {
         let Ok(entries) = std::fs::read_dir(&dir) else { return };
         let mut files: Vec<_> = entries.flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_file())).map(|e| e.path()).collect();
         files.sort();
+        // Said even when empty: an absent line read as "never looked".
+        let count = files.iter().filter(|f| f.file_name().is_some_and(|n| startup_file(&n.to_string_lossy()))).count();
+        log(&format!("autostart ({what}): {count} entries in {}", dir.display()));
         for file in files {
             let Some(name) = file.file_name().map(|n| n.to_string_lossy().into_owned()) else { continue };
             if !startup_file(&name) {
