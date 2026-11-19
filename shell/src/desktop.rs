@@ -35,7 +35,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetCursorPos, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_SHOW,
     EVENT_OBJECT_UNCLOAKED, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MOVESIZEEND,
     EVENT_SYSTEM_MOVESIZESTART, EnumWindows, GA_ROOT,
-    GetForegroundWindow, HWND_BOTTOM,
+    GetForegroundWindow, HWND_BOTTOM, HWND_TOP,
     GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClientRect, GetPropW, GetSystemMetrics, GetWindow, GetWindowLongPtrW,
     GetClassNameW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, HWND_TOPMOST, IsHungAppWindow, IsIconic, IsWindow,
     IsWindowVisible, IsZoomed, KillTimer,
@@ -474,6 +474,36 @@ pub fn on_event(event: u32, w: HWND) {
     // A game going fullscreen mid-animation gets the screen to itself at once.
     if event == EVENT_SYSTEM_FOREGROUND && PHASE.get() != Phase::Idle && fullscreen_app() {
         cut();
+    }
+    if event == EVENT_SYSTEM_FOREGROUND {
+        raise_over_tiles(w);
+    }
+}
+
+/// A focused window the shell doesn't place goes over any tile drawn over
+/// it (wm::tiles_over). Logged, since why Windows left it under one is
+/// still unknown.
+fn raise_over_tiles(w: HWND) {
+    let w = unsafe { GetAncestor(w, GA_ROOT) };
+    if w.is_invalid() || WM.with_borrow(|wm| wm.as_ref().is_none_or(|wm| wm.manages(w))) {
+        return;
+    }
+    let Some((_, at)) = visible_frame(w) else { return };
+    let tiles: Vec<(HWND, Rect)> = WM
+        .with_borrow(|wm| wm.as_ref().map(Wm::tiled).unwrap_or_default())
+        .into_iter()
+        .filter(|&t| on_screen(t))
+        .filter_map(|t| Some((t, visible_frame(t)?.1)))
+        .collect();
+    let over = crate::wm::tiles_over(&z_order(), w, at, &tiles);
+    if over.is_empty() {
+        return;
+    }
+    let over: Vec<String> = over.iter().map(|t| format!("{:#x}", t.0 as usize)).collect();
+    log(&format!("focused window {:#x} was under tile(s) {}; raising it", w.0 as usize, over.join(", ")));
+    let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS;
+    unsafe {
+        let _ = SetWindowPos(w, Some(HWND_TOP), 0, 0, 0, 0, flags);
     }
 }
 

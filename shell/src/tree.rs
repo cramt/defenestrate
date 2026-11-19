@@ -32,6 +32,9 @@ impl Rect {
     pub fn contains(self, p: Point) -> bool {
         (self.left..self.right).contains(&p.x) && (self.top..self.bottom).contains(&p.y)
     }
+    pub fn overlaps(self, o: Rect) -> bool {
+        self.left < o.right && o.left < self.right && self.top < o.bottom && o.top < self.bottom
+    }
     pub fn centre(self) -> Point {
         Point { x: (self.left + self.right) / 2, y: (self.top + self.bottom) / 2 }
     }

@@ -1192,9 +1192,31 @@ impl<W: Copy + Eq> Wm<W> {
     }
 }
 
+/// The tiles drawn over a focused window the shell doesn't place (a
+/// dialog, an installer): above it in the z-order (`z`, top first) and
+/// overlapping it, top first. COSMIC keeps floating windows over the tiles;
+/// Windows stacks by activation, and on saturn (2026-11-19) a focused
+/// installer stayed under the tile next to it.
+pub fn tiles_over<W: Copy + PartialEq>(z: &[W], w: W, at: Rect, tiles: &[(W, Rect)]) -> Vec<W> {
+    let Some(i) = z.iter().position(|&x| x == w) else { return Vec::new() };
+    z[..i].iter().copied().filter(|&x| tiles.iter().any(|&(t, r)| t == x && r.overlaps(at))).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_focused_dialog_under_a_tile_is_found() {
+        let r = |left, right| Rect { left, top: 0, right, bottom: 100 };
+        let tiles = [(1, r(0, 50)), (2, r(50, 100))];
+        // z top first: tile 1, the dialog (9), tile 2. The dialog spans
+        // both tiles; only the one above it is drawn over it.
+        assert_eq!(tiles_over(&[1, 9, 2], 9, r(40, 60), &tiles), [1]);
+        assert_eq!(tiles_over(&[9, 1, 2], 9, r(40, 60), &tiles), Vec::<i32>::new(), "on top already");
+        assert_eq!(tiles_over(&[2, 9, 1], 9, r(10, 40), &tiles), Vec::<i32>::new(), "tile 2 is above but elsewhere");
+        assert_eq!(tiles_over(&[1, 2], 9, r(10, 40), &tiles), Vec::<i32>::new(), "gone from the z-order");
+    }
 
     const AREA: Rect = Rect { left: 0, top: 0, right: 1600, bottom: 1000 };
     /// A second monitor to the right of the first, a different size.
