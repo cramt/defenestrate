@@ -86,6 +86,26 @@ pub struct Config {
     pub linux_boot_entry: LinuxBootEntry,
     #[serde(default)]
     pub registry: Registry,
+    /// Default apps by file extension (".html") or URL scheme ("https"), as
+    /// `dism /online /export-defaultappassociations` lists them. Windows
+    /// guards the user's own choice against programs (UserChoice's hash,
+    /// then UCPD.sys), so these go through the one supported way, the
+    /// "default associations configuration file" policy, which Windows
+    /// applies at every sign-in. One whose ProgId isn't registered at a
+    /// sign-in (an app winget installs during the first) is skipped then and
+    /// applied at the next.
+    #[serde(default)]
+    pub default_apps: BTreeMap<AssocId, DefaultApp>,
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DefaultApp {
+    /// The app's registered ProgId, FirefoxURL-308046B0AF4A39CB say (the
+    /// suffix is a hash of the install path).
+    pub prog_id: ProgId,
+    /// What Settings shows; Windows doesn't match on it.
+    pub name: AppName,
 }
 
 /// The firmware boot entry the Start Menu's "Reboot to Linux" sets as the
@@ -591,6 +611,17 @@ checked_string!(GithubRepo, "a GitHub repo (owner/name)", |s| {
 // query parameter and nothing else.
 checked_string!(CatalogQuery, "an Update Catalog search (a hardware ID like VEN_1002&DEV_747E, or an update's title)", |s| {
     !s.trim().is_empty() && s.len() <= 200 && !s.chars().any(char::is_control)
+});
+checked_string!(AssocId, "a file extension (.html) or URL scheme (https)", |s| {
+    let body = s.strip_prefix('.').unwrap_or(s);
+    !body.is_empty() && body.bytes().all(|b| b.is_ascii_alphanumeric() || b"-+.".contains(&b))
+});
+checked_string!(ProgId, "a ProgId (letters, digits, - _ .)", |s| {
+    (1..=255).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+});
+// Escaped when rendered into XML, so only control characters are out.
+checked_string!(AppName, "an app name (1-255 printable characters)", |s| {
+    (1..=255).contains(&s.chars().count()) && !s.chars().any(char::is_control)
 });
 checked_string!(FsType, "a filesystem type", |s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()));
 checked_string!(MountOption, "a mount option", |s| { !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.:=@/".contains(&b)) });

@@ -2,13 +2,14 @@
 //! written to a directory: what `dfnstrate render` shows and `build iso`
 //! puts in the image.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
 use crate::cache::Cache;
 use crate::cert::ShellCert;
-use crate::config::{Config, Hive, RegValue, Shell};
+use crate::config::{AssocId, Config, DefaultApp, Hive, RegValue, Shell};
 use crate::registry::{self, Root};
 use crate::unattend::{self, Variant};
 use crate::wsl;
@@ -178,6 +179,14 @@ pub fn render(config: &Config, variant: &Variant, cache: &Cache, work: &Path, di
     if let Some(cert) = &shell_cert {
         set(&mut software, &cert.root_key(), "Blob", RegValue::Binary(cert.blob()));
     }
+    if !config.default_apps.is_empty() {
+        std::fs::write(dir.join(DEFAULT_APPS), crlf(&default_apps_xml(&config.default_apps)?))?;
+        // Program Files, not ProgramData: only administrators can change
+        // what every sign-in applies.
+        files.push(InstallFile::new(format!("{SHELL_DIR}/{DEFAULT_APPS}"), dir.join(DEFAULT_APPS), ReadAt::EveryLogon));
+        let path = format!("C:\\{}\\{DEFAULT_APPS}", SHELL_DIR.replace('/', "\\"));
+        set(&mut software, "Policies\\Microsoft\\Windows\\System", "DefaultAssociationsConfiguration", RegValue::Sz(path));
+    }
     let mut shell = Hive::new();
     set(&mut shell, "Microsoft\\Windows NT\\CurrentVersion\\Winlogon", "Shell", RegValue::Sz(shell_command));
 
@@ -224,6 +233,26 @@ fn program_files(exe: &str) -> String {
     format!("\"C:\\Program Files\\defenestrate\\{exe}\"")
 }
 
+const DEFAULT_APPS: &str = "default-apps.xml";
+
+/// The file `dism /online /export-defaultappassociations` writes, for the
+/// DefaultAssociationsConfiguration policy.
+fn default_apps_xml(apps: &BTreeMap<AssocId, DefaultApp>) -> Result<String> {
+    let escape = unattend::escape;
+    let mut xml = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<DefaultAssociations>\n");
+    for (id, app) in apps {
+        xml += &format!(
+            "  <Association Identifier=\"{}\" ProgId=\"{}\" ApplicationName=\"{}\" />\n",
+            escape(id.as_str()),
+            escape(app.prog_id.as_str()),
+            escape(app.name.as_str())
+        );
+    }
+    xml += "</DefaultAssociations>\n";
+    roxmltree::Document::parse(&xml).context("generated default-apps.xml doesn't parse")?;
+    Ok(xml)
+}
+
 fn set(hive: &mut Hive, key: &str, name: &str, value: RegValue) {
     hive.entry(key.to_owned()).or_default().insert(name.to_owned(), value);
 }
@@ -254,6 +283,23 @@ fn builtin_shell(work: &Path) -> Result<BuiltinShell> {
 mod tests {
     use super::*;
     use crate::config::Sri;
+
+    #[test]
+    fn default_apps_file() {
+        let apps: BTreeMap<AssocId, DefaultApp> = toml::from_str(
+            r#"
+            https = { progId = "FirefoxURL-308046B0AF4A39CB", name = "Firefox" }
+            ".html" = { progId = "FirefoxHTML-308046B0AF4A39CB", name = "Tom & Jerry's <browser>" }
+            "#,
+        )
+        .unwrap();
+        let xml = default_apps_xml(&apps).unwrap();
+        assert!(xml.contains(r#"<Association Identifier="https" ProgId="FirefoxURL-308046B0AF4A39CB" ApplicationName="Firefox" />"#), "{xml}");
+        assert!(xml.contains(r#"ApplicationName="Tom &amp; Jerry&apos;s &lt;browser&gt;""#), "{xml}");
+        for bad in [r#""https:" = { progId = "X", name = "x" }"#, r#"https = { progId = "a b", name = "x" }"#, r#""." = { progId = "X", name = "x" }"#] {
+            assert!(toml::from_str::<BTreeMap<AssocId, DefaultApp>>(bad).is_err(), "{bad} parsed");
+        }
+    }
 
     /// What `build iso` adds and `update` rewrites, and which of them an
     /// installed system reads again.
