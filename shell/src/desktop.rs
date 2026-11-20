@@ -487,6 +487,13 @@ pub fn on_event(event: u32, w: HWND) {
         cut();
     }
     if event == EVENT_SYSTEM_FOREGROUND {
+        // A window that took focus without ever showing as a new one gets
+        // its verdict line now: borderless League's game never had one, so
+        // there was nothing to say why it stayed where it was (2026-11-20).
+        let root = unsafe { GetAncestor(w, GA_ROOT) };
+        if !root.is_invalid() && WM.with_borrow(|wm| wm.as_ref().is_some_and(|wm| !wm.manages(root))) && on_screen(root) {
+            log_verdict(root, verdict(root));
+        }
         raise_over_tiles(w);
     }
 }
@@ -1403,13 +1410,19 @@ fn strip_caption(w: HWND) -> bool {
         }
         let style = GetWindowLongPtrW(w, GWL_STYLE) as u32;
         // Changing another process's window's style waits on its thread.
-        if style & TITLE_BAR != TITLE_BAR || IsHungAppWindow(w).as_bool() {
+        // A caption is enough: fixed-size windows (League's game, windowed)
+        // have no sizing border, and requiring both left them their title
+        // bar (saturn, 2026-11-20).
+        if style & WS_CAPTION.0 != WS_CAPTION.0 || IsHungAppWindow(w).as_bool() {
             return false;
         }
-        if SetPropW(w, CAPTIONLESS, Some(HANDLE(1 as *mut c_void))).is_err() {
+        // What's taken is kept on the window, so exactly that comes back.
+        let taken = style & TITLE_BAR;
+        if SetPropW(w, CAPTIONLESS, Some(HANDLE(taken as usize as *mut c_void))).is_err() {
+            log(&format!("couldn't mark {w:?} as captionless; leaving its title bar"));
             return false;
         }
-        SetWindowLongPtrW(w, GWL_STYLE, (style & !TITLE_BAR) as isize);
+        SetWindowLongPtrW(w, GWL_STYLE, (style & !taken) as isize);
         frame_changed(w);
         true
     }
@@ -1418,11 +1431,14 @@ fn strip_caption(w: HWND) -> bool {
 /// Gives `w` back the title bar the shell took, if it took one: true if so.
 fn restore_caption(w: HWND) -> bool {
     unsafe {
+        let taken = GetPropW(w, CAPTIONLESS).0 as usize as u32 & TITLE_BAR;
         if RemovePropW(w, CAPTIONLESS).is_err() {
             return false;
         }
+        // Shells from before kept a plain 1 here, having taken both.
+        let taken = if taken == 0 { TITLE_BAR } else { taken };
         let style = GetWindowLongPtrW(w, GWL_STYLE) as u32;
-        SetWindowLongPtrW(w, GWL_STYLE, (style | TITLE_BAR) as isize);
+        SetWindowLongPtrW(w, GWL_STYLE, (style | taken) as isize);
         frame_changed(w);
         true
     }
