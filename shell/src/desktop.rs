@@ -69,6 +69,12 @@ pub const REPLACE_TIMER: usize = 0xdf1;
 /// The shell's window gets this WM_TIMER id when focus_follows_cursor's
 /// delay runs out.
 pub const FOLLOW_TIMER: usize = 0xdf2;
+/// Sends moves held back by `set_pos`.
+const FLUSH_TIMER: usize = 0xdf3;
+/// How long a window gets to handle a move before the next goes anyway:
+/// one that can't move (at its minimum size, say) mustn't hold the newest
+/// place back for good.
+const IN_FLIGHT_FOR: Duration = Duration::from_millis(100);
 pub use crate::overlay::WM_FRAME;
 
 /// How long, once nothing moves, the overlay waits for the windows that
@@ -137,6 +143,11 @@ thread_local! {
     /// Windows asked to move that haven't yet: where they were, and where
     /// they're going.
     static PENDING: RefCell<Vec<(HWND, RECT, RECT)>> = const { RefCell::new(Vec::new()) };
+    /// Moves sent that the window hasn't handled yet: where it was then,
+    /// and when (set_pos).
+    static IN_FLIGHT: RefCell<Vec<(HWND, RECT, Instant)>> = const { RefCell::new(Vec::new()) };
+    /// The newest place for a window still busy with the last one.
+    static HELD: RefCell<Vec<(HWND, RECT)>> = const { RefCell::new(Vec::new()) };
     static EVENTS_TO: Cell<HWND> = const { Cell::new(HWND(std::ptr::null_mut())) };
     static REACH: Cell<Reach> = const { Cell::new(Reach::SameLevel) };
     static DRAGGING: Cell<Option<Dragging>> = const { Cell::new(None) };
@@ -654,6 +665,20 @@ pub fn on_timer(id: usize) {
         follow_focus();
         return;
     }
+    if id == FLUSH_TIMER {
+        let held = HELD.take();
+        for (w, to) in held {
+            if let Err(e) = set_pos(w, to) {
+                log(&format!("placing {w:?} failed: {e}"));
+            }
+        }
+        if HELD.with_borrow(Vec::is_empty) {
+            unsafe {
+                let _ = KillTimer(Some(EVENTS_TO.get()), id);
+            }
+        }
+        return;
+    }
     if id == REPLACE_TIMER {
         unsafe {
             let _ = KillTimer(Some(EVENTS_TO.get()), id);
@@ -1155,7 +1180,6 @@ fn place(w: HWND, r: Rect) {
         {
             (l, t, rr, b) = (visible.left - outer.left, visible.top - outer.top, outer.right - visible.right, outer.bottom - visible.bottom);
         }
-        let flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS;
         let to = RECT { left: r.left - l, top: r.top - t, right: r.right + rr, bottom: r.bottom + b };
         if outer != to {
             PENDING.with_borrow_mut(|p| {
@@ -1163,10 +1187,37 @@ fn place(w: HWND, r: Rect) {
                 p.push((w, outer, to));
             });
         }
-        if let Err(e) = SetWindowPos(w, None, to.left, to.top, to.right - to.left, to.bottom - to.top, flags) {
+        if let Err(e) = set_pos(w, to) {
             log(&format!("placing {w:?} failed: {e}"));
         }
     }
+}
+
+/// SetWindowPos, one move in flight per window. Async, so a hung app can't
+/// hang the shell, but then each move waits in the app's own queue: a
+/// Super+drag resize sends one per pointer move, and a console, slow to
+/// resize (it re-wraps its text), kept working through them after the
+/// drag ended (saturn, 2026-11-20). A window still busy gets only the
+/// newest place, sent once it has handled the last.
+fn set_pos(w: HWND, to: RECT) -> windows::core::Result<()> {
+    let busy = IN_FLIGHT.with_borrow_mut(|f| {
+        f.retain(|&(x, from, sent)| x != w || (sent.elapsed() < IN_FLIGHT_FOR && window_rect(x) == Some(from)));
+        f.iter().any(|&(x, ..)| x == w)
+    });
+    if busy {
+        HELD.with_borrow_mut(|h| {
+            h.retain(|&(x, _)| x != w);
+            h.push((w, to));
+        });
+        unsafe { SetTimer(Some(EVENTS_TO.get()), FLUSH_TIMER, 8, None) };
+        return Ok(());
+    }
+    HELD.with_borrow_mut(|h| h.retain(|&(x, _)| x != w));
+    if let Some(from) = window_rect(w).filter(|&from| from != to) {
+        IN_FLIGHT.with_borrow_mut(|f| f.push((w, from, Instant::now())));
+    }
+    let flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS;
+    unsafe { SetWindowPos(w, None, to.left, to.top, to.right - to.left, to.bottom - to.top, flags) }
 }
 
 /// Windows only lets the process that got the last input take the
@@ -1189,10 +1240,7 @@ fn window_rect(w: HWND) -> Option<RECT> {
 
 fn move_to(w: HWND, r: RECT) {
     PENDING.with_borrow_mut(|p| p.retain(|&(x, ..)| x != w));
-    let flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS;
-    unsafe {
-        let _ = SetWindowPos(w, None, r.left, r.top, r.right - r.left, r.bottom - r.top, flags);
-    }
+    let _ = set_pos(w, r);
 }
 
 /// `r` moved by how far the pointer went since `from`.
