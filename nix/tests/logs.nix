@@ -40,6 +40,9 @@ pkgs.vmTools.runInLinuxVM (pkgs.runCommand "dfnstrate-logs-test"
     [ "$(stat -c %u:%g $o/Users/user/AppData/Local/defenestrate/shell.log)" = 1000:100 ]
     [ "$(stat -c %u:%g out)" = 1000:100 ]
     [ "$(stat -c %u:%g out/nested)" = 1000:100 ]
+    [ "$(stat -c %u:%g $o/ProgramData $o/Users $o/Users/user/AppData)" = "1000:100
+    1000:100
+    1000:100" ]
     [ "$(stat -c %u . )" != 1000 ]
     [ ! -e $o/Windows/Setup/defenestrate/big.vhdx ] || { echo "copied a 60 MB file"; exit 1; }
     [ "$(sha256sum < v.img)" = "$before" ] || { echo "logs wrote to the volume"; exit 1; }

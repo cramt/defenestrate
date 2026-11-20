@@ -97,7 +97,22 @@ pub fn run(config: &Config, args: &Args) -> Result<()> {
         copied += copy(&from, &out.join(rel), owner)?;
     }
     mount.unmount()?;
+    // Everything under --out, the parents of each copied path included
+    // (create_dir_all made those as root).
+    if let Some(owner) = owner {
+        chown_tree(&out, owner)?;
+    }
     println!("{copied} files into {}", out.display());
+    Ok(())
+}
+
+fn chown_tree(dir: &Path, (uid, gid): (u32, u32)) -> Result<()> {
+    std::os::unix::fs::lchown(dir, Some(uid), Some(gid))?;
+    if std::fs::symlink_metadata(dir)?.is_dir() {
+        for entry in std::fs::read_dir(dir)? {
+            chown_tree(&entry?.path(), (uid, gid))?;
+        }
+    }
     Ok(())
 }
 
