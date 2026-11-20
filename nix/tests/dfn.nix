@@ -109,6 +109,18 @@ pkgs.vmTools.runInLinuxVM (pkgs.runCommand "dfn-test"
     grep -q 'wayland-0' env
     [ "$(inside /bin/busybox cat /linux/etc/resolv.conf)" = "nameserver 192.0.2.1" ]
 
+    # Before Windows reboots: unmounted, flushed, whatever was using it gone.
+    inside /bin/busybox sh -c 'cd /linux/home/user && exec /bin/busybox sleep 1000' &
+    holder2=$!
+    dfn run sh -c 'echo kept > ~/written-before-reboot'
+    sleep 1
+    dfn release
+    if inside /bin/busybox grep -q ' /linux' /proc/mounts; then inside /bin/busybox grep ' /linux' /proc/mounts; echo "dfn release left mounts"; exit 1; fi
+    if kill -0 $holder2 2>/dev/null; then echo "dfn release left a process using the install"; exit 1; fi
+    dfn release # again: nothing mounted is fine
+    dfn mount
+    [ "$(inside /bin/busybox cat /linux/home/user/written-before-reboot)" = kept ]
+
     mkdir $out
     cp version env $out/
   '')

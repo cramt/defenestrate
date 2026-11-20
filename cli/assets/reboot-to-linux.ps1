@@ -33,6 +33,22 @@ try {
         exit 1
     }
 
+    # The Linux install is mounted read-write inside WSL's VM, which the
+    # reboot kills: unmounted first, or the last 30 s of what Windows wrote
+    # to it is lost (dfn release says why). Not fatal: a reboot that loses a
+    # little beats none.
+    $wsl = Join-Path $env:ProgramFiles 'WSL\wsl.exe'
+    if (Test-Path $wsl) {
+        $ErrorActionPreference = 'Continue'
+        $env:WSL_UTF8 = '1'
+        $out = & $wsl -d defenestrate -u root --cd / --exec /defenestrate/dfn release 2>&1 | ForEach-Object { "$_" }
+        $code = $LASTEXITCODE
+        foreach ($line in $out) { if ($line.Trim()) { Log "  $line" } }
+        Log "released the Linux install (dfn release exited with $code)"
+        & $wsl --shutdown 2>&1 | Out-Null
+        $ErrorActionPreference = 'Stop'
+    }
+
     Log "booting '$($linux.Description)' ($($linux.Id)) once ($want)"
     $ErrorActionPreference = 'Continue'
     $out = & bcdedit.exe /set $fwbootmgr bootsequence $linux.Id 2>&1 | ForEach-Object { "$_" }

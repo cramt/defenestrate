@@ -7,6 +7,7 @@
 #
 #   dfn boot           wsl.conf's boot command: share mounts, then mount
 #   dfn mount          mount the install at /linux (idempotent)
+#   dfn release        unmount it, flushed, before Windows reboots
 #   dfn pack <path>    a tar of the install's <path> on stdout, symlinks followed
 #   dfn run <cmd>...   run a command as the user, through a login shell
 #   dfn shell          the user's own login shell (the "Linux terminal")
@@ -224,6 +225,37 @@ _session)
 mount)
 	do_mount
 	;;
+release)
+	# Windows killing WSL's VM (a reboot) leaves the install's filesystems
+	# mounted, and btrfs writes back every 30 s: whatever Windows wrote in
+	# the last half minute was lost (saturn, 2026-11-20: a test report's
+	# last items and a rename, seen done and then missing on Linux). So the
+	# reboot task asks for this first. Programs still using the install
+	# (a Linux terminal, say) get asked to quit, then made to.
+	$bb sync
+	is_mounted "$ROOT" || exit 0
+	# Deepest first: binds and the install's own mounts under it.
+	under() { $bb awk -v r="$ROOT" "$1"' && ($2 == r || index($2, r "/") == 1) { print length($2), $2 }' /proc/mounts | $bb sort -rn | $bb awk '{ print $2 }'; }
+	mounts=$(under 1)
+	# Who's using it: only the install's own filesystems, the ones on a
+	# disk. Each btrfs subvolume is a device of its own to fuser -m, so
+	# each is asked; the /proc, /dev and /sys binds are used by everything,
+	# init included (asking those killed the test VM's).
+	disks=$(under '$1 ~ /^\/dev\//')
+	for m in $disks; do $bb fuser -m -k -TERM "$m" >/dev/null 2>&1 || true; done
+	$bb sleep 2
+	for m in $disks; do $bb fuser -m -k "$m" >/dev/null 2>&1 || true; done
+	failed=
+	for m in $mounts; do
+		$bb umount "$m" || failed="$failed $m"
+	done
+	if [ -n "$failed" ]; then
+		# Read-only still forces everything out to disk.
+		for m in $failed; do $bb mount -o remount,ro "$m" 2>/dev/null || true; done
+		echo "dfn: couldn't unmount$failed; remounted read-only" >&2
+		exit 1
+	fi
+	;;
 pack)
 	[ $# -eq 2 ] || { echo "usage: dfn pack <path>" >&2; exit 2; }
 	do_mount
@@ -249,7 +281,7 @@ shell)
 	as_user 'exec "$1" -l' "$(user_field 7)"
 	;;
 *)
-	echo "usage: dfn boot | mount | pack <path> | run <command> [args] | shell" >&2
+	echo "usage: dfn boot | mount | release | pack <path> | run <command> [args] | shell" >&2
 	exit 2
 	;;
 esac
