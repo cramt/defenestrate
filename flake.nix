@@ -57,6 +57,8 @@
         dfnstrate-tests = dfnstrate.passthru.tests;
         # dfn against a Linux install, in a VM; no Windows needed.
         dfn = import ./nix/tests/dfn.nix { inherit pkgs; rendered = vm.build.rendered; linuxDisk = testLinuxDisk; };
+        # dfnstrate logs reading an NTFS volume, in a VM.
+        logs = import ./nix/tests/logs.nix { inherit pkgs dfnstrate; };
       };
 
       # Same tools, firmware and shell the package wraps in, so `cargo run`

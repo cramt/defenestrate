@@ -127,5 +127,12 @@ in
       name = "defenestrate-update";
       text = ''exec ${lib.getExe dfnstrate} update ${configArgs} --cache ${isoFreeCache} --offline "$@"'';
     };
+    # Copies the logs of the last Windows boot off the disk (read-only), e.g.
+    # nix run .#…build.logs -- --out ./logs
+    logs = pkgs.writeShellApplication {
+      derivationArgs = local;
+      name = "defenestrate-logs";
+      text = ''exec ${lib.getExe dfnstrate} logs ${configArgs} "$@"'';
+    };
   };
 }

@@ -14,6 +14,7 @@ mod flash;
 mod gpt;
 mod image;
 mod iso;
+mod logs;
 mod pins;
 mod reboot;
 mod reboot_to_linux;
@@ -162,6 +163,15 @@ enum Cmd {
         #[command(flatten)]
         args: update::Args,
     },
+    /// Copy defenestrate's logs (and anything else with --also) off the
+    /// shut-down Windows partition, read-only, to find out from Linux what
+    /// happened on the last Windows boot.
+    Logs {
+        #[command(flatten)]
+        config: ConfigArgs,
+        #[command(flatten)]
+        args: logs::Args,
+    },
     /// Update dfnstrate itself to the latest GitHub release (installs from
     /// the `curl | sh` installer only).
     #[cfg(feature = "self-update")]
@@ -252,6 +262,7 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Flash(args) => flash::run(&args),
         Cmd::Reboot(args) => reboot::run(&args),
         Cmd::Update { config, cache, args } => update::run(&config.load()?, &cache.open()?, &args),
+        Cmd::Logs { config, args } => logs::run(&config.load()?, &args),
         #[cfg(feature = "self-update")]
         Cmd::SelfUpdate(args) => self_update::run(&args),
     }

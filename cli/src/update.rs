@@ -343,7 +343,7 @@ fn windows(dest: &str) -> String {
 
 /// ntfs-3g mounts a volume it won't write read-only without failing, so
 /// whether it would write is asked first, for a message that says why not.
-fn probe(volume: &Path, write: bool) -> Result<()> {
+pub(crate) fn probe(volume: &Path, write: bool) -> Result<()> {
     let out = NTFS3G_PROBE.cmd().arg(if write { "--readwrite" } else { "--readonly" }).arg(volume).stdin(Stdio::null()).output()?;
     let v = volume.display();
     // Exit codes from ntfs-3g's ntfs_volume_error().
@@ -361,8 +361,8 @@ fn probe(volume: &Path, write: bool) -> Result<()> {
 }
 
 /// A volume mounted with ntfs-3g, unmounted on drop.
-struct Mount {
-    dir: PathBuf,
+pub(crate) struct Mount {
+    pub(crate) dir: PathBuf,
     /// ntfs-3g's stderr: it chats there when not detached, and only says why
     /// it failed when it does.
     log: PathBuf,
@@ -375,7 +375,7 @@ struct Mount {
 const FUSE_SUPER_MAGIC: i64 = 0x6573_5546;
 
 impl Mount {
-    fn new(volume: &Path, dir: PathBuf, write: bool) -> Result<Self> {
+    pub(crate) fn new(volume: &Path, dir: PathBuf, write: bool) -> Result<Self> {
         std::fs::create_dir(&dir).with_context(|| dir.display().to_string())?;
         let log = dir.with_extension("log");
         let child = NTFS3G
@@ -406,7 +406,7 @@ impl Mount {
         bail!("ntfs-3g didn't mount {} within 30 seconds", volume.display())
     }
 
-    fn unmount(mut self) -> Result<()> {
+    pub(crate) fn unmount(mut self) -> Result<()> {
         self.finish()
     }
 
