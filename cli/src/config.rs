@@ -86,26 +86,16 @@ pub struct Config {
     pub linux_boot_entry: LinuxBootEntry,
     #[serde(default)]
     pub registry: Registry,
-    /// Default apps by file extension (".html") or URL scheme ("https"), as
-    /// `dism /online /export-defaultappassociations` lists them. Windows
-    /// guards the user's own choice against programs (UserChoice's hash,
-    /// then UCPD.sys), so these go through the one supported way, the
-    /// "default associations configuration file" policy, which Windows
-    /// applies at every sign-in. One whose ProgId isn't registered at a
-    /// sign-in (an app winget installs during the first) is skipped then and
-    /// applied at the next.
+    /// Default apps by file extension (".html") or URL scheme ("https"):
+    /// the ProgId each should go to, as `dism /online
+    /// /export-defaultappassociations` lists them. Windows keeps this the
+    /// user's own choice (UserChoice's hash, UCPD.sys), and the policy for
+    /// it only applies on domain-joined machines (saturn, 2026-11-20), so
+    /// the shell asks: at each logon, while one isn't set and the app that
+    /// registers its ProgId is installed, it opens Settings at that app's
+    /// default-apps page once, for one click on "Set default".
     #[serde(default)]
-    pub default_apps: BTreeMap<AssocId, DefaultApp>,
-}
-
-#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct DefaultApp {
-    /// The app's registered ProgId, FirefoxURL-308046B0AF4A39CB say (the
-    /// suffix is a hash of the install path).
-    pub prog_id: ProgId,
-    /// What Settings shows; Windows doesn't match on it.
-    pub name: AppName,
+    pub default_apps: BTreeMap<AssocId, ProgId>,
 }
 
 /// The firmware boot entry the Start Menu's "Reboot to Linux" sets as the
@@ -619,10 +609,6 @@ checked_string!(AssocId, "a file extension (.html) or URL scheme (https)", |s| {
 checked_string!(ProgId, "a ProgId (letters, digits, - _ .)", |s| {
     (1..=255).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
 });
-// Escaped when rendered into XML, so only control characters are out.
-checked_string!(AppName, "an app name (1-255 printable characters)", |s| {
-    (1..=255).contains(&s.chars().count()) && !s.chars().any(char::is_control)
-});
 checked_string!(FsType, "a filesystem type", |s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()));
 checked_string!(MountOption, "a mount option", |s| { !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.:=@/".contains(&b)) });
 
@@ -837,6 +823,15 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn default_apps_keys_and_prog_ids() {
+        let ok: BTreeMap<AssocId, ProgId> = toml::from_str("https = \"FirefoxURL-308046B0AF4A39CB\"\n\".html\" = \"FirefoxHTML-308046B0AF4A39CB\"").unwrap();
+        assert_eq!(ok.len(), 2);
+        for bad in ["\"https:\" = \"X\"", "https = \"a b\"", "\".\" = \"X\"", "https = \"\""] {
+            assert!(toml::from_str::<BTreeMap<AssocId, ProgId>>(bad).is_err(), "{bad} parsed");
+        }
+    }
 
     #[test]
     fn defaults_parse() {

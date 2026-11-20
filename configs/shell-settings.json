@@ -106,5 +106,6 @@
   ],
   "displays": [],
   "dark": true,
-  "autostart": []
+  "autostart": [],
+  "default_apps": []
 }

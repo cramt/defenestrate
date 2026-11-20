@@ -35,6 +35,18 @@ pub struct Settings {
     /// Not COSMIC's: the config's `autostart`, command lines run once per
     /// logon after what explorer would start (autostart.rs).
     pub autostart: Vec<String>,
+    /// Not COSMIC's: the config's `defaultApps` (default_apps.rs).
+    #[serde(default)]
+    pub default_apps: Vec<DefaultApp>,
+}
+
+/// A file extension (".html") or URL scheme ("https") and the ProgId it
+/// should open with.
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DefaultApp {
+    pub id: String,
+    pub prog_id: String,
 }
 
 /// Floats windows whose app ID and title both match, as COSMIC's
@@ -198,6 +210,7 @@ impl Default for Settings {
             displays: Vec::new(),
             dark: true,
             autostart: Vec::new(),
+            default_apps: Vec::new(),
         }
     }
 }

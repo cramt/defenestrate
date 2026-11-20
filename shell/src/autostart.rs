@@ -68,6 +68,8 @@ mod sys {
         if !first_in_session() {
             return log("autostart: already ran in this session");
         }
+        // Once per session too: a restarted shell mustn't ask again.
+        crate::default_apps::start();
         // Its own thread: an app's registry entries or a slow network share
         // in a Startup folder mustn't hold up the message loop.
         std::thread::spawn(|| {

@@ -386,7 +386,17 @@ pub struct ShellSettings {
     pub dark: bool,
     /// Not COSMIC's: the config's `autostart`.
     pub autostart: Vec<String>,
+    /// Not COSMIC's: the config's `defaultApps`.
+    pub default_apps: Vec<DefaultApp>,
 }
+
+#[derive(Serialize, Debug, PartialEq)]
+pub struct DefaultApp {
+    pub id: String,
+    pub prog_id: String,
+}
+
+type DefaultApps = std::collections::BTreeMap<crate::config::AssocId, crate::config::ProgId>;
 
 #[derive(Serialize, Debug, PartialEq)]
 pub struct FocusFollowsCursor {
@@ -412,7 +422,7 @@ pub struct Shortcut {
 }
 
 impl Cosmic {
-    pub fn shell_settings(&self, displays: &[crate::config::DisplayMode], autostart: &[String]) -> ShellSettings {
+    pub fn shell_settings(&self, displays: &[crate::config::DisplayMode], autostart: &[String], default_apps: &DefaultApps) -> ShellSettings {
         let c = &self.compositor;
         let t = &self.theme;
         ShellSettings {
@@ -428,11 +438,12 @@ impl Cosmic {
             displays: displays.to_vec(),
             dark: self.mode.is_dark,
             autostart: autostart.to_vec(),
+            default_apps: default_apps.iter().map(|(id, p)| DefaultApp { id: id.to_string(), prog_id: p.to_string() }).collect(),
         }
     }
 
-    pub fn render(&self, displays: &[crate::config::DisplayMode], autostart: &[String]) -> String {
-        let mut json = serde_json::to_string_pretty(&self.shell_settings(displays, autostart)).expect("plain data");
+    pub fn render(&self, displays: &[crate::config::DisplayMode], autostart: &[String], default_apps: &DefaultApps) -> String {
+        let mut json = serde_json::to_string_pretty(&self.shell_settings(displays, autostart, default_apps)).expect("plain data");
         json.push('\n');
         json
     }
@@ -526,12 +537,12 @@ mod tests {
             "#,
         )
         .unwrap();
-        let s = c.shell_settings(&[], &[]);
+        let s = c.shell_settings(&[], &[], &DefaultApps::new());
         assert_eq!((s.active_hint, s.focus_follows_cursor), (None, None));
         assert!(!s.dark);
         c.compositor.active_hint = true;
-        assert_eq!(c.shell_settings(&[], &[]).active_hint, Some(ActiveHint { thickness: 3, colour: [99, 176, 227] }));
+        assert_eq!(c.shell_settings(&[], &[], &DefaultApps::new()).active_hint, Some(ActiveHint { thickness: 3, colour: [99, 176, 227] }));
         c.theme.active_hint = 0;
-        assert_eq!(c.shell_settings(&[], &[]).active_hint, None);
+        assert_eq!(c.shell_settings(&[], &[], &DefaultApps::new()).active_hint, None);
     }
 }

@@ -7,6 +7,7 @@
 #![cfg_attr(not(windows), allow(dead_code))]
 
 mod autostart;
+mod default_apps;
 mod classify;
 mod cycle;
 mod display;
