@@ -110,19 +110,6 @@ public static extern System.IntPtr SendMessageTimeout(System.IntPtr hWnd, uint m
     [void][Defenestrate.Broadcast]::SendMessageTimeout([System.IntPtr]0xffff, 0x1A, [System.UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$result)
 }
 
-# The PCI vendor IDs of the machine's display controllers (PCI class 03),
-# from every PnP device rather than Win32_VideoController so a GPU without a
-# driver yet still counts.
-function Get-GpuVendors {
-    $vendors = foreach ($dev in Get-CimInstance Win32_PnPEntity) {
-        if ($dev.DeviceID -match '^PCI\\VEN_([0-9A-F]{4})' -and ($dev.CompatibleID -match '^PCI\\CC_03')) {
-            $Matches[1]
-            Log "GPU: $($dev.Name) ($($dev.DeviceID))"
-        }
-    }
-    @($vendors | Sort-Object -Unique)
-}
-
 # What Windows Update would install for the GPUs by itself sooner or later,
 # now. BrowseOnly ones are the "optional updates" it wouldn't.
 function Install-DisplayDrivers {
@@ -200,20 +187,16 @@ if ($Limited) {
 
 try {
     $plan = Get-Content -Raw -LiteralPath (Join-Path $here 'apps.json') | ConvertFrom-Json
-    # Drivers first: the vendors' apps and the games want them in.
+    # Drivers first: the games want them in.
     $ids = @()
     if ($plan.windowsUpdateDisplayDrivers) { $ids += $wuItem }
-    $gpus = Get-GpuVendors
-    foreach ($v in @($plan.gpuVendors)) {
-        if ($gpus -contains $v.pciVendor) { $ids += @($v.apps) }
-    }
     $ids += @($plan.apps)
     $ids = @($ids | Select-Object -Unique)
     $done = @()
     if (Test-Path -LiteralPath $doneFile) { $done = @(Get-Content -LiteralPath $doneFile) }
     $pending = @($ids | Where-Object { $done -notcontains $_ })
     $elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-    Log "starting as $([Security.Principal.WindowsIdentity]::GetCurrent().Name) (elevated: $elevated), $($pending.Count) of $($ids.Count) to install (GPU vendors: $($gpus -join ', '))"
+    Log "starting as $([Security.Principal.WindowsIdentity]::GetCurrent().Name) (elevated: $elevated), $($pending.Count) of $($ids.Count) to install"
 
     # winget needs the network and its own registration, and neither is a
     # given right at logon on a fresh machine, so keep trying for a while.

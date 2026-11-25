@@ -20,42 +20,22 @@ use crate::tasks::{self, AsUser, Logon, RunLevel, Task, Trigger};
 pub const DIR: &str = "Windows/Setup/defenestrate/apps";
 pub const TASK: &str = "defenestrate-apps";
 
-/// What install-apps.ps1 reads. The GPU half is decided there, since only
-/// the real machine knows its GPUs.
+/// What install-apps.ps1 reads.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Plan<'a> {
     apps: &'a [AppId],
     windows_update_display_drivers: bool,
-    gpu_vendors: Vec<VendorApps<'a>>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct VendorApps<'a> {
-    /// Matched against `PCI\VEN_xxxx` in device IDs.
-    pci_vendor: &'static str,
-    apps: &'a [AppId],
 }
 
 const SCRIPT_ARGS: &str = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\\Windows\\Setup\\defenestrate\\apps\\install-apps.ps1";
 
 pub fn needed(config: &Config) -> bool {
-    !config.apps.is_empty() || config.gpu.installs_anything()
+    !config.apps.is_empty() || config.gpu.windows_update
 }
 
 fn plan(config: &Config) -> Plan<'_> {
-    Plan {
-        apps: &config.apps,
-        windows_update_display_drivers: config.gpu.windows_update,
-        gpu_vendors: config
-            .gpu
-            .vendor_apps()
-            .into_iter()
-            .filter(|(_, apps)| !apps.is_empty())
-            .map(|(vendor, apps)| VendorApps { pci_vendor: vendor.pci_id(), apps })
-            .collect(),
-    }
+    Plan { apps: &config.apps, windows_update_display_drivers: config.gpu.windows_update }
 }
 
 pub fn render(config: &Config, dir: &Path) -> Result<Vec<InstallFile>> {
@@ -119,9 +99,9 @@ mod tests {
     }
 
     #[test]
-    fn plan_keeps_only_vendors_with_apps() {
+    fn plan_carries_apps_and_the_driver_pass() {
         let mut t: toml::Table = toml::from_str(crate::config::DEFAULTS).unwrap();
-        let machine = "apps = [\"Valve.Steam\"]\n[user]\nname = \"u\"\n[gpu]\nnvidia = [\"A.B\"]\nintel = [\"C.D\"]";
+        let machine = "apps = [\"Valve.Steam\"]\n[user]\nname = \"u\"";
         for (k, v) in toml::from_str::<toml::Table>(machine).unwrap() {
             match (t.get_mut(&k), v) {
                 (Some(toml::Value::Table(into)), toml::Value::Table(from)) => into.extend(from),
@@ -136,7 +116,6 @@ mod tests {
             serde_json::json!({
                 "apps": ["Valve.Steam"],
                 "windowsUpdateDisplayDrivers": true,
-                "gpuVendors": [{ "pciVendor": "10DE", "apps": ["A.B"] }, { "pciVendor": "8086", "apps": ["C.D"] }],
             })
         );
     }

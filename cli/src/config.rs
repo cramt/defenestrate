@@ -408,44 +408,6 @@ pub struct Gpu {
     /// than whenever it gets round to it. The only route that installs an
     /// actual driver without a click (see default.toml).
     pub windows_update: bool,
-    /// winget IDs installed only when the machine has a GPU from that
-    /// vendor (all that apply, so a hybrid laptop gets both).
-    #[serde(default)]
-    pub nvidia: Vec<AppId>,
-    #[serde(default)]
-    pub amd: Vec<AppId>,
-    #[serde(default)]
-    pub intel: Vec<AppId>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GpuVendor {
-    Nvidia,
-    Amd,
-    Intel,
-}
-
-impl GpuVendor {
-    /// The PCI vendor ID, as it appears in a device's `PCI\VEN_xxxx` ID.
-    /// 1002 is ATI's, which AMD's GPUs still carry (AMD's own, 1022, is on
-    /// its CPUs and chipsets).
-    pub fn pci_id(self) -> &'static str {
-        match self {
-            Self::Nvidia => "10DE",
-            Self::Amd => "1002",
-            Self::Intel => "8086",
-        }
-    }
-}
-
-impl Gpu {
-    pub fn installs_anything(&self) -> bool {
-        self.windows_update || self.vendor_apps().iter().any(|(_, ids)| !ids.is_empty())
-    }
-
-    pub fn vendor_apps(&self) -> [(GpuVendor, &[AppId]); 3] {
-        [(GpuVendor::Nvidia, &self.nvidia), (GpuVendor::Amd, &self.amd), (GpuVendor::Intel, &self.intel)]
-    }
 }
 
 /// key path (backslash separated, relative to the hive root) -> value name
@@ -843,25 +805,15 @@ mod tests {
         assert!(config.gpu.windows_update);
     }
 
+    /// winget has no GPU driver to offer (README, "GPU drivers"), so the
+    /// per-vendor winget lists a config may still set fail rather than do
+    /// nothing.
     #[test]
-    fn gpu_lists_append_per_vendor_and_reject_bad_ids() {
+    fn gpu_vendor_lists_are_gone() {
         let mut t: toml::Table = toml::from_str(DEFAULTS).unwrap();
-        merge(&mut t, toml::from_str("[user]\nname = \"x\"\n[gpu]\nnvidia = [\"Some.App\"]\nwindowsUpdate = false").unwrap());
-        let config: Config = toml::Value::Table(t).try_into().unwrap();
-        assert!(!config.gpu.windows_update);
-        let [(nv, ids), (amd, none), _] = config.gpu.vendor_apps();
-        assert_eq!((nv.pci_id(), amd.pci_id()), ("10DE", "1002"));
-        assert_eq!(ids.last().map(|a| a.as_str()), Some("Some.App"));
-        assert!(none.is_empty());
-        assert!(config.gpu.installs_anything());
-
-        // A vendor that isn't one, or a list of something other than IDs.
-        for bad in ["[gpu]\nwindowsUpdate = true\nmatrox = []", "[gpu]\nwindowsUpdate = true\nnvidia = [\"has space\"]"] {
-            let mut t: toml::Table = toml::from_str(DEFAULTS).unwrap();
-            t.remove("gpu");
-            merge(&mut t, toml::from_str(&format!("[user]\nname = \"x\"\n{bad}")).unwrap());
-            assert!(toml::Value::Table(t).try_into::<Config>().is_err(), "{bad}");
-        }
+        merge(&mut t, toml::from_str("[user]\nname = \"x\"\n[gpu]\nnvidia = []").unwrap());
+        let err = deserialize::<Config>(t).expect_err("took gpu.nvidia");
+        assert!(err.to_string().contains("gpu"), "{err}");
     }
 
     #[test]

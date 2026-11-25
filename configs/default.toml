@@ -54,18 +54,13 @@ busybox = { url = "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-mu
 # there under the vendors' names doesn't install a driver: AMD's
 # "AMDSoftwareCloudEdition" is for Azure's V620 VMs, and Intel's
 # "Intel.IntelDriverAndSupportAssistant" installs silently but only offers
-# drivers in a browser page that wants clicks. So the vendor lists start
-# empty, and Windows Update does the driver.
+# drivers in a browser page that wants clicks. So Windows Update does the
+# driver.
 [gpu]
 # Search Windows Update for display drivers and install them right away.
 # It would get to them on its own eventually, but the first boot is when a
 # games console wants them. NVIDIA's WU driver lags its own by a few weeks.
 windowsUpdate = true
-# winget IDs, installed only when the machine has a GPU from that vendor
-# (found by PCI vendor ID; a hybrid laptop gets both lists).
-nvidia = []
-amd = []
-intel = []
 # Pinned drivers baked into the image go in `drivers` instead (README,
 # "GPU drivers").
 

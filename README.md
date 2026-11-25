@@ -49,7 +49,7 @@ values per hive. Every config is layered over the distro's own defaults,
 - [x] Windows apps (`apps`): winget IDs, unpinned, installed by winget at the first real boot from a logon task first logon registers. Seen in the VM under our shell, online: the script installed Firefox elevated, and an equivalent logon task fired at the next logon, installed 7-Zip and deleted itself. From a fresh `build image`: first logon registered the task, and it ran at the first real boot and removed itself (the VM config has no apps, so only the GPU pass below ran)
   - Pinned drivers (`drivers`): .cabs from the Update Catalog (or any archive 7-Zip opens), added to the image and installed by pnputil at specialize. Seen in a `build image` for saturn: specialize added AMD's three packages to the driver store and removed the staged copy (pnputil exit 3010, "reboot to finish"). Binding to a real GPU not seen yet
 - [x] Tracked downloads and `dfnstrate pins` ([Pins](#pins)): GitHub release assets and Update Catalog drivers, resolved at build time without Nix, pinned in place for Nix. Run against the live catalog (it found the .cab pinned by hand) and GitHub (moved an unpinned font to the hash the defaults already had, comments kept); a `render` with an unpinned font downloaded it online and refused with `--offline`
-  - GPU drivers (`gpu`): a Windows Update pass for display drivers at first boot, plus per-vendor winget lists picked by PCI vendor ID. Seen from a fresh `build image` in the VM, online: the pass found QEMU's VGA (vendor 1234), asked Windows Update, which had no display driver for it, and finished in 6 minutes. Not yet seen on real GPU hardware
+  - GPU drivers (`gpu`): a Windows Update pass for display drivers at first boot; winget has none to offer. Seen from a fresh `build image` in the VM, online: the pass found QEMU's VGA (vendor 1234), asked Windows Update, which had no display driver for it, and finished in 6 minutes. Not yet seen on real GPU hardware
 - [ ] WSL installed offline, and the machine's Linux install run through it (`wsl.linux`): its disks attached and mounted, its programs run chrooted as its user from a "Linux terminal" in the Start Menu
   - Files and secrets from the install copied into the Windows profile at logon (`wsl.linux.files`): `dfn pack` is in the flake check (a store symlink resolved, a group-only secret read), and the copy step ran under pwsh on Linux against a fake `wsl.exe` (bytes intact, directories replaced, a missing source failing alone). Not yet run on Windows
   - Seen in a VM (Windows nested in KVM, a saturn-shaped btrfs test install as a second disk, `nix build .#test-linux-disk`): WSL installs from the image, the logon task imports the distro, attaches the disk by GPT GUID, mounts it and puts the "Linux terminal" in the Start Menu, which opens the user's login shell from the install. dfn's half is also a flake check (`checks.x86_64-linux.dfn`)
@@ -609,18 +609,13 @@ than whenever it gets round to it. That pass is the only time Windows
 Update runs: automatic updates are off ([Windows updates](#windows-updates)),
 so a newer driver comes with the next reflash.
 
-`gpu.nvidia`, `gpu.amd` and `gpu.intel` are winget IDs installed only when
-the machine has a display controller (PCI class 03) from that vendor (PCI
-vendor 10DE, 1002, 8086), driver or not, so a hybrid laptop gets both its
-lists. The vendor is checked when the task runs, so a GPU added after the
-task has finished isn't picked up. They're empty by default because no
-winget package installs a GPU driver silently: winget's repo turns GPU
-drivers down, since its validation sandbox has no GPU (the NVIDIA app was
-refused, microsoft/winget-pkgs#348600, and GeForce Experience was removed),
-AMD's only package there is a driver for Azure VMs, and Intel's Driver &
-Support Assistant installs silently but then wants clicks in a browser to
-fetch anything. NVIDIA's Windows Update driver trails its own by a few
-weeks, so that's still the gap for NVIDIA machines.
+There's no winget route for GPU drivers: no winget package installs one
+silently. winget's repo turns GPU drivers down, since its validation sandbox
+has no GPU (the NVIDIA app was refused, microsoft/winget-pkgs#348600, and
+GeForce Experience was removed), AMD's only package there is a driver for
+Azure VMs, and Intel's Driver & Support Assistant installs silently but then
+wants clicks in a browser to fetch anything. NVIDIA's Windows Update driver
+trails its own by a few weeks, so that's the gap for NVIDIA machines.
 
 Windows Update only installs a display driver it would have installed by
 itself. On saturn (an RX 7000 card, `PCI\VEN_1002&DEV_747E`) it offered
