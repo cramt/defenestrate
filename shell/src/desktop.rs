@@ -37,7 +37,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     EVENT_SYSTEM_MOVESIZESTART, EnumWindows, GA_ROOT,
     GetForegroundWindow, HWND_BOTTOM, HWND_TOP,
     GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClientRect, GetPropW, GetSystemMetrics, GetWindow, GetWindowLongPtrW,
-    GetClassNameW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, HWND_TOPMOST, IsHungAppWindow, IsIconic, IsWindow,
+    GetClassNameW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, HWND_TOPMOST, IsHungAppWindow, IsIconic, IsWindow,
     IsWindowVisible, IsZoomed, KillTimer,
     LWA_ALPHA, PostMessageW, RegisterClassW, RemovePropW, SM_CXSCREEN, SM_CYSCREEN, SPI_SETWORKAREA, SW_HIDE, SW_RESTORE,
     SW_SHOWNA, SW_SHOWNOACTIVATE, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
@@ -48,7 +48,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{BOOL, PCWSTR, PWSTR, w};
 
-use crate::classify::{Facts, Verdict, classify};
+use crate::classify::{Facts, Process, Verdict, app_id, classify};
 use crate::keys::{Button, Drag};
 use crate::motion::{Animator, Pace, Scene};
 use crate::follow::{Follow, Timer};
@@ -388,9 +388,9 @@ pub fn start(events_to: HWND) {
         if !visible(w) {
             continue;
         }
-        let verdict = verdict(w);
-        log_verdict(w, verdict);
-        if verdict == Verdict::Tile {
+        let judged = judge(w);
+        log_verdict(w, &judged);
+        if judged.verdict == Verdict::Tile {
             if unsafe { IsIconic(w) }.as_bool() {
                 WM.with_borrow_mut(|wm| wm.as_mut().map(|wm| wm.add_minimized(w)));
             } else {
@@ -457,9 +457,9 @@ pub fn on_event(event: u32, w: HWND) {
                 // Ours to show is shown already; this one showed itself.
                 if on_screen(w) { wm.raised(w) } else { None }
             } else if on_screen(w) {
-                let verdict = verdict(w);
-                log_verdict(w, verdict);
-                (verdict == Verdict::Tile).then(|| wm.add_new(w))
+                let judged = judge(w);
+                log_verdict(w, &judged);
+                (judged.verdict == Verdict::Tile).then(|| wm.add_new(w))
             } else {
                 None
             }
@@ -492,7 +492,7 @@ pub fn on_event(event: u32, w: HWND) {
         // there was nothing to say why it stayed where it was (2026-11-20).
         let root = unsafe { GetAncestor(w, GA_ROOT) };
         if !root.is_invalid() && WM.with_borrow(|wm| wm.as_ref().is_some_and(|wm| !wm.manages(root))) && on_screen(root) {
-            log_verdict(root, verdict(root));
+            log_verdict(root, &judge(root));
         }
         raise_over_tiles(w);
     }
@@ -656,9 +656,7 @@ pub fn pointer_moved(p: Point) {
 fn follow_focus() {
     let Some(w) = FOLLOW.with_borrow_mut(Follow::fire) else { return };
     let foreground = unsafe { GetForegroundWindow() };
-    let mut pid = 0;
-    unsafe { GetWindowThreadProcessId(foreground, Some(&mut pid)) };
-    if foreground == w || pid == unsafe { GetCurrentProcessId() } {
+    if foreground == w || is_ours(pid_of(foreground)) {
         return;
     }
     update(|wm| wm.is_shown(w).then(|| Effects { focus: Some(w), ..Effects::default() }));
@@ -709,71 +707,107 @@ fn on_screen(w: HWND) -> bool {
     visible(w) && !unsafe { IsIconic(w) }.as_bool()
 }
 
-/// What Windows' Alt+Tab lists: visible, unowned top-level windows with a
-/// title that aren't tool windows, here not the shell's own.
+/// What the shell reads off a window itself (classify.rs's Facts), once
+/// for both deciding and logging.
+struct Seen {
+    pid: u32,
+    /// 0 for none.
+    owner: usize,
+    root: bool,
+    style: u32,
+    ex_style: u32,
+    title: String,
+    class: String,
+}
+
+impl Seen {
+    fn read(w: HWND) -> Seen {
+        unsafe {
+            Seen {
+                pid: pid_of(w),
+                owner: GetWindow(w, GW_OWNER).map_or(0, |o| o.0 as usize),
+                root: GetAncestor(w, GA_ROOT) == w,
+                style: GetWindowLongPtrW(w, GWL_STYLE) as u32,
+                ex_style: GetWindowLongPtrW(w, GWL_EXSTYLE) as u32,
+                title: window_text(w),
+                class: class_name(w),
+            }
+        }
+    }
+
+    fn facts(&self) -> Facts<'_> {
+        Facts {
+            root: self.root,
+            owned: self.owner != 0,
+            style: self.style,
+            ex_style: self.ex_style,
+            title: &self.title,
+            class: &self.class,
+            ours: is_ours(self.pid),
+        }
+    }
+}
+
+/// A window, what its process says, and whether it tiles (classify.rs);
+/// the rest float where they open.
+struct Judged {
+    seen: Seen,
+    app: Option<String>,
+    verdict: Verdict,
+}
+
+fn judge(w: HWND) -> Judged {
+    let seen = Seen::read(w);
+    let same_level = REACH.get() == Reach::SameLevel;
+    let opened = ask_process(seen.pid, |p| (exe_path(p).map(|path| app_id(&path)), same_level && is_elevated(p)));
+    let app = opened.as_ref().and_then(|(app, _)| app.clone());
+    // As before window rules: without uiAccess, a process the shell can't
+    // open is taken to be out of reach too.
+    let out_of_reach = same_level && opened.is_none_or(|(_, elevated)| elevated);
+    let process = Process { app: app.as_deref(), out_of_reach };
+    let verdict = classify(&seen.facts(), &process, &settings::get().tiling_exceptions);
+    Judged { seen, app, verdict }
+}
+
+/// Of the visible windows, what Windows' Alt+Tab lists (classify.rs).
 fn app_window(w: HWND) -> bool {
-    unsafe {
-        if !visible(w) || GetAncestor(w, GA_ROOT) != w || GetWindowTextLengthW(w) == 0 {
-            return false;
-        }
-        if GetWindow(w, GW_OWNER).is_ok_and(|owner| !owner.is_invalid()) {
-            return false;
-        }
-        let ex = GetWindowLongPtrW(w, GWL_EXSTYLE) as u32;
-        if ex & (WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) != 0 {
-            return false;
-        }
-        let mut pid = 0;
-        GetWindowThreadProcessId(w, Some(&mut pid));
-        pid != GetCurrentProcessId()
-    }
+    visible(w) && Seen::read(w).facts().switchable()
 }
 
-/// Whether a visible window tiles (classify.rs); the rest float where they
-/// open.
-fn verdict(w: HWND) -> Verdict {
-    unsafe {
-        let style = GetWindowLongPtrW(w, GWL_STYLE) as u32;
-        let ex_style = GetWindowLongPtrW(w, GWL_EXSTYLE) as u32;
-        let mut pid = 0;
-        GetWindowThreadProcessId(w, Some(&mut pid));
-        let process = (pid != 0).then(|| OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()).flatten();
-        let app = process.and_then(exe_stem);
-        // As before window rules: without uiAccess, a process the shell can't
-        // open is taken to be out of reach too.
-        let out_of_reach = REACH.get() == Reach::SameLevel && process.is_none_or(is_elevated);
-        if let Some(p) = process {
-            let _ = CloseHandle(p);
-        }
-        let title = window_text(w);
-        let class = class_name(w);
-        let facts = Facts {
-            root: GetAncestor(w, GA_ROOT) == w,
-            owned: GetWindow(w, GW_OWNER).is_ok_and(|owner| !owner.is_invalid()),
-            style,
-            ex_style,
-            app: app.as_deref(),
-            title: &title,
-            class: &class,
-            ours: pid == GetCurrentProcessId(),
-            out_of_reach,
-        };
-        classify(&facts, &settings::get().tiling_exceptions)
-    }
+pub fn pid_of(w: HWND) -> u32 {
+    let mut pid = 0;
+    unsafe { GetWindowThreadProcessId(w, Some(&mut pid)) };
+    pid
 }
 
-/// The exe's file name without `.exe`: what tiling exceptions match as the
-/// app ID.
-fn exe_stem(process: HANDLE) -> Option<String> {
+/// Whether `pid` is the shell itself.
+fn is_ours(pid: u32) -> bool {
+    pid == unsafe { GetCurrentProcessId() }
+}
+
+/// `f` on process `pid`, opened for querying and closed after; None if it
+/// can't be opened (pid 0, a protected process, or one gone).
+pub fn ask_process<T>(pid: u32, f: impl FnOnce(HANDLE) -> T) -> Option<T> {
+    if pid == 0 {
+        return None;
+    }
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    let answer = f(process);
+    unsafe {
+        let _ = CloseHandle(process);
+    }
+    Some(answer)
+}
+
+/// The full path of the process's exe.
+pub fn exe_path(process: HANDLE) -> Option<String> {
     let mut buf = [0u16; 1024];
     let mut len = buf.len() as u32;
     unsafe { QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len) }.ok()?;
-    let path = String::from_utf16_lossy(&buf[..len as usize]);
-    let name = path.rsplit('\\').next()?;
-    Some(name.strip_suffix(".exe").or_else(|| name.strip_suffix(".EXE")).unwrap_or(name).to_owned())
+    Some(String::from_utf16_lossy(&buf[..len as usize]))
 }
 
-fn window_text(w: HWND) -> String {
+pub fn window_text(w: HWND) -> String {
     let mut buf = [0u16; 512];
     let n = unsafe { GetWindowTextW(w, &mut buf) };
     String::from_utf16_lossy(&buf[..n.max(0) as usize])
@@ -788,29 +822,16 @@ fn class_name(w: HWND) -> String {
 /// One line per window the shell sees appear and doesn't already manage,
 /// with why it tiled or not, so a window that tiles wrongly can be told
 /// apart from one the shell never heard of. Each window once.
-fn log_verdict(w: HWND, verdict: Verdict) {
-    if !verdict.worth_logging() || !LOGGED.with_borrow_mut(|seen| seen.insert(w.0 as usize)) {
+fn log_verdict(w: HWND, j: &Judged) {
+    if !j.verdict.worth_logging() || !LOGGED.with_borrow_mut(|seen| seen.insert(w.0 as usize)) {
         return;
     }
-    unsafe {
-        let style = GetWindowLongPtrW(w, GWL_STYLE) as u32;
-        let ex_style = GetWindowLongPtrW(w, GWL_EXSTYLE) as u32;
-        let owner = GetWindow(w, GW_OWNER).map(|o| o.0 as usize).unwrap_or(0);
-        let mut pid = 0;
-        GetWindowThreadProcessId(w, Some(&mut pid));
-        let app = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok().and_then(|p| {
-            let name = exe_stem(p);
-            let _ = CloseHandle(p);
-            name
-        });
-        log(&format!(
-            "window {:#x}: app {} class {:?} title {:?} style {style:#010x} exstyle {ex_style:#010x} owner {owner:#x}: {verdict}",
-            w.0 as usize,
-            app.as_deref().unwrap_or("?"),
-            class_name(w),
-            window_text(w),
-        ));
-    }
+    let Judged { seen: Seen { style, ex_style, owner, title, class, .. }, app, verdict, .. } = j;
+    log(&format!(
+        "window {:#x}: app {} class {class:?} title {title:?} style {style:#010x} exstyle {ex_style:#010x} owner {owner:#x}: {verdict}",
+        w.0 as usize,
+        app.as_deref().unwrap_or("?"),
+    ));
 }
 
 fn is_elevated(process: HANDLE) -> bool {
@@ -958,10 +979,9 @@ fn fullscreen_app() -> bool {
     if w.is_invalid() || WM.with_borrow(|wm| wm.as_ref().is_some_and(|wm| wm.manages(w))) || !on_screen(w) {
         return false;
     }
-    let mut pid = 0;
-    unsafe { GetWindowThreadProcessId(w, Some(&mut pid)) };
+    let pid = pid_of(w);
     let s = monitor_rect(w);
-    pid != unsafe { GetCurrentProcessId() }
+    !is_ours(pid)
         && window_rect(w).is_some_and(|r| r.left <= s.left && r.top <= s.top && r.right >= s.right && r.bottom >= s.bottom)
 }
 

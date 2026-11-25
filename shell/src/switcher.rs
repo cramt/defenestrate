@@ -9,14 +9,13 @@
 use std::cell::{Cell, RefCell};
 use std::path::Path;
 
-use windows::Win32::Foundation::{CloseHandle, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateSolidBrush, DT_LEFT, DT_RIGHT, DeleteObject, EndPaint, FillRect, InvalidateRect, PAINTSTRUCT,
     SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
-use windows::Win32::System::Threading::{OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetClientRect, GetWindowTextW, GetWindowThreadProcessId, IDC_ARROW,
+    CreateWindowExW, DefWindowProcW, GetClientRect, IDC_ARROW,
     LoadCursorW, RegisterClassW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos,
     ShowWindow, WA_INACTIVE, WM_ACTIVATE, WM_LBUTTONUP, WM_PAINT, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
@@ -101,31 +100,14 @@ pub fn on(s: Switch) {
 }
 
 fn entries() -> Vec<Entry> {
-    desktop::switchable().into_iter().map(|window| Entry { window, title: title(window), app: app(window) }).collect()
+    desktop::switchable().into_iter().map(|window| Entry { window, title: desktop::window_text(window), app: app_name(window) }).collect()
 }
 
-fn title(w: HWND) -> String {
-    let mut buf = [0u16; 512];
-    let n = unsafe { GetWindowTextW(w, &mut buf) };
-    String::from_utf16_lossy(&buf[..n.max(0) as usize])
-}
-
-/// The executable's name, the closest thing Windows has to the app name
-/// COSMIC shows under the title.
-fn app(w: HWND) -> String {
-    let mut pid = 0;
-    unsafe { GetWindowThreadProcessId(w, Some(&mut pid)) };
-    let Ok(process) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }) else { return String::new() };
-    let mut buf = [0u16; 1024];
-    let mut len = buf.len() as u32;
-    let ok = unsafe { QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, windows::core::PWSTR(buf.as_mut_ptr()), &mut len) };
-    unsafe {
-        let _ = CloseHandle(process);
-    }
-    if ok.is_err() {
-        return String::new();
-    }
-    let path = String::from_utf16_lossy(&buf[..len as usize]);
+/// The exe's file stem, the closest thing Windows has to the app name
+/// COSMIC shows under the title. Unlike the app ID tiling exceptions match
+/// (classify::app_id), any extension goes, in any case: it's only shown.
+fn app_name(w: HWND) -> String {
+    let path = desktop::ask_process(desktop::pid_of(w), desktop::exe_path).flatten().unwrap_or_default();
     Path::new(&path).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
