@@ -52,6 +52,7 @@ use crate::classify::{Facts, Process, Verdict, app_id, classify};
 use crate::keys::{Button, Drag};
 use crate::motion::{Animator, Pace, Scene};
 use crate::follow::{Follow, Timer};
+use crate::throttle::{Ask, Moves};
 use crate::hint;
 use crate::overlay::{self, Look};
 use crate::settings;
@@ -63,19 +64,36 @@ use crate::{log, scaled_at};
 /// lparam the window. Hook callbacks only post, so all state changes
 /// happen in one place, from the message loop.
 pub const WM_WINEVENT: u32 = WM_APP + 1;
-/// The shell's window gets this WM_TIMER id when the windows whose title
-/// bars came or went should be placed again (see `sync_captions`).
-pub const REPLACE_TIMER: usize = 0xdf1;
-/// The shell's window gets this WM_TIMER id when focus_follows_cursor's
-/// delay runs out.
-pub const FOLLOW_TIMER: usize = 0xdf2;
-/// Sends moves held back by `set_pos`.
-const FLUSH_TIMER: usize = 0xdf3;
-/// How long a window gets to handle a move before the next goes anyway:
-/// one that can't move (at its minimum size, say) mustn't hold the newest
-/// place back for good.
-const IN_FLIGHT_FOR: Duration = Duration::from_millis(100);
 pub use crate::overlay::WM_FRAME;
+
+/// The shell's window's WM_TIMER ids.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TimerId {
+    /// The windows whose title bars came or went, or that crossed to a
+    /// monitor with another DPI, should be placed again (`sync_captions`).
+    Replace = 0xdf1,
+    /// focus_follows_cursor's delay ran out.
+    Follow = 0xdf2,
+    /// Sends moves held back by `set_pos`.
+    Flush = 0xdf3,
+}
+
+impl TimerId {
+    fn from_id(id: usize) -> Option<TimerId> {
+        [TimerId::Replace, TimerId::Follow, TimerId::Flush].into_iter().find(|&t| t as usize == id)
+    }
+
+    /// Starts it, or restarts it if it's running.
+    fn set(self, ms: u32) {
+        unsafe { SetTimer(Some(EVENTS_TO.get()), self as usize, ms, None) };
+    }
+
+    fn kill(self) {
+        unsafe {
+            let _ = KillTimer(Some(EVENTS_TO.get()), self as usize);
+        }
+    }
+}
 
 /// How long, once nothing moves, the overlay waits for the windows that
 /// slid or faded out to be hidden, so they don't flash as it goes. A hung
@@ -122,6 +140,9 @@ enum Reach {
 
 #[derive(Clone, Copy, PartialEq)]
 enum Phase {
+    /// The shell is picking up the windows already open: those shouldn't
+    /// fade in.
+    Starting,
     Idle,
     /// The overlay is up, drawing motion.rs's frames.
     Running,
@@ -129,25 +150,26 @@ enum Phase {
     Settling { until: Duration },
 }
 
+impl Phase {
+    /// The overlay is up.
+    fn animating(self) -> bool {
+        matches!(self, Phase::Running | Phase::Settling { .. })
+    }
+}
+
 thread_local! {
     static WM: RefCell<Option<Wm<HWND>>> = const { RefCell::new(None) };
     static ANIM: RefCell<Option<Animator<HWND>>> = const { RefCell::new(None) };
-    static PHASE: Cell<Phase> = const { Cell::new(Phase::Idle) };
+    static PHASE: Cell<Phase> = const { Cell::new(Phase::Starting) };
     static EPOCH: Cell<Option<Instant>> = const { Cell::new(None) };
-    /// Off while the shell picks up the windows already open: those
-    /// shouldn't fade in.
-    static ANIMATING: Cell<bool> = const { Cell::new(false) };
     /// Windows to hide once the animation is over: until then they're
     /// what slides or fades out.
     static DEFERRED: RefCell<Vec<HWND>> = const { RefCell::new(Vec::new()) };
     /// Windows asked to move that haven't yet: where they were, and where
     /// they're going.
     static PENDING: RefCell<Vec<(HWND, RECT, RECT)>> = const { RefCell::new(Vec::new()) };
-    /// Moves sent that the window hasn't handled yet: where it was then,
-    /// and when (set_pos).
-    static IN_FLIGHT: RefCell<Vec<(HWND, RECT, Instant)>> = const { RefCell::new(Vec::new()) };
-    /// The newest place for a window still busy with the last one.
-    static HELD: RefCell<Vec<(HWND, RECT)>> = const { RefCell::new(Vec::new()) };
+    /// Moves sent that the window hasn't handled yet (`set_pos`).
+    static MOVES: RefCell<Moves<HWND, RECT>> = const { RefCell::new(Moves::new()) };
     static EVENTS_TO: Cell<HWND> = const { Cell::new(HWND(std::ptr::null_mut())) };
     static REACH: Cell<Reach> = const { Cell::new(Reach::SameLevel) };
     static DRAGGING: Cell<Option<Dragging>> = const { Cell::new(None) };
@@ -321,7 +343,7 @@ fn sync_hint() {
         return;
     }
     let at = || {
-        if PHASE.get() != Phase::Idle || DRAGGING.get().is_some() || MOVING.get() {
+        if PHASE.get().animating() || DRAGGING.get().is_some() || MOVING.get() {
             return None;
         }
         let (w, tile) = WM.with_borrow(|wm| wm.as_ref().and_then(Wm::hinted))?;
@@ -403,7 +425,7 @@ pub fn start(events_to: HWND) {
             }
         }
     }
-    ANIMATING.set(true);
+    PHASE.set(Phase::Idle);
 
     let flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
     // Narrow ranges: one spanning everything would wake the shell for
@@ -483,7 +505,7 @@ pub fn on_event(event: u32, w: HWND) {
         _ => None,
     });
     // A game going fullscreen mid-animation gets the screen to itself at once.
-    if event == EVENT_SYSTEM_FOREGROUND && PHASE.get() != Phase::Idle && fullscreen_app() {
+    if event == EVENT_SYSTEM_FOREGROUND && PHASE.get().animating() && fullscreen_app() {
         cut();
     }
     if event == EVENT_SYSTEM_FOREGROUND {
@@ -638,16 +660,10 @@ pub fn pointer_moved(p: Point) {
     }
     let under = window_under(p);
     let timer = FOLLOW.with_borrow_mut(|f| f.moved(under));
-    unsafe {
-        match timer {
-            Timer::Restart => {
-                SetTimer(Some(EVENTS_TO.get()), FOLLOW_TIMER, ffc.delay_ms.try_into().unwrap_or(u32::MAX), None);
-            }
-            Timer::Cancel => {
-                let _ = KillTimer(Some(EVENTS_TO.get()), FOLLOW_TIMER);
-            }
-            Timer::Leave => {}
-        }
+    match timer {
+        Timer::Restart => TimerId::Follow.set(ffc.delay_ms.try_into().unwrap_or(u32::MAX)),
+        Timer::Cancel => TimerId::Follow.kill(),
+        Timer::Leave => {}
     }
 }
 
@@ -663,32 +679,27 @@ fn follow_focus() {
 }
 
 pub fn on_timer(id: usize) {
-    if id == FOLLOW_TIMER {
-        unsafe {
-            let _ = KillTimer(Some(EVENTS_TO.get()), id);
+    match TimerId::from_id(id) {
+        Some(TimerId::Follow) => {
+            TimerId::Follow.kill();
+            follow_focus();
         }
-        follow_focus();
-        return;
-    }
-    if id == FLUSH_TIMER {
-        let held = HELD.take();
-        for (w, to) in held {
-            if let Err(e) = set_pos(w, to) {
-                log(&format!("placing {w:?} failed: {e}"));
+        Some(TimerId::Flush) => {
+            let held = MOVES.with_borrow_mut(Moves::take_held);
+            for (w, to) in held {
+                if let Err(e) = set_pos(w, to) {
+                    log(&format!("placing {w:?} failed: {e}"));
+                }
+            }
+            if !MOVES.with_borrow(Moves::holding) {
+                TimerId::Flush.kill();
             }
         }
-        if HELD.with_borrow(Vec::is_empty) {
-            unsafe {
-                let _ = KillTimer(Some(EVENTS_TO.get()), id);
-            }
+        Some(TimerId::Replace) => {
+            TimerId::Replace.kill();
+            update(|wm| Some(wm.placement()));
         }
-        return;
-    }
-    if id == REPLACE_TIMER {
-        unsafe {
-            let _ = KillTimer(Some(EVENTS_TO.get()), id);
-        }
-        update(|wm| Some(wm.placement()));
+        None => {}
     }
 }
 
@@ -882,7 +893,7 @@ fn apply(fx: Effects<HWND>) {
         // resizes itself to what WM_DPICHANGED suggests, over where it was
         // put; so it's put there again once it has.
         if crossed {
-            SetTimer(Some(EVENTS_TO.get()), REPLACE_TIMER, 250, None);
+            TimerId::Replace.set(250);
         }
         let follow = fx.follow.and_then(|w| {
             let tile = fx.place.iter().find(|&&(x, _)| x == w).map(|&(_, r)| r);
@@ -939,8 +950,8 @@ fn carried(r: RECT, from: Rect, to: Rect) -> RECT {
 fn animate(pace: Pace, activated: &[(OutputId, usize)]) -> bool {
     let Some(screens) = WM.with_borrow(|wm| wm.as_ref().map(Wm::screens)) else { return false };
     let at = now();
-    let running = PHASE.get() != Phase::Idle;
-    let allowed = ANIMATING.get() && (running || (overlay::enabled() && !fullscreen_app()));
+    let running = PHASE.get().animating();
+    let allowed = PHASE.get() != Phase::Starting && (running || (overlay::enabled() && !fullscreen_app()));
     ANIM.with_borrow_mut(|a| {
         let a = a.get_or_insert_with(|| Animator::new(screens.clone()));
         if allowed {
@@ -1111,7 +1122,7 @@ fn clipped(at: Rect, source: RECT, clip: Rect) -> Option<(Rect, RECT)> {
 pub fn on_frame() {
     overlay::frame_taken();
     let phase = PHASE.get();
-    if phase == Phase::Idle {
+    if !phase.animating() {
         return;
     }
     let at = now();
@@ -1136,7 +1147,7 @@ pub fn on_frame() {
                 finish();
             }
         }
-        Phase::Idle => {}
+        Phase::Starting | Phase::Idle => {}
     }
 }
 
@@ -1179,7 +1190,7 @@ fn cut() {
             a.rest(screens);
         }
     });
-    if PHASE.get() != Phase::Idle {
+    if PHASE.get().animating() {
         finish();
     }
 }
@@ -1220,28 +1231,12 @@ fn place(w: HWND, r: Rect) {
     }
 }
 
-/// SetWindowPos, one move in flight per window. Async, so a hung app can't
-/// hang the shell, but then each move waits in the app's own queue: a
-/// Super+drag resize sends one per pointer move, and a console, slow to
-/// resize (it re-wraps its text), kept working through them after the
-/// drag ended (saturn, 2026-11-20). A window still busy gets only the
-/// newest place, sent once it has handled the last.
+/// SetWindowPos, async, one move in flight per window (throttle.rs).
 fn set_pos(w: HWND, to: RECT) -> windows::core::Result<()> {
-    let busy = IN_FLIGHT.with_borrow_mut(|f| {
-        f.retain(|&(x, from, sent)| x != w || (sent.elapsed() < IN_FLIGHT_FOR && window_rect(x) == Some(from)));
-        f.iter().any(|&(x, ..)| x == w)
-    });
-    if busy {
-        HELD.with_borrow_mut(|h| {
-            h.retain(|&(x, _)| x != w);
-            h.push((w, to));
-        });
-        unsafe { SetTimer(Some(EVENTS_TO.get()), FLUSH_TIMER, 8, None) };
+    let ask = MOVES.with_borrow_mut(|m| m.ask(w, to, Instant::now(), || window_rect(w)));
+    if ask == Ask::Hold {
+        TimerId::Flush.set(8);
         return Ok(());
-    }
-    HELD.with_borrow_mut(|h| h.retain(|&(x, _)| x != w));
-    if let Some(from) = window_rect(w).filter(|&from| from != to) {
-        IN_FLIGHT.with_borrow_mut(|f| f.push((w, from, Instant::now())));
     }
     let flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS;
     unsafe { SetWindowPos(w, None, to.left, to.top, to.right - to.left, to.bottom - to.top, flags) }
@@ -1414,9 +1409,7 @@ fn sync_captions() {
         changed |= restore_caption(w);
     }
     if changed {
-        unsafe {
-            SetTimer(Some(EVENTS_TO.get()), REPLACE_TIMER, 250, None);
-        }
+        TimerId::Replace.set(250);
     }
 }
 

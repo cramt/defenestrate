@@ -15,6 +15,7 @@ mod follow;
 mod fuzzy;
 mod motion;
 mod settings;
+mod throttle;
 mod tree;
 mod wm;
 
