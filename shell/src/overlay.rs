@@ -41,17 +41,18 @@ use windows::Win32::Graphics::Dwm::{
     DWM_TNP_VISIBLE, DwmFlush, DwmRegisterThumbnail, DwmUnregisterThumbnail, DwmUpdateThumbnailProperties,
 };
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, COLOR_DESKTOP, EndPaint, FillRect, GetSysColor, GetSysColorBrush, PAINTSTRUCT, PaintDesktop, UpdateWindow,
+    BeginPaint, COLOR_DESKTOP, CreateSolidBrush, EndPaint, FillRect, GetSysColor, GetSysColorBrush, PAINTSTRUCT, PaintDesktop,
+    UpdateWindow,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, HWND_TOPMOST, LWA_ALPHA, PostMessageW, RegisterClassW, SPI_GETCLIENTAREAANIMATION,
     SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetLayeredWindowAttributes, SetWindowPos, ShowWindow, SystemParametersInfoW,
-    WM_APP, WM_ERASEBKGND, WM_PAINT, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
-    WS_POPUP,
+    WM_APP, WM_ERASEBKGND, WM_PAINT, WNDCLASSW, WNDPROC, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_EX_TRANSPARENT, WS_POPUP,
 };
-use windows::core::{BOOL, w};
+use windows::core::{BOOL, PCWSTR, w};
 
 use crate::log;
 use crate::tree::Rect;
@@ -74,18 +75,30 @@ static WAKE: Condvar = Condvar::new();
 /// moment, not a backlog.
 static POSTED: AtomicBool = AtomicBool::new(false);
 
-pub fn create(notify: HWND) -> windows::core::Result<()> {
+/// A hidden topmost window of the shell's that only shows something:
+/// layered and transparent, so the mouse goes through to the windows under
+/// it and WindowFromPoint never returns it (only a layered window is
+/// click-through), and never activated. The animation overlay, the active
+/// hint and the drop preview. Filled with `colour` if given, at `alpha`.
+pub fn click_through(class: PCWSTR, title: PCWSTR, proc: WNDPROC, colour: Option<COLORREF>, alpha: u8) -> windows::core::Result<HWND> {
     unsafe {
         let instance = GetModuleHandleW(None)?.into();
-        let class = w!("DefenestrateAnimation");
-        RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(proc), hInstance: instance, lpszClassName: class, ..Default::default() });
-        // Layered and transparent: the mouse goes through to the real
-        // windows, and WindowFromPoint never returns it.
+        RegisterClassW(&WNDCLASSW {
+            lpfnWndProc: proc,
+            hInstance: instance,
+            lpszClassName: class,
+            hbrBackground: colour.map(|c| CreateSolidBrush(c)).unwrap_or_default(),
+            ..Default::default()
+        });
         let ex = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST;
-        let window = CreateWindowExW(ex, class, w!("defenestrate animation"), WS_POPUP, 0, 0, 0, 0, None, None, Some(instance), None)?;
-        SetLayeredWindowAttributes(window, COLORREF(0), 255, LWA_ALPHA)?;
-        OVERLAY.set(window);
+        let window = CreateWindowExW(ex, class, title, WS_POPUP, 0, 0, 0, 0, None, None, Some(instance), None)?;
+        SetLayeredWindowAttributes(window, COLORREF(0), alpha, LWA_ALPHA)?;
+        Ok(window)
     }
+}
+
+pub fn create(notify: HWND) -> windows::core::Result<()> {
+    OVERLAY.set(click_through(w!("DefenestrateAnimation"), w!("defenestrate animation"), Some(proc), None, 255)?);
     if stats_wanted() {
         STATS.set(Some(Stats::now()));
     }

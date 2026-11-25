@@ -6,36 +6,23 @@
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 
-use windows::Win32::Foundation::{COLORREF, CloseHandle, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DeleteObject,
-    DrawTextW, EndPaint, FillRect, InvalidateRect, PAINTSTRUCT, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
-};
+use windows::Win32::Foundation::{CloseHandle, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Graphics::Gdi::{DT_LEFT, DT_RIGHT, InvalidateRect, SetTextColor};
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::Input::KeyboardAndMouse::{VK_DOWN, VK_ESCAPE, VK_NEXT, VK_PRIOR, VK_RETURN, VK_TAB, VK_UP};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, IDC_ARROW, KillTimer, LoadCursorW, RegisterClassW, SW_HIDE, SW_SHOW, SW_SHOWNORMAL, SWP_NOACTIVATE,
-    SetTimer, SetWindowPos, ShowWindow, WA_INACTIVE, WM_ACTIVATE,
-    WM_CHAR, WM_KEYDOWN, WM_PAINT, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    DefWindowProcW, KillTimer, SW_HIDE, SW_SHOWNORMAL, SWP_NOACTIVATE, SetTimer, ShowWindow, WA_INACTIVE, WM_ACTIVATE, WM_CHAR,
+    WM_KEYDOWN, WM_PAINT, WM_TIMER,
 };
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx};
 use windows::Win32::UI::Shell::{SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
 use windows::Win32::System::Threading::GetProcessId;
 use windows::core::{HSTRING, PCWSTR, Result, w};
 
-use crate::{desktop, font, fuzzy, log, scaled, use_dpi};
+use crate::popup::{DIM, FOREGROUND, Popup, ROW_HEIGHT, ROWS, first_row, highlight, size, text};
+use crate::{desktop, fuzzy, log};
 
-const ROWS: usize = 10;
-pub const WIDTH: i32 = 640;
-pub const ROW_HEIGHT: i32 = 28;
-pub const PADDING: i32 = 12;
 const CLOCK_TIMER: usize = 1;
-
-// COLORREF is 0x00BBGGRR.
-pub const BACKGROUND: COLORREF = COLORREF(0x0020_1818);
-pub const SELECTED: COLORREF = COLORREF(0x0040_3030);
-pub const FOREGROUND: COLORREF = COLORREF(0x00E0_E0E0);
-pub const DIM: COLORREF = COLORREF(0x0080_8080);
 
 struct App {
     name: String,
@@ -74,41 +61,20 @@ enum Launch {
 
 thread_local! {
     static STATE: RefCell<State> = RefCell::new(State::default());
-    static WINDOW: Cell<HWND> = const { Cell::new(HWND(std::ptr::null_mut())) };
+    static POPUP: Cell<Popup> = const { Cell::new(Popup::NONE) };
 }
 
-pub fn create(instance: HINSTANCE) -> Result<()> {
-    let class = w!("DefenestrateLauncher");
-    unsafe {
-        RegisterClassW(&WNDCLASSW {
-            lpfnWndProc: Some(wndproc),
-            hInstance: instance,
-            lpszClassName: class,
-            hCursor: LoadCursorW(None, IDC_ARROW)?,
-            ..Default::default()
-        });
-        let height = scaled(ROW_HEIGHT) * (ROWS as i32 + 1) + scaled(PADDING) * 2;
-        let window = CreateWindowExW(
-            WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-            class,
-            w!("defenestrate launcher"),
-            WS_POPUP,
-            0,
-            0,
-            scaled(WIDTH),
-            height,
-            None,
-            None,
-            Some(instance),
-            None,
-        )?;
-        WINDOW.set(window);
-    }
+/// The query line, then the matches.
+const LINES: i32 = ROWS as i32 + 1;
+
+/// Hidden, sized for `dpi` until it first opens.
+pub fn create(instance: HINSTANCE, dpi: u32) -> Result<()> {
+    POPUP.set(Popup::create(instance, w!("DefenestrateLauncher"), w!("defenestrate launcher"), Some(wndproc), size(LINES, dpi), dpi)?);
     Ok(())
 }
 
 pub fn toggle() {
-    let window = WINDOW.get();
+    let window = POPUP.get().window;
     if unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(window) }.as_bool() {
         hide();
     } else {
@@ -117,31 +83,22 @@ pub fn toggle() {
 }
 
 fn show() {
-    let window = WINDOW.get();
     let apps = scan();
     STATE.with_borrow_mut(|s| {
         s.apps = apps;
         s.query.clear();
         s.refilter();
     });
+    Popup::open(&POPUP, LINES, SWP_NOACTIVATE);
+    let window = POPUP.get().window;
     unsafe {
-        // On the monitor the pointer is on, as COSMIC opens it on the
-        // active output, sized for that monitor's DPI. Centred, a quarter
-        // of the way down: where the eye already is.
-        let (area, dpi) = desktop::overlay_spot();
-        use_dpi(dpi);
-        let (width, height) = (scaled(WIDTH), scaled(ROW_HEIGHT) * (ROWS as i32 + 1) + scaled(PADDING) * 2);
-        let x = area.left + (area.width() - width) / 2;
-        let y = area.top + area.height() / 4;
-        let _ = SetWindowPos(window, None, x, y, width, height, SWP_NOACTIVATE);
-        let _ = ShowWindow(window, SW_SHOW);
         SetTimer(Some(window), CLOCK_TIMER, 1000, None);
     }
     desktop::focus(window);
 }
 
 fn hide() {
-    let window = WINDOW.get();
+    let window = POPUP.get().window;
     unsafe {
         let _ = KillTimer(Some(window), CLOCK_TIMER);
         let _ = ShowWindow(window, SW_HIDE);
@@ -296,42 +253,21 @@ fn clock_text() -> String {
     )
 }
 
-pub fn text(hdc: windows::Win32::Graphics::Gdi::HDC, s: &str, rect: &mut RECT, align: windows::Win32::Graphics::Gdi::DRAW_TEXT_FORMAT) {
-    let mut wide: Vec<u16> = s.encode_utf16().collect();
-    unsafe {
-        DrawTextW(hdc, &mut wide, rect, align | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
-    }
-}
-
-fn paint(window: HWND) {
-    unsafe {
-        let mut ps = PAINTSTRUCT::default();
-        let hdc = BeginPaint(window, &mut ps);
-        let mut client = RECT::default();
-        let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(window, &mut client);
-        let background = CreateSolidBrush(BACKGROUND);
-        FillRect(hdc, &client, background);
-        let _ = DeleteObject(background.into());
-        SelectObject(hdc, font().into());
-        SetBkMode(hdc, TRANSPARENT);
-
-        let (pad, row) = (scaled(PADDING), scaled(ROW_HEIGHT));
-        let mut line = RECT { left: pad, top: pad, right: client.right - pad, bottom: pad + row };
+fn paint() {
+    let popup = POPUP.get();
+    let row = popup.scaled(ROW_HEIGHT);
+    popup.paint(|hdc, client, mut line| unsafe {
         STATE.with_borrow(|s| {
             SetTextColor(hdc, DIM);
             text(hdc, &clock_text(), &mut line.clone(), DT_RIGHT);
             SetTextColor(hdc, FOREGROUND);
             text(hdc, &format!("> {}_", s.query), &mut line.clone(), DT_LEFT);
 
-            // Scrolls by pages so the selection is always on screen.
-            let first = s.selected / ROWS * ROWS;
-            for (i, &app) in s.matches.iter().enumerate().skip(first).take(ROWS) {
+            for (i, &app) in s.matches.iter().enumerate().skip(first_row(s.selected)).take(ROWS) {
                 line.top += row;
                 line.bottom += row;
                 if i == s.selected {
-                    let highlight = CreateSolidBrush(SELECTED);
-                    FillRect(hdc, &RECT { left: 0, right: client.right, ..line }, highlight);
-                    let _ = DeleteObject(highlight.into());
+                    highlight(hdc, client, line);
                 }
                 SetTextColor(hdc, FOREGROUND);
                 text(hdc, &s.apps[app].name, &mut line.clone(), DT_LEFT);
@@ -343,8 +279,7 @@ fn paint(window: HWND) {
                 text(hdc, "Enter runs it as a command", &mut line.clone(), DT_LEFT);
             }
         });
-        let _ = EndPaint(window, &ps);
-    }
+    });
 }
 
 unsafe extern "system" fn wndproc(window: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -353,7 +288,7 @@ unsafe extern "system" fn wndproc(window: HWND, msg: u32, wparam: WPARAM, lparam
     };
     match msg {
         WM_PAINT => {
-            paint(window);
+            paint();
             LRESULT(0)
         }
         WM_KEYDOWN if on_key(wparam.0 as u16) => {

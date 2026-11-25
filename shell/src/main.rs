@@ -36,6 +36,10 @@ mod modes;
 #[cfg(windows)]
 mod overlay;
 #[cfg(windows)]
+mod preview;
+#[cfg(windows)]
+mod popup;
+#[cfg(windows)]
 mod switcher;
 #[cfg(windows)]
 mod theme;
@@ -46,7 +50,7 @@ fn main() {
 }
 
 #[cfg(windows)]
-use windows_main::{font, log, scaled, scaled_at, start_line, use_dpi};
+use windows_main::{log, scaled_at, start_line};
 
 #[cfg(windows)]
 fn main() {
@@ -77,7 +81,6 @@ fn main() {
 
 #[cfg(windows)]
 mod windows_main {
-    use std::cell::Cell;
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::process::CommandExt;
     use std::process::Command;
@@ -85,10 +88,6 @@ mod windows_main {
     use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, LRESULT, WPARAM};
     use windows::Win32::System::Threading::{CreateProcessW, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTUPINFOW};
     use windows::Win32::UI::Input::KeyboardAndMouse::{INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY};
-    use windows::Win32::Graphics::Gdi::{
-        CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, DEFAULT_CHARSET, DeleteObject, FF_MODERN, FIXED_PITCH, FW_NORMAL, HFONT,
-        OUT_TT_PRECIS,
-    };
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::SystemInformation::GetLocalTime;
     use windows::Win32::System::Shutdown::{EWX_LOGOFF, ExitWindowsEx, LockWorkStation, SHUTDOWN_REASON};
@@ -102,67 +101,12 @@ mod windows_main {
     use crate::keys::{self, Action, WM_ACTION};
     use crate::{autostart, desktop, env, launcher, settings, switcher, theme};
 
-    // In 96 DPI pixels; scaled to the DPI of the monitor it's drawn on.
-    const FONT_HEIGHT: i32 = 18;
-    // Installed by configs/default.nix (`fonts`). GDI quietly substitutes
-    // something else if it's missing.
-    const FONT_FACE: windows::core::PCWSTR = w!("Iosevka NFM");
     const CREATE_NEW_CONSOLE: u32 = 0x10;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-    thread_local! {
-        /// The DPI the launcher and switcher draw at: that of the monitor
-        /// they last opened on (Per-Monitor V2: each monitor has its own).
-        static DPI: Cell<i32> = const { Cell::new(96) };
-        static FONT: Cell<Option<(i32, HFONT)>> = const { Cell::new(None) };
-    }
-
-    pub fn scaled(px: i32) -> i32 {
-        px * DPI.get() / 96
-    }
-
+    /// `px` 96 DPI pixels at `dpi`.
     pub fn scaled_at(px: i32, dpi: u32) -> i32 {
         px * dpi as i32 / 96
-    }
-
-    /// The overlays are about to open on a monitor at `dpi`.
-    pub fn use_dpi(dpi: u32) {
-        DPI.set(dpi as i32);
-    }
-
-    /// The shell's font at the current DPI, made the first time it's needed
-    /// at that DPI.
-    pub fn font() -> HFONT {
-        let dpi = DPI.get();
-        if let Some((at, f)) = FONT.get()
-            && at == dpi
-        {
-            return f;
-        }
-        let f = unsafe {
-            CreateFontW(
-                -scaled(FONT_HEIGHT),
-                0,
-                0,
-                0,
-                FW_NORMAL.0 as i32,
-                0,
-                0,
-                0,
-                DEFAULT_CHARSET,
-                OUT_TT_PRECIS,
-                CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY,
-                (FIXED_PITCH.0 | FF_MODERN.0) as u32,
-                FONT_FACE,
-            )
-        };
-        if let Some((_, old)) = FONT.replace(Some((dpi, f))) {
-            unsafe {
-                let _ = DeleteObject(old.into());
-            }
-        }
-        f
     }
 
     /// Appends to %LOCALAPPDATA%\defenestrate\shell.log. There is no
@@ -192,7 +136,6 @@ mod windows_main {
             if let Err(e) = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) {
                 log(&format!("becoming DPI aware failed: {e}"));
             }
-            DPI.set(GetDpiForSystem() as i32);
             env::log_path();
 
             // Before the hook thread, which reads the shortcuts.
@@ -218,10 +161,13 @@ mod windows_main {
             }
             // Before the apps the logon starts, so they open in it.
             theme::apply();
-            if let Err(e) = launcher::create(instance) {
+            // Each opens at its monitor's DPI; until then they have the
+            // system's, which the launcher's first, unseen size is for.
+            let dpi = GetDpiForSystem();
+            if let Err(e) = launcher::create(instance, dpi) {
                 log(&format!("creating the launcher failed: {e}"));
             }
-            if let Err(e) = switcher::create(instance) {
+            if let Err(e) = switcher::create(instance, dpi) {
                 log(&format!("creating the window switcher failed: {e}"));
             }
             desktop::start(main);

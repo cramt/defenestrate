@@ -14,15 +14,14 @@ use std::collections::HashSet;
 use std::ffi::c_void;
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{CloseHandle, COLORREF, HANDLE, HWND, LPARAM, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
-    ClientToScreen, CreateSolidBrush, DISPLAY_DEVICEW, EnumDisplayDevicesW, EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR,
+    ClientToScreen, DISPLAY_DEVICEW, EnumDisplayDevicesW, EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR,
     MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW, MonitorFromWindow,
 };
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_INFORMATION_CLASS, TOKEN_QUERY, TokenElevation, TokenUIAccess};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentProcessId, OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
     QueryFullProcessImageNameW,
@@ -31,20 +30,15 @@ use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, INPUT, INPUT_MOUSE, SendInput, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON};
 use windows::Win32::UI::Shell::{QUNS_RUNNING_D3D_FULL_SCREEN, SHQueryUserNotificationState};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, EDD_GET_DEVICE_INTERFACE_NAME, EVENT_OBJECT_CLOAKED, GetCursorPos, MONITORINFOF_PRIMARY,
-    SetCursorPos, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_SHOW,
-    EVENT_OBJECT_UNCLOAKED, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MOVESIZEEND,
-    EVENT_SYSTEM_MOVESIZESTART, EnumWindows, GA_ROOT,
-    GetForegroundWindow, HWND_BOTTOM, HWND_TOP,
-    GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClientRect, GetPropW, GetSystemMetrics, GetWindow, GetWindowLongPtrW,
-    GetClassNameW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, HWND_TOPMOST, IsHungAppWindow, IsIconic, IsWindow,
-    IsWindowVisible, IsZoomed, KillTimer,
-    LWA_ALPHA, PostMessageW, RegisterClassW, RemovePropW, SM_CXSCREEN, SM_CYSCREEN, SPI_SETWORKAREA, SW_HIDE, SW_RESTORE,
-    SW_SHOWNA, SW_SHOWNOACTIVATE, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
-    SWP_NOZORDER, SWP_SHOWWINDOW, SetForegroundWindow, SetLayeredWindowAttributes, SetPropW, SetTimer, SetWindowLongPtrW,
-    SetWindowPos, ShowWindowAsync, SystemParametersInfoW, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP, WM_CLOSE,
-    WNDCLASSW, WS_CAPTION, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
-    WS_POPUP, WS_THICKFRAME, WindowFromPoint,
+    EDD_GET_DEVICE_INTERFACE_NAME, EVENT_OBJECT_CLOAKED, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_SHOW, EVENT_OBJECT_UNCLOAKED,
+    EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART,
+    EnumWindows, GA_ROOT, GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClassNameW, GetClientRect, GetCursorPos, GetForegroundWindow,
+    GetPropW, GetSystemMetrics, GetWindow, GetWindowLongPtrW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, HWND_BOTTOM,
+    HWND_TOP, IsHungAppWindow, IsIconic, IsWindow, IsWindowVisible, IsZoomed, KillTimer, MONITORINFOF_PRIMARY, PostMessageW,
+    RemovePropW, SM_CXSCREEN, SM_CYSCREEN, SPI_SETWORKAREA, SW_HIDE, SW_RESTORE, SW_SHOWNA, SW_SHOWNOACTIVATE, SWP_ASYNCWINDOWPOS,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SetCursorPos, SetForegroundWindow,
+    SetPropW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindowAsync, SystemParametersInfoW, WINEVENT_OUTOFCONTEXT,
+    WINEVENT_SKIPOWNPROCESS, WM_APP, WM_CLOSE, WS_CAPTION, WS_THICKFRAME, WindowFromPoint,
 };
 use windows::core::{BOOL, PCWSTR, PWSTR, w};
 
@@ -53,7 +47,7 @@ use crate::keys::{Button, Drag};
 use crate::motion::{Animator, Pace, Scene};
 use crate::follow::{Follow, Timer};
 use crate::throttle::{Ask, Moves};
-use crate::hint;
+use crate::{hint, preview};
 use crate::overlay::{self, Look};
 use crate::settings;
 use crate::tree::{Axis, Direction, Gaps, Point, Rect};
@@ -106,9 +100,6 @@ const DROP_BAND: i32 = 32;
 /// Marks a window whose title bar the shell took, on the window itself, so
 /// a shell that crashed can give it back when it starts again.
 const CAPTIONLESS: PCWSTR = w!("defenestrate.captionless");
-// COLORREF is 0x00BBGGRR: COSMIC's default accent blue.
-const PREVIEW_COLOUR: COLORREF = COLORREF(0x00E4_B163);
-const PREVIEW_ALPHA: u8 = 96;
 /// What a tiled window loses. The sizing border goes with the caption:
 /// without a caption, Windows 11 paints the top sizing border as a white
 /// strip across the window.
@@ -173,7 +164,6 @@ thread_local! {
     static EVENTS_TO: Cell<HWND> = const { Cell::new(HWND(std::ptr::null_mut())) };
     static REACH: Cell<Reach> = const { Cell::new(Reach::SameLevel) };
     static DRAGGING: Cell<Option<Dragging>> = const { Cell::new(None) };
-    static PREVIEW: Cell<HWND> = const { Cell::new(HWND(std::ptr::null_mut())) };
     /// Windows the shell took the title bar from.
     static STRIPPED: RefCell<Vec<HWND>> = const { RefCell::new(Vec::new()) };
     /// A window is being moved or sized by its own title bar or borders.
@@ -389,7 +379,7 @@ pub fn start(events_to: HWND) {
     }
     MONITORS.set(found);
     EPOCH.set(Some(Instant::now()));
-    if let Err(e) = create_preview() {
+    if let Err(e) = preview::create() {
         log(&format!("creating the drop preview failed: {e}"));
     }
     match overlay::create(events_to) {
@@ -1306,7 +1296,7 @@ pub fn drag(d: Drag) {
                 move_to(w, shifted(start, from, to));
                 let band = scaled_at(DROP_BAND, dpi_at(to));
                 let target = WM.with_borrow(|wm| wm.as_ref().and_then(|wm| wm.drop_preview(w, to, band)));
-                preview(target);
+                preview::show(target);
             }
             Some(Dragging::Float { w, from, start }) => move_to(w, shifted(start, from, to)),
             Some(Dragging::TileEdge { w, from, corner, axis, at }) => {
@@ -1331,56 +1321,12 @@ pub fn drag(d: Drag) {
         },
         Drag::End(at) => {
             if let Some(Dragging::Tile { w, .. }) = DRAGGING.take() {
-                preview(None);
+                preview::show(None);
                 ANIM.with_borrow_mut(|a| a.as_mut().map(|a| a.forget(w)));
                 let band = scaled_at(DROP_BAND, dpi_at(at));
                 update(|wm| Some(wm.drop(w, at, band)));
             }
             sync_hint();
-        }
-    }
-}
-
-/// A see-through accent-coloured window over where a dragged tile would
-/// land, like COSMIC's drop placeholder.
-fn create_preview() -> windows::core::Result<()> {
-    unsafe {
-        let instance = GetModuleHandleW(None)?.into();
-        let class = w!("DefenestrateDropPreview");
-        RegisterClassW(&WNDCLASSW {
-            lpfnWndProc: Some(preview_proc),
-            hInstance: instance,
-            lpszClassName: class,
-            hbrBackground: CreateSolidBrush(PREVIEW_COLOUR),
-            ..Default::default()
-        });
-        // Transparent to the mouse, so it's never what's under the pointer.
-        let ex = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST;
-        let window = CreateWindowExW(ex, class, w!("defenestrate drop preview"), WS_POPUP, 0, 0, 0, 0, None, None, Some(instance), None)?;
-        SetLayeredWindowAttributes(window, COLORREF(0), PREVIEW_ALPHA, LWA_ALPHA)?;
-        PREVIEW.set(window);
-    }
-    Ok(())
-}
-
-unsafe extern "system" fn preview_proc(w: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> windows::Win32::Foundation::LRESULT {
-    unsafe { DefWindowProcW(w, msg, wparam, lparam) }
-}
-
-fn preview(at: Option<Rect>) {
-    let window = PREVIEW.get();
-    if window.is_invalid() {
-        return;
-    }
-    unsafe {
-        match at {
-            Some(r) => {
-                let flags = SWP_NOACTIVATE | SWP_SHOWWINDOW;
-                let _ = SetWindowPos(window, Some(HWND_TOPMOST), r.left, r.top, r.width(), r.height(), flags);
-            }
-            None => {
-                let _ = ShowWindowAsync(window, SW_HIDE);
-            }
         }
     }
 }

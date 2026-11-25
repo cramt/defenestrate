@@ -14,15 +14,11 @@
 use std::cell::Cell;
 
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::Graphics::Gdi::{CombineRgn, CreateRectRgn, CreateSolidBrush, DeleteObject, RGN_DIFF, SetWindowRgn};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, HWND_TOPMOST, LWA_ALPHA, RegisterClassW, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW,
-    SetLayeredWindowAttributes, SetWindowPos, ShowWindowAsync, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
-};
+use windows::Win32::Graphics::Gdi::{CombineRgn, CreateRectRgn, DeleteObject, RGN_DIFF, SetWindowRgn};
+use windows::Win32::UI::WindowsAndMessaging::{DefWindowProcW, HWND_TOPMOST, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowPos, ShowWindowAsync};
 use windows::core::w;
 
+use crate::overlay::click_through;
 use crate::settings::ActiveHint;
 use crate::tree::Rect;
 
@@ -36,23 +32,10 @@ thread_local! {
 /// `thickness` in real pixels.
 pub fn create(hint: ActiveHint, thickness: i32) -> windows::core::Result<()> {
     let [r, g, b] = hint.colour;
-    unsafe {
-        let instance = GetModuleHandleW(None)?.into();
-        let class = w!("DefenestrateActiveHint");
-        RegisterClassW(&WNDCLASSW {
-            lpfnWndProc: Some(proc_),
-            hInstance: instance,
-            lpszClassName: class,
-            // COLORREF is 0x00BBGGRR.
-            hbrBackground: CreateSolidBrush(COLORREF(u32::from(r) | u32::from(g) << 8 | u32::from(b) << 16)),
-            ..Default::default()
-        });
-        let ex = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST;
-        let window = CreateWindowExW(ex, class, w!("defenestrate active hint"), WS_POPUP, 0, 0, 0, 0, None, None, Some(instance), None)?;
-        // Opaque, but layered: only a layered window is click-through.
-        SetLayeredWindowAttributes(window, COLORREF(0), 255, LWA_ALPHA)?;
-        WINDOW.set(window);
-    }
+    // COLORREF is 0x00BBGGRR.
+    let colour = COLORREF(u32::from(r) | u32::from(g) << 8 | u32::from(b) << 16);
+    // Opaque, but layered: only a layered window is click-through.
+    WINDOW.set(click_through(w!("DefenestrateActiveHint"), w!("defenestrate active hint"), Some(proc_), Some(colour), 255)?);
     THICKNESS.set(thickness.max(1));
     Ok(())
 }
