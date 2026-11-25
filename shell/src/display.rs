@@ -5,21 +5,7 @@
 //! Without this Windows picks its own default mode, which for a 240 Hz
 //! monitor was 60 Hz.
 
-use serde::Deserialize;
-
-/// One monitor's mode. The monitor is matched by its EDID's model name and,
-/// if given, serial: the same strings Linux compositors name it by, unlike
-/// Windows' connector numbering, which changes when monitors come and go.
-#[derive(Deserialize, Debug, Clone, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct DisplayMode {
-    pub model: String,
-    pub serial: Option<String>,
-    pub width: u32,
-    pub height: u32,
-    /// Hz. Windows only has whole ones, so this picks the nearest.
-    pub refresh: f64,
-}
+use crate::settings::DisplayMode;
 
 /// The text descriptors of a monitor's EDID that name it.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -53,20 +39,21 @@ impl Edid {
     }
 }
 
-impl DisplayMode {
-    pub fn is_for(&self, edid: &Edid) -> bool {
-        edid.model.as_deref() == Some(&self.model) && self.serial.as_ref().is_none_or(|s| edid.serial.as_ref() == Some(s))
-    }
+/// Whether `mode` is for the monitor with this EDID: its model, and its
+/// serial if the mode names one.
+pub fn is_for(mode: &DisplayMode, edid: &Edid) -> bool {
+    edid.model.as_deref() == Some(mode.model.as_str()) && mode.serial.as_ref().is_none_or(|s| edid.serial.as_deref() == Some(s.as_str()))
+}
 
-    /// Of the refresh rates the monitor offers at this resolution, the one
-    /// nearest to the configured one.
-    pub fn pick(&self, offered: impl IntoIterator<Item = (u32, u32, u32)>) -> Option<u32> {
-        offered
-            .into_iter()
-            .filter(|&(w, h, _)| (w, h) == (self.width, self.height))
-            .map(|(_, _, hz)| hz)
-            .min_by(|&a, &b| (f64::from(a) - self.refresh).abs().total_cmp(&(f64::from(b) - self.refresh).abs()))
-    }
+/// Of the refresh rates the monitor offers at `mode`'s resolution, the one
+/// nearest to its refresh rate: Windows only has whole ones.
+pub fn pick(mode: &DisplayMode, offered: impl IntoIterator<Item = (u32, u32, u32)>) -> Option<u32> {
+    let want = mode.refresh.hz();
+    offered
+        .into_iter()
+        .filter(|&(w, h, _)| (w, h) == (mode.width.get(), mode.height.get()))
+        .map(|(_, _, hz)| hz)
+        .min_by(|&a, &b| (f64::from(a) - want).abs().total_cmp(&(f64::from(b) - want).abs()))
 }
 
 #[cfg(test)]
@@ -95,7 +82,9 @@ mod tests {
     }
 
     fn mode(serial: Option<&str>) -> DisplayMode {
-        DisplayMode { model: "49M2C8900".into(), serial: serial.map(Into::into), width: 5120, height: 1440, refresh: 240.49 }
+        let text = |s: &str| s.to_owned().try_into().unwrap();
+        let size = |n| std::num::NonZeroU32::new(n).unwrap();
+        DisplayMode { model: text("49M2C8900"), serial: serial.map(text), width: size(5120), height: size(1440), refresh: 240.49.try_into().unwrap() }
     }
 
     #[test]
@@ -107,18 +96,19 @@ mod tests {
     #[test]
     fn matches_by_model_and_serial_when_given() {
         let edid = Edid::parse(&philips());
-        assert!(mode(None).is_for(&edid));
-        assert!(mode(Some("AU42447000108")).is_for(&edid));
-        assert!(!mode(Some("other")).is_for(&edid));
-        assert!(!DisplayMode { model: "49M2C8901".into(), ..mode(None) }.is_for(&edid));
+        assert!(is_for(&mode(None), &edid));
+        assert!(is_for(&mode(Some("AU42447000108")), &edid));
+        assert!(!is_for(&mode(Some("other")), &edid));
+        assert!(!is_for(&DisplayMode { model: "49M2C8901".to_owned().try_into().unwrap(), ..mode(None) }, &edid));
     }
 
     /// What the driver offered at 5120x1440 (windows-bugs.md #8).
     #[test]
     fn picks_the_nearest_whole_hz() {
         let offered = [48, 60, 75, 100, 120, 165, 240].map(|hz| (5120, 1440, hz)).into_iter().chain([(3840, 1080, 241)]);
-        assert_eq!(mode(None).pick(offered.clone()), Some(240));
-        assert_eq!(DisplayMode { refresh: 59.94, ..mode(None) }.pick(offered.clone()), Some(60));
-        assert_eq!(DisplayMode { width: 2560, ..mode(None) }.pick(offered), None);
+        assert_eq!(pick(&mode(None), offered.clone()), Some(240));
+        assert_eq!(pick(&DisplayMode { refresh: 59.94.try_into().unwrap(), ..mode(None) }, offered.clone()), Some(60));
+        assert_eq!(pick(&DisplayMode { width: std::num::NonZeroU32::new(2560).unwrap(), ..mode(None) }, offered), None);
     }
 }
+

@@ -11,7 +11,7 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_BINARY, RegGetValueW};
 use windows::core::{HSTRING, PCWSTR, w};
 
-use crate::display::Edid;
+use crate::display::{self, Edid};
 use crate::{log, settings};
 
 thread_local! {
@@ -34,24 +34,24 @@ pub fn apply(device: &str, path: &str) {
         return;
     };
     let edid = Edid::parse(&edid);
-    let Some(want) = modes.iter().find(|m| m.is_for(&edid)) else {
+    let Some(want) = modes.iter().find(|m| display::is_for(m, &edid)) else {
         log(&format!("display modes: none configured for {path} (model {:?}, serial {:?})", edid.model, edid.serial));
         return;
     };
     let device = HSTRING::from(device);
     let offered = (0..).map_while(|i| mode(&device, ENUM_DISPLAY_SETTINGS_MODE(i))).map(|m| (m.dmPelsWidth, m.dmPelsHeight, m.dmDisplayFrequency));
-    let Some(hz) = want.pick(offered) else {
+    let Some(hz) = display::pick(want, offered) else {
         log(&format!("display modes: {path} offers nothing at {}x{}", want.width, want.height));
         return;
     };
     let Some(mut current) = mode(&device, ENUM_CURRENT_SETTINGS) else { return };
     let now = (current.dmPelsWidth, current.dmPelsHeight, current.dmDisplayFrequency);
-    if now == (want.width, want.height, hz) {
+    if now == (want.width.get(), want.height.get(), hz) {
         return;
     }
     TRIED.with_borrow_mut(|t| t.insert(path.to_owned()));
-    current.dmPelsWidth = want.width;
-    current.dmPelsHeight = want.height;
+    current.dmPelsWidth = want.width.get();
+    current.dmPelsHeight = want.height.get();
     current.dmDisplayFrequency = hz;
     current.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
     // Per user, no admin needed, as the Settings app does it.

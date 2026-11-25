@@ -7,9 +7,7 @@ name = "defenestrate-shell"
 version = "0.1.0"
 dependencies = [
  "embed-manifest",
- "regex-lite",
- "serde",
- "serde_json",
+ "shell-config",
  "windows",
 ]
 
@@ -96,6 +94,15 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "shell-config"
+version = "0.1.0"
+dependencies = [
+ "regex-lite",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

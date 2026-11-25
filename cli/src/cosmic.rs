@@ -13,9 +13,13 @@
 //! which the shell reads at startup.
 
 use std::collections::BTreeMap;
-use std::fmt;
+use std::num::NonZeroU8;
 
 use serde::{Deserialize, Serialize};
+use shell_config::{
+    Action, ActivationPolicy, ActiveHint, DefaultApp, DisplayMode, FocusFollowsCursor, Gaps, Keys, Pattern, Settings as ShellSettings,
+    Shortcut, TileBehavior, TilingException,
+};
 
 #[derive(Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -60,26 +64,6 @@ fn enabled() -> bool {
     true
 }
 
-/// A regex the shell's regex-lite accepts, so a bad one fails the build
-/// rather than leaving the shell on its defaults.
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
-#[serde(try_from = "String", into = "String")]
-pub struct Pattern(String);
-
-impl TryFrom<String> for Pattern {
-    type Error = String;
-    fn try_from(s: String) -> Result<Self, String> {
-        regex_lite::Regex::new(&s).map_err(|e| format!("{s:?}: {e}"))?;
-        Ok(Pattern(s))
-    }
-}
-
-impl From<Pattern> for String {
-    fn from(p: Pattern) -> String {
-        p.0
-    }
-}
-
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Compositor {
@@ -94,26 +78,6 @@ pub struct Compositor {
     /// The pointer jumps to the middle of a window focused from the keyboard.
     pub cursor_follows_focus: bool,
     pub activation_policy: ActivationPolicy,
-}
-
-/// What Super+Y (ToggleTiling) toggles.
-#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TileBehavior {
-    /// Every workspace at once.
-    Global,
-    /// The one being shown; `autotile` only decides how new ones start.
-    PerWorkspace,
-}
-
-/// What a window raising itself gets (xdg-activation in COSMIC).
-#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ActivationPolicy {
-    /// Its workspace is switched to and it gets focus.
-    Focus,
-    /// Focus if it's on the workspace being shown, else it's marked urgent.
-    FocusIfActiveWorkspace,
-    /// Only ever marked urgent.
-    Urgent,
 }
 
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
@@ -175,7 +139,7 @@ impl TryFrom<BTreeMap<String, Action>> for Shortcuts {
         let mut out = BTreeMap::new();
         let mut spelled: BTreeMap<Keys, String> = BTreeMap::new();
         for (text, action) in raw {
-            let keys = Keys::parse(&text)?;
+            let keys = parse_keys(&text)?;
             // "Super+y" and "super+Y" are the same keys; two actions for them
             // would silently pick one.
             if let Some(first) = spelled.insert(keys, text.clone()) {
@@ -187,38 +151,24 @@ impl TryFrom<BTreeMap<String, Action>> for Shortcuts {
     }
 }
 
-/// Modifiers plus one key, which the shell matches as a Windows virtual-key
-/// code.
-#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Keys {
-    #[serde(rename = "super")]
-    pub logo: bool,
-    pub ctrl: bool,
-    pub alt: bool,
-    pub shift: bool,
-    pub vk: u8,
-}
-
-impl Keys {
-    /// COSMIC's spelling (cosmic-settings-config's Binding::from_str):
-    /// modifiers in any case, `+`-separated, one key named as its xkb keysym
-    /// or as the character itself.
-    pub fn parse(text: &str) -> Result<Keys, String> {
-        let mut keys = Keys { logo: false, ctrl: false, alt: false, shift: false, vk: 0 };
-        let mut key = None;
-        for token in text.split('+').map(str::trim) {
-            match token.to_ascii_lowercase().as_str() {
-                "super" => keys.logo = true,
-                "ctrl" => keys.ctrl = true,
-                "alt" => keys.alt = true,
-                "shift" => keys.shift = true,
-                _ if key.is_some() => return Err(format!("{text:?}: only one key besides the modifiers")),
-                _ => key = Some(vk(token).ok_or_else(|| format!("{text:?}: no key {token:?} (an xkb keysym name, e.g. space, Return, period, a, F1)"))?),
-            }
+/// COSMIC's spelling of keys (cosmic-settings-config's Binding::from_str):
+/// modifiers in any case, `+`-separated, one key named as its xkb keysym or
+/// as the character itself.
+pub fn parse_keys(text: &str) -> Result<Keys, String> {
+    let mut keys = Keys { logo: false, ctrl: false, alt: false, shift: false, vk: 0 };
+    let mut key = None;
+    for token in text.split('+').map(str::trim) {
+        match token.to_ascii_lowercase().as_str() {
+            "super" => keys.logo = true,
+            "ctrl" => keys.ctrl = true,
+            "alt" => keys.alt = true,
+            "shift" => keys.shift = true,
+            _ if key.is_some() => return Err(format!("{text:?}: only one key besides the modifiers")),
+            _ => key = Some(vk(token).ok_or_else(|| format!("{text:?}: no key {token:?} (an xkb keysym name, e.g. space, Return, period, a, F1)"))?),
         }
-        keys.vk = key.ok_or_else(|| format!("{text:?}: names no key besides the modifiers"))?;
-        Ok(keys)
     }
+    keys.vk = key.ok_or_else(|| format!("{text:?}: names no key besides the modifiers"))?;
+    Ok(keys)
 }
 
 /// The virtual-key code for an xkb keysym name. Letters, digits, F-keys and
@@ -276,153 +226,11 @@ fn vk(name: &str) -> Option<u8> {
     NAMED.iter().find(|(n, _)| *n == name).or_else(|| NAMED.iter().find(|(n, _)| n.eq_ignore_ascii_case(name))).map(|&(_, vk)| vk)
 }
 
-/// COSMIC's shortcut actions (cosmic-settings-config's `Action`), the ones
-/// the shell has.
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
-pub enum Action {
-    /// No binding: the keys go to Windows and the focused app.
-    Disable,
-    /// A command line, started in the user's home as Windows parses it
-    /// (CreateProcess), not split by a shell.
-    Spawn(CommandLine),
-    System(System),
-    Close,
-    Maximize,
-    ToggleTiling,
-    ToggleWindowFloating,
-    ToggleOrientation,
-    Focus(Direction),
-    Move(Direction),
-    Workspace(WorkspaceNumber),
-    /// The window goes there, and so do you (the shell has no SendTo*).
-    MoveToWorkspace(WorkspaceNumber),
-    NextWorkspace,
-    PreviousWorkspace,
-    MoveToNextWorkspace,
-    MoveToPreviousWorkspace,
-    /// Focus the monitor that way.
-    SwitchOutput(Direction),
-    MoveToOutput(Direction),
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum System {
-    AppLibrary,
-    HomeFolder,
-    Launcher,
-    LockScreen,
-    LogOut,
-    Terminal,
-    Mute,
-    VolumeLower,
-    VolumeRaise,
-    PlayPause,
-    PlayNext,
-    PlayPrev,
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Direction {
-    Left,
-    Right,
-    Up,
-    Down,
-}
-
-/// 1–9: the shell has nine workspaces.
-#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[serde(try_from = "u8")]
-pub struct WorkspaceNumber(u8);
-
-impl TryFrom<u8> for WorkspaceNumber {
-    type Error = String;
-    fn try_from(n: u8) -> Result<Self, String> {
-        if (1..=9).contains(&n) { Ok(Self(n)) } else { Err(format!("workspace {n}: the shell has workspaces 1 to 9")) }
-    }
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
-#[serde(try_from = "String")]
-pub struct CommandLine(String);
-
-impl TryFrom<String> for CommandLine {
-    type Error = String;
-    fn try_from(s: String) -> Result<Self, String> {
-        if s.trim().is_empty() || s.chars().any(char::is_control) {
-            Err(format!("{s:?} isn't a command line (non-empty, one line)"))
-        } else {
-            Ok(Self(s))
-        }
-    }
-}
-
-impl fmt::Display for Keys {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        for (on, name) in [(self.logo, "Super+"), (self.ctrl, "Ctrl+"), (self.alt, "Alt+"), (self.shift, "Shift+")] {
-            if on {
-                f.write_str(name)?;
-            }
-        }
-        write!(f, "vk {:#04x}", self.vk)
-    }
-}
-
-/// What the shell reads (shell/src/settings.rs), with the choices made: no
-/// flag that only means something next to another one.
-#[derive(Serialize, Debug, PartialEq)]
-pub struct ShellSettings {
-    pub autotile: bool,
-    pub autotile_behavior: TileBehavior,
-    pub focus_follows_cursor: Option<FocusFollowsCursor>,
-    pub cursor_follows_focus: bool,
-    pub activation_policy: ActivationPolicy,
-    pub gaps: Gaps,
-    pub active_hint: Option<ActiveHint>,
-    pub shortcuts: Vec<Shortcut>,
-    /// Only the enabled ones.
-    pub tiling_exceptions: Vec<ApplicationException>,
-    /// Not COSMIC's: the config's `displays`.
-    pub displays: Vec<crate::config::DisplayMode>,
-    pub dark: bool,
-    /// Not COSMIC's: the config's `autostart`.
-    pub autostart: Vec<String>,
-    /// Not COSMIC's: the config's `defaultApps`.
-    pub default_apps: Vec<DefaultApp>,
-}
-
-#[derive(Serialize, Debug, PartialEq)]
-pub struct DefaultApp {
-    pub id: String,
-    pub prog_id: String,
-}
-
-type DefaultApps = std::collections::BTreeMap<crate::config::AssocId, crate::config::ProgId>;
-
-#[derive(Serialize, Debug, PartialEq)]
-pub struct FocusFollowsCursor {
-    pub delay_ms: u64,
-}
-
-#[derive(Serialize, Debug, PartialEq)]
-pub struct Gaps {
-    pub outer: u16,
-    pub inner: u16,
-}
-
-#[derive(Serialize, Debug, PartialEq)]
-pub struct ActiveHint {
-    pub thickness: u8,
-    pub colour: [u8; 3],
-}
-
-#[derive(Serialize, Debug, PartialEq)]
-pub struct Shortcut {
-    pub keys: Keys,
-    pub action: Action,
-}
+type DefaultApps = BTreeMap<crate::config::AssocId, crate::config::ProgId>;
 
 impl Cosmic {
-    pub fn shell_settings(&self, displays: &[crate::config::DisplayMode], autostart: &[String], default_apps: &DefaultApps) -> ShellSettings {
+    /// What the shell reads (shell/config), with the choices made.
+    pub fn shell_settings(&self, displays: &[DisplayMode], autostart: &[String], default_apps: &DefaultApps) -> ShellSettings {
         let c = &self.compositor;
         let t = &self.theme;
         ShellSettings {
@@ -432,9 +240,15 @@ impl Cosmic {
             cursor_follows_focus: c.cursor_follows_focus,
             activation_policy: c.activation_policy,
             gaps: Gaps { outer: t.gaps.0, inner: t.gaps.1 },
-            active_hint: (c.active_hint && t.active_hint > 0).then_some(ActiveHint { thickness: t.active_hint, colour: t.accent.bytes() }),
+            active_hint: NonZeroU8::new(t.active_hint).filter(|_| c.active_hint).map(|thickness| ActiveHint { thickness, colour: t.accent.bytes() }),
             shortcuts: self.shortcuts.0.iter().map(|(&keys, action)| Shortcut { keys, action: action.clone() }).collect(),
-            tiling_exceptions: self.window_rules.tiling_exception_custom.iter().filter(|e| e.enabled).cloned().collect(),
+            tiling_exceptions: self
+                .window_rules
+                .tiling_exception_custom
+                .iter()
+                .filter(|e| e.enabled)
+                .map(|e| TilingException { appid: e.appid.clone(), title: e.title.clone() })
+                .collect(),
             displays: displays.to_vec(),
             dark: self.mode.is_dark,
             autostart: autostart.to_vec(),
@@ -442,7 +256,7 @@ impl Cosmic {
         }
     }
 
-    pub fn render(&self, displays: &[crate::config::DisplayMode], autostart: &[String], default_apps: &DefaultApps) -> String {
+    pub fn render(&self, displays: &[DisplayMode], autostart: &[String], default_apps: &DefaultApps) -> String {
         let mut json = serde_json::to_string_pretty(&self.shell_settings(displays, autostart, default_apps)).expect("plain data");
         json.push('\n');
         json
@@ -455,17 +269,17 @@ mod tests {
 
     #[test]
     fn keys_are_spelled_like_cosmic() {
-        let k = Keys::parse("Super+Shift+space").unwrap();
+        let k = parse_keys("Super+Shift+space").unwrap();
         assert_eq!(k, Keys { logo: true, ctrl: false, alt: false, shift: true, vk: 0x20 });
-        assert_eq!(Keys::parse("super+Y").unwrap(), Keys::parse("Super+y").unwrap());
-        assert_eq!(Keys::parse("Super+period").unwrap().vk, 0xBE);
-        assert_eq!(Keys::parse("Super+.").unwrap().vk, 0xBE);
-        assert_eq!(Keys::parse("Super+F1").unwrap().vk, 0x70);
-        assert_eq!(Keys::parse("Super+F24").unwrap().vk, 0x87);
-        assert_eq!(Keys::parse("Super+escape").unwrap().vk, 0x1B, "names fall back to any case");
-        assert_eq!(Keys::parse("Ctrl+Alt+Delete").unwrap().vk, 0x2E);
+        assert_eq!(parse_keys("super+Y").unwrap(), parse_keys("Super+y").unwrap());
+        assert_eq!(parse_keys("Super+period").unwrap().vk, 0xBE);
+        assert_eq!(parse_keys("Super+.").unwrap().vk, 0xBE);
+        assert_eq!(parse_keys("Super+F1").unwrap().vk, 0x70);
+        assert_eq!(parse_keys("Super+F24").unwrap().vk, 0x87);
+        assert_eq!(parse_keys("Super+escape").unwrap().vk, 0x1B, "names fall back to any case");
+        assert_eq!(parse_keys("Ctrl+Alt+Delete").unwrap().vk, 0x2E);
         for bad in ["Super", "Super+a+b", "Super+F25", "Super+Hyper", "Super+bracketleft", ""] {
-            assert!(Keys::parse(bad).is_err(), "{bad}");
+            assert!(parse_keys(bad).is_err(), "{bad}");
         }
     }
 
@@ -481,7 +295,7 @@ mod tests {
         "#;
         let s: Shortcuts = toml::from_str(toml).unwrap();
         assert_eq!(s.0.len(), 6);
-        assert_eq!(s.0[&Keys::parse("Super+t").unwrap()], Action::Spawn(CommandLine("wt.exe -p cmd".into())));
+        assert_eq!(s.0[&parse_keys("Super+t").unwrap()], Action::Spawn("wt.exe -p cmd".to_owned().try_into().unwrap()));
         let bad = [
             r#""Super+y" = "ZoomIn""#,
             r#""Super+y" = { Focus = "In" }"#,
@@ -541,7 +355,7 @@ mod tests {
         assert_eq!((s.active_hint, s.focus_follows_cursor), (None, None));
         assert!(!s.dark);
         c.compositor.active_hint = true;
-        assert_eq!(c.shell_settings(&[], &[], &DefaultApps::new()).active_hint, Some(ActiveHint { thickness: 3, colour: [99, 176, 227] }));
+        assert_eq!(c.shell_settings(&[], &[], &DefaultApps::new()).active_hint, Some(ActiveHint { thickness: NonZeroU8::new(3).unwrap(), colour: [99, 176, 227] }));
         c.theme.active_hint = 0;
         assert_eq!(c.shell_settings(&[], &[], &DefaultApps::new()).active_hint, None);
     }

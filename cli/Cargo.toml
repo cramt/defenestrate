@@ -17,12 +17,13 @@ clap = { version = "4", features = ["derive", "env"] }
 # by its build script (which the Nix sandbox would block).
 headless_chrome = { version = "1", default-features = false, features = ["offline"] }
 libc = "0.2"
-regex-lite = "0.1"
 roxmltree = "0.20"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_path_to_error = "0.1"
 sha1 = "0.10"
+# shell.json's format, which the shell reads with the same crate.
+shell-config = { path = "../shell/config" }
 sha2 = "0.10"
 tar = "0.4"
 toml = "0.8"

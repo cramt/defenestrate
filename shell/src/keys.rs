@@ -281,8 +281,7 @@ fn binding(key: VIRTUAL_KEY, m: Mods) -> Option<Binding> {
     }
 }
 
-/// What a configured shortcut does; None for Disable, or a workspace that
-/// doesn't exist (settings.rs refuses those).
+/// What a configured shortcut does; None for Disable.
 fn configured(action: &'static settings::Action) -> Option<Action> {
     use Command::*;
     use settings::Action as A;
@@ -292,11 +291,10 @@ fn configured(action: &'static settings::Action) -> Option<Action> {
         settings::Direction::Up => Direction::Up,
         settings::Direction::Down => Direction::Down,
     };
-    let ws = |n: u8| WorkspaceId::from_key(n.into());
     let wm = |c| Some(Action::Wm(c, hold()));
     match *action {
         A::Disable => None,
-        A::Spawn(ref line) => Some(Action::Spawn(line)),
+        A::Spawn(ref line) => Some(Action::Spawn(line.as_str())),
         A::System(s) => Some(match s {
             System::Launcher | System::AppLibrary => Action::Launcher,
             System::Terminal => Action::Terminal,
@@ -317,8 +315,8 @@ fn configured(action: &'static settings::Action) -> Option<Action> {
         A::ToggleOrientation => wm(ToggleOrientation),
         A::Focus(d) => wm(Focus(dir(d))),
         A::Move(d) => wm(Move(dir(d))),
-        A::Workspace(n) => wm(Switch(ws(n)?)),
-        A::MoveToWorkspace(n) => wm(MoveTo(ws(n)?)),
+        A::Workspace(n) => wm(Switch(n.into())),
+        A::MoveToWorkspace(n) => wm(MoveTo(n.into())),
         A::NextWorkspace => wm(SwitchStep(Step::Next)),
         A::PreviousWorkspace => wm(SwitchStep(Step::Previous)),
         A::MoveToNextWorkspace => wm(MoveStep(Step::Next)),

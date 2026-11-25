@@ -44,7 +44,7 @@ use crate::{captions, hint, preview};
 use crate::overlay::{self, Look};
 use crate::settings;
 use crate::tree::{Axis, Direction, Gaps, Point, Rect};
-use crate::wm::{Command, Effects, Grab, Hold, OutputId, Screens, Tiling, Wm};
+use crate::wm::{Command, Effects, Grab, Hold, OutputId, Screens, Tiling, Warp, Wm};
 use crate::{log, scaled_at};
 
 /// Posted to the shell's window for every WinEvent: wparam the event,
@@ -282,7 +282,7 @@ pub fn start(events_to: HWND) {
     };
     WM.set(Some(Wm::with_tiling(screens(&found), tiling)));
     if let Some(h) = config.active_hint
-        && let Err(e) = hint::create(h, scaled_at(h.thickness.into(), dpi))
+        && let Err(e) = hint::create(h, scaled_at(i32::from(h.thickness.get()), dpi))
     {
         log(&format!("creating the active hint failed: {e}"));
     }
@@ -775,11 +775,14 @@ fn apply(fx: Effects<HWND>) {
         if crossed {
             TimerId::Replace.set(250);
         }
-        let follow = fx.follow.and_then(|w| {
-            let tile = fx.place.iter().find(|&&(x, _)| x == w).map(|&(_, r)| r);
-            Some(tile.or_else(|| visible_frame(w).map(|(_, r)| r))?.centre())
+        let warp = fx.pointer.and_then(|warp| match warp {
+            Warp::To(p) => Some(p),
+            Warp::Follow(w) => {
+                let tile = fx.place.iter().find(|&&(x, _)| x == w).map(|&(_, r)| r);
+                Some(tile.or_else(|| visible_frame(w).map(|(_, r)| r))?.centre())
+            }
         });
-        if let Some(p) = fx.pointer.or(follow) {
+        if let Some(p) = warp {
             let _ = SetCursorPos(p.x, p.y);
             // Not the user pointing at something: focus mustn't follow it.
             let under = window_under(p);

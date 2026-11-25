@@ -460,37 +460,8 @@ pub enum RegValue {
     Delete,
 }
 
-/// One monitor's mode. The monitor is matched by the model name and serial
-/// in its EDID: the last two words of the name Linux compositors give it
-/// ("Philips Consumer Electronics Company 49M2C8900 AU42447000108").
-#[derive(Deserialize, serde::Serialize, Debug, Clone, PartialEq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct DisplayMode {
-    pub model: EdidText,
-    /// Only needed to tell apart two monitors of the same model.
-    pub serial: Option<EdidText>,
-    pub width: std::num::NonZeroU32,
-    pub height: std::num::NonZeroU32,
-    /// Hz; the nearest whole one the monitor offers, which is all Windows has.
-    pub refresh: Refresh,
-}
-
-#[derive(Deserialize, serde::Serialize, Debug, Clone, Copy, PartialEq)]
-#[serde(try_from = "f64", into = "f64")]
-pub struct Refresh(f64);
-
-impl TryFrom<f64> for Refresh {
-    type Error = String;
-    fn try_from(hz: f64) -> Result<Self, String> {
-        if hz.is_finite() && hz > 0.0 { Ok(Refresh(hz)) } else { Err(format!("{hz} isn't a refresh rate")) }
-    }
-}
-
-impl From<Refresh> for f64 {
-    fn from(r: Refresh) -> f64 {
-        r.0
-    }
-}
+/// One monitor's mode, as the shell reads it (shell/config).
+pub use shell_config::DisplayMode;
 
 macro_rules! checked_string {
     ($name:ident, $what:literal, $check:expr) => {
@@ -535,12 +506,6 @@ checked_string!(AppxName, "an AppX package name (the part before the first _)", 
 });
 // Kernel names (nvme0n1, sda) reorder between boots; by-id doesn't.
 checked_string!(ByIdPath, "a /dev/disk/by-id/ path", |s| { s.strip_prefix("/dev/disk/by-id/").is_some_and(|rest| !rest.is_empty() && !rest.contains('/')) });
-
-// An EDID text descriptor holds at most 13 bytes, and the shell compares
-// them trimmed of their padding.
-checked_string!(EdidText, "EDID text (1-13 printable ASCII characters, no padding)", |s| {
-    (1..=13).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_graphic() || b == b' ') && s.trim() == s
-});
 
 checked_string!(AppId, "a winget package ID", |s| {
     s.starts_with(|c: char| c.is_ascii_alphanumeric()) && s.bytes().all(|b| b.is_ascii_alphanumeric() || b".+_-".contains(&b))
@@ -808,7 +773,7 @@ mod tests {
     fn display_modes_are_checked_and_render_as_the_shell_reads_them() {
         let parse = |body: &str| toml::from_str::<DisplayMode>(body);
         let m = parse("model = \"49M2C8900\"\nwidth = 5120\nheight = 1440\nrefresh = 240.49").unwrap();
-        // shell/src/display.rs's DisplayMode, field for field.
+        // As shell.json has it.
         assert_eq!(
             serde_json::to_value(&m).unwrap(),
             serde_json::json!({ "model": "49M2C8900", "serial": null, "width": 5120, "height": 1440, "refresh": 240.49 })

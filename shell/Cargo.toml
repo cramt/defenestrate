@@ -4,11 +4,9 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 
-# shell.json, written by dfnstrate (cli/src/cosmic.rs).
 [dependencies]
-regex-lite = "0.1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# shell.json's format, which dfnstrate writes with the same crate.
+shell-config = { path = "config" }
 
 # One source, two binaries, so the copy that runs without uiAccess can't
 # drift from the one that has it: build.rs gives only the second the

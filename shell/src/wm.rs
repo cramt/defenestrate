@@ -29,10 +29,10 @@
 //! spot in the tree; here it splits the focused window like a new one.
 
 use crate::motion::{Pace, View};
-use crate::settings::{ActivationPolicy, TileBehavior};
+use crate::settings::{ActivationPolicy, TileBehavior, WorkspaceNumber};
 use crate::tree::{Axis, Direction, Gaps, Point, Rect, Tree};
 
-pub const WORKSPACES: usize = 9;
+pub use crate::settings::WORKSPACES;
 
 /// A workspace number that exists. Keys 1–9 map to 0–8.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,6 +41,13 @@ pub struct WorkspaceId(usize);
 impl WorkspaceId {
     pub fn from_key(n: u32) -> Option<Self> {
         (1..=WORKSPACES as u32).contains(&n).then(|| WorkspaceId(n as usize - 1))
+    }
+}
+
+/// shell.json's workspaces are checked as it's read.
+impl From<WorkspaceNumber> for WorkspaceId {
+    fn from(n: WorkspaceNumber) -> Self {
+        WorkspaceId(n.index())
     }
 }
 
@@ -129,11 +136,17 @@ pub struct Effects<W> {
     /// Floating windows going to another monitor: from that area to this
     /// one, keeping their place relative to it.
     pub carry: Vec<(W, Rect, Rect)>,
-    /// Where the pointer jumps to, as COSMIC's output moves move it.
-    pub pointer: Option<Point>,
-    /// cursor_follows_focus: the pointer jumps to the middle of this
-    /// window, wherever it ends up (a floating one's place isn't known here).
-    pub follow: Option<W>,
+    /// Where the pointer jumps to, if anywhere.
+    pub pointer: Option<Warp<W>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Warp<W> {
+    /// A point, as COSMIC's output moves move it.
+    To(Point),
+    /// cursor_follows_focus: the middle of this window, wherever it ends up
+    /// (a floating one's place isn't known here).
+    Follow(W),
 }
 
 impl<W> Default for Effects<W> {
@@ -149,7 +162,6 @@ impl<W> Default for Effects<W> {
             restore: Vec::new(),
             carry: Vec::new(),
             pointer: None,
-            follow: None,
         }
     }
 }
@@ -684,7 +696,7 @@ impl<W: Copy + Eq> Wm<W> {
     pub fn add_new(&mut self, w: W) -> Effects<W> {
         let fx = self.add(w);
         let follow = (self.tiling.cursor_follows_focus && fx.focus == Some(w)).then_some(w);
-        Effects { follow, ..fx }
+        Effects { pointer: fx.pointer.or(follow.map(Warp::Follow)), ..fx }
     }
 
     /// Managed `w`, on a workspace that isn't shown, showed itself or took
@@ -962,7 +974,7 @@ impl<W: Copy + Eq> Wm<W> {
         if focus.is_none() {
             self.keyboard = None;
         }
-        let pointer = Some(self.outputs[to].centre());
+        let pointer = Some(Warp::To(self.outputs[to].centre()));
         self.effects(before, Effects { focus, activated, pointer, ..Effects::default() })
     }
 
@@ -1026,7 +1038,7 @@ impl<W: Copy + Eq> Wm<W> {
             fx.hide.extend(again.hide);
             fx.place = again.place;
         }
-        fx.pointer = Some(self.outputs[to].centre());
+        fx.pointer = Some(Warp::To(self.outputs[to].centre()));
         fx
     }
 
@@ -1066,7 +1078,7 @@ impl<W: Copy + Eq> Wm<W> {
             Command::MoveTo(_) | Command::MoveStep(_) | Command::MoveToOutput(_) => now.filter(|_| now == focused),
             _ => None,
         };
-        Effects { follow, ..fx }
+        Effects { pointer: fx.pointer.or(follow.map(Warp::Follow)), ..fx }
     }
 
     fn run(&mut self, c: Command, hold: Hold) -> Effects<W> {
@@ -1655,7 +1667,7 @@ mod tests {
         let mut wm = dual();
         let fx = cmd(&mut wm, Command::Focus(Direction::Right));
         assert_eq!(fx.focus, Some(3));
-        assert_eq!(fx.pointer, Some(Point { x: 2240, y: 512 }));
+        assert_eq!(fx.pointer, Some(Warp::To(Point { x: 2240, y: 512 })));
         // COSMIC puts back the workspace A showed when focus left the tiling
         // (the same one), then activates the one B shows.
         assert_eq!(fx.activated, [(id("A"), 0), (id("B"), 0)]);
@@ -1672,7 +1684,7 @@ mod tests {
         cmd(&mut wm, Command::Move(Direction::Left));
         assert_eq!(wm.focused_window(), Some(3));
         let fx = cmd(&mut wm, Command::SwitchOutput(Direction::Right));
-        assert_eq!((fx.focus, fx.pointer), (None, Some(Point { x: 2240, y: 512 })));
+        assert_eq!((fx.focus, fx.pointer), (None, Some(Warp::To(Point { x: 2240, y: 512 }))));
         assert_eq!(cmd(&mut wm, Command::Move(Direction::Left)), Effects::default(), "no window has focus to move");
     }
 
@@ -1710,7 +1722,7 @@ mod tests {
         let mut wm = dual();
         let fx = cmd(&mut wm, Command::Move(Direction::Right));
         assert_eq!(fx.focus, Some(2));
-        assert_eq!(fx.pointer, Some(Point { x: 2240, y: 512 }));
+        assert_eq!(fx.pointer, Some(Warp::To(Point { x: 2240, y: 512 })));
         assert_eq!(rect(&fx, 2), Some(left_half(RIGHT_AREA)), "moving right it comes in on the left");
         assert_eq!(rect(&fx, 3), Some(right_half(RIGHT_AREA)));
         assert_eq!(rect(&fx, 1), Some(AREA));
@@ -2042,16 +2054,16 @@ mod tests {
         let on = Tiling { cursor_follows_focus: true, ..Tiling::default() };
         let mut wm = Wm::with_tiling(one(), on);
         wm.add(1);
-        assert_eq!(wm.add_new(2).follow, Some(2), "a new window");
-        assert_eq!(cmd(&mut wm, Command::Focus(Direction::Left)).follow, Some(1));
-        assert_eq!(cmd(&mut wm, Command::Focus(Direction::Left)).follow, None, "nothing that way");
-        assert_eq!(cmd(&mut wm, Command::Move(Direction::Right)).follow, None, "a move within the tiling");
+        assert_eq!(wm.add_new(2).pointer, Some(Warp::Follow(2)), "a new window");
+        assert_eq!(cmd(&mut wm, Command::Focus(Direction::Left)).pointer, Some(Warp::Follow(1)));
+        assert_eq!(cmd(&mut wm, Command::Focus(Direction::Left)).pointer, None, "nothing that way");
+        assert_eq!(cmd(&mut wm, Command::Move(Direction::Right)).pointer, None, "a move within the tiling");
         let fx = cmd(&mut wm, Command::MoveTo(ws(3)));
-        assert_eq!(fx.follow, Some(1), "taken to another workspace");
-        assert_eq!(cmd(&mut wm, Command::Switch(ws(1))).follow, None);
+        assert_eq!(fx.pointer, Some(Warp::Follow(1)), "taken to another workspace");
+        assert_eq!(cmd(&mut wm, Command::Switch(ws(1))).pointer, None);
         let mut off = wm_with(2);
-        assert_eq!(cmd(&mut off, Command::Focus(Direction::Left)).follow, None, "off by default");
-        assert_eq!(off.add_new(3).follow, None);
+        assert_eq!(cmd(&mut off, Command::Focus(Direction::Left)).pointer, None, "off by default");
+        assert_eq!(off.add_new(3).pointer, None);
     }
 
     #[test]
