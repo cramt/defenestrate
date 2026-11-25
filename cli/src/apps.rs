@@ -14,8 +14,9 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::config::{AppId, Config};
-use crate::render::{IfMissing, InstallFile, ReadAt, SETUP_DIR};
+use crate::render::{IfMissing, InstallFile, Payload, ReadAt, SETUP_DIR};
 use crate::tasks::{self, AsUser, Logon, RunLevel, Task, Trigger};
+use crate::unattend::FirstLogon;
 
 pub const TASK: &str = "defenestrate-apps";
 
@@ -35,9 +36,9 @@ fn plan(config: &Config) -> Plan<'_> {
     Plan { apps: &config.apps, windows_update_display_drivers: config.gpu.windows_update }
 }
 
-pub fn render(config: &Config, dir: &Path) -> Result<Vec<InstallFile>> {
+pub fn render(config: &Config, dir: &Path) -> Result<Payload> {
     if !needed(config) {
-        return Ok(Vec::new());
+        return Ok(Payload::default());
     }
     let out = dir.join("apps");
     std::fs::create_dir_all(&out)?;
@@ -82,7 +83,8 @@ pub fn render(config: &Config, dir: &Path) -> Result<Vec<InstallFile>> {
     // Since the script registers it, it needs nothing but to exist, so
     // `update` can create it on an install from before it was added.
     files.last_mut().expect("just written").if_missing = IfMissing::CreateLike(script);
-    Ok(files)
+    let first_logon = vec![FirstLogon::register_task(TASK, &on_c.join("task.xml"), "Install the apps at the next logon")];
+    Ok(Payload { files, first_logon })
 }
 
 #[cfg(test)]

@@ -27,21 +27,16 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::config::{Config, LinuxBootEntry};
-use crate::render::{IfMissing, InstallFile, ReadAt, SETUP_DIR};
+use crate::render::{IfMissing, InstallFile, Payload, ReadAt, SETUP_DIR};
 use crate::tasks::{self, AsUser, Logon, RunLevel, Task, Trigger};
+use crate::unattend::FirstLogon;
 
 pub const TASK: &str = "defenestrate-reboot-to-linux";
 pub const LINUX_FIRST_TASK: &str = "defenestrate-linux-first";
 
-/// Whether there's anything to register at first logon: both tasks or
-/// neither.
-pub fn enabled(config: &Config) -> bool {
-    config.linux_boot_entry != LinuxBootEntry::None
-}
-
-pub fn render(config: &Config, dir: &Path) -> Result<Vec<InstallFile>> {
+pub fn render(config: &Config, dir: &Path) -> Result<Payload> {
     let description = match &config.linux_boot_entry {
-        LinuxBootEntry::None => return Ok(Vec::new()),
+        LinuxBootEntry::None => return Ok(Payload::default()),
         LinuxBootEntry::Auto => None,
         LinuxBootEntry::Description(d) => Some(d.as_str()),
     };
@@ -93,5 +88,9 @@ pub fn render(config: &Config, dir: &Path) -> Result<Vec<InstallFile>> {
     let entry = on_c.join("linux-entry.ps1");
     let entry = files.iter_mut().find(|f| f.dest == entry).expect("written above");
     entry.if_missing = IfMissing::CreateLike(on_c.join("reboot-to-linux.ps1"));
-    Ok(files)
+    let first_logon = vec![
+        FirstLogon::powershell(&on_c.join("register.ps1"), &format!("-Task {TASK}"), "Register Reboot to Linux"),
+        FirstLogon::register_task(LINUX_FIRST_TASK, &on_c.join("linux-first.xml"), "Keep Linux first in the boot order"),
+    ];
+    Ok(Payload { files, first_logon })
 }

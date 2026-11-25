@@ -11,7 +11,7 @@ use crate::cache::Cache;
 use crate::cert::ShellCert;
 use crate::config::{Config, Hive, RegValue, Shell};
 use crate::registry::{self, Root};
-use crate::unattend::{self, Variant};
+use crate::unattend::{self, FirstLogon, Variant};
 use crate::wsl;
 
 /// The builtin shell's two files under C:\Program Files\defenestrate: the
@@ -24,21 +24,41 @@ const SHELL_DIR: CPath = CPath::new("Program Files/defenestrate");
 /// change them.
 pub const SHELL_SETTINGS: &str = "shell.json";
 
-/// One .reg file: its name (without .reg) and the hive its keys are in.
+/// One .reg file: its name (without .reg), the hive its keys are in, and
+/// where they come from.
 pub struct RegFile {
     pub name: &'static str,
     pub root: Root,
+    keys: RegKeys,
+}
+
+enum RegKeys {
+    /// The config's registry.software, plus what the build needs there.
+    Software,
+    System,
+    DefaultUser,
+    /// The Shell value alone.
+    Shell,
 }
 
 pub const REG_FILES: [RegFile; 4] = [
-    RegFile { name: "software", root: Root::Software },
-    RegFile { name: "system", root: Root::System },
-    RegFile { name: "defaultUser", root: Root::DefaultUser },
+    RegFile { name: "software", root: Root::Software, keys: RegKeys::Software },
+    RegFile { name: "system", root: Root::System, keys: RegKeys::System },
+    RegFile { name: "defaultUser", root: Root::DefaultUser, keys: RegKeys::DefaultUser },
     // Applied by FirstLogonCommands instead of specialize: OOBE runs its own
     // session as defaultuser0, and that session needs explorer. With the
     // shell switched at specialize, OOBE died with "Why did my PC restart?".
-    RegFile { name: "shell", root: Root::Software },
+    RegFile { name: "shell", root: Root::Software, keys: RegKeys::Shell },
 ];
+
+/// What one part of the payload (wsl, apps, reboot) puts on C:, and what
+/// first logon runs to set it up. Both come from the same decision, so a
+/// part that's off has neither.
+#[derive(Default)]
+pub struct Payload {
+    pub files: Vec<InstallFile>,
+    pub first_logon: Vec<FirstLogon>,
+}
 
 /// Where setup finds our registry files and scripts.
 pub const SETUP_DIR: CPath = CPath::new("Windows/Setup/defenestrate");
@@ -234,11 +254,11 @@ pub fn render(config: &Config, variant: &Variant, cache: &Cache, work: &Path, di
     set(&mut shell, "Microsoft\\Windows NT\\CurrentVersion\\Winlogon", "Shell", RegValue::Sz(shell_command));
 
     for f in &REG_FILES {
-        let keys = match f.name {
-            "software" => &software,
-            "system" => &config.registry.system,
-            "defaultUser" => &config.registry.default_user,
-            _ => &shell,
+        let keys = match f.keys {
+            RegKeys::Software => &software,
+            RegKeys::System => &config.registry.system,
+            RegKeys::DefaultUser => &config.registry.default_user,
+            RegKeys::Shell => &shell,
         };
         let text = registry::render(f.root, keys);
         std::fs::write(dir.join(format!("reg/ascii/{}.reg", f.name)), &text)?;
@@ -258,10 +278,12 @@ pub fn render(config: &Config, variant: &Variant, cache: &Cache, work: &Path, di
         files.push(InstallFile::new(SETUP_DIR.join(name), dir.join(name), ReadAt::Setup));
     }
 
-    files.extend(wsl::render(config, cache, work, dir)?);
-    files.extend(crate::apps::render(config, dir)?);
-    files.extend(crate::reboot_to_linux::render(config, dir)?);
-    std::fs::write(dir.join("autounattend.xml"), unattend::render(config, variant)?)?;
+    let mut first_logon = Vec::new();
+    for part in [wsl::render(config, cache, work, dir)?, crate::apps::render(config, dir)?, crate::reboot_to_linux::render(config, dir)?] {
+        files.extend(part.files);
+        first_logon.extend(part.first_logon);
+    }
+    std::fs::write(dir.join("autounattend.xml"), unattend::render(config, variant, &first_logon)?)?;
 
     Ok(Rendered { dir: dir.to_path_buf(), files, shell_cert })
 }

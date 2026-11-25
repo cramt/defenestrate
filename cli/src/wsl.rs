@@ -16,14 +16,15 @@ use anyhow::Result;
 
 use crate::cache::Cache;
 use crate::config::{Config, Linux};
-use crate::render::{InstallFile, ReadAt, SETUP_DIR};
+use crate::render::{InstallFile, Payload, ReadAt, SETUP_DIR};
 use crate::tasks::{self, AsUser, Logon, RunLevel, Task, Trigger};
+use crate::unattend::FirstLogon;
 
 pub const TASK: &str = "defenestrate-wsl";
 
 /// Writes the payload to `dir`/wsl, except the MSI, which stays in the
 /// cache (it's 370 MB).
-pub fn render(config: &Config, cache: &Cache, work: &Path, dir: &Path) -> Result<Vec<InstallFile>> {
+pub fn render(config: &Config, cache: &Cache, work: &Path, dir: &Path) -> Result<Payload> {
     let wsl = &config.wsl;
     let out = dir.join("wsl");
     std::fs::create_dir_all(&out)?;
@@ -36,7 +37,8 @@ pub fn render(config: &Config, cache: &Cache, work: &Path, dir: &Path) -> Result
         Ok(())
     };
     write("wsl-install.cmd", crate::render::crlf(include_str!("../assets/wsl-install.cmd")).as_bytes(), ReadAt::Setup)?;
-    let Some(linux) = &wsl.linux else { return Ok(files) };
+    let first_logon = vec![FirstLogon::run(&on_c.join("wsl-install.cmd"), "Install WSL")];
+    let Some(linux) = &wsl.linux else { return Ok(Payload { files, first_logon }) };
 
     let busybox = std::fs::read(cache.materialize(&wsl.busybox, work)?.path)?;
     write("rootfs.tar", &rootfs(&busybox, linux)?, ReadAt::EveryLogon)?;
@@ -69,7 +71,7 @@ pub fn render(config: &Config, cache: &Cache, work: &Path, dir: &Path) -> Result
         ReadAt::Setup,
     )?;
     drop(write);
-    Ok(files)
+    Ok(Payload { files, first_logon })
 }
 
 const APPLETS: &[&str] = &[

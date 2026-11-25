@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 
 use crate::config::{Config, SetupDisk};
 use crate::gpt::ImagePart;
+use crate::render::{CPath, SETUP_DIR};
 use crate::tasks::{self, Window};
 
 impl Variant {
@@ -37,9 +38,37 @@ pub struct Variant {
     pub boot_prompt: bool,
 }
 
-pub fn render(config: &Config, v: &Variant) -> Result<String> {
+/// One of first logon's commands, which runs through cmd.exe with its
+/// output added to firstlogon.log.
+pub struct FirstLogon {
+    command: String,
+    description: &'static str,
+}
+
+impl FirstLogon {
+    pub fn run(script: &CPath, description: &'static str) -> Self {
+        Self { command: on_c(script), description }
+    }
+
+    pub fn powershell(script: &CPath, args: &str, description: &'static str) -> Self {
+        let (powershell, arguments) = tasks::powershell(&on_c(script), Window::Console);
+        Self { command: format!("{powershell} {arguments} {args}"), description }
+    }
+
+    pub fn register_task(name: &str, xml: &CPath, description: &'static str) -> Self {
+        Self { command: format!("schtasks /create /tn {name} /xml {}", on_c(xml)), description }
+    }
+}
+
+/// How the answer file names our files.
+fn on_c(path: &CPath) -> String {
+    path.system_root().expect("all of first logon's files are under C:\\Windows")
+}
+
+/// `first_logon` runs after the shell switch, in order.
+pub fn render(config: &Config, v: &Variant, first_logon: &[FirstLogon]) -> Result<String> {
     let x = escape;
-    let setup = crate::render::SETUP_DIR.system_root().expect("under C:\\Windows");
+    let setup = on_c(&SETUP_DIR);
     let component = |name: &str, body: String| {
         format!(
             "<component name=\"{name}\" processorArchitecture=\"amd64\" publicKeyToken=\"31bf3856ad364e35\" language=\"neutral\" versionScope=\"nonSxS\">\n{body}</component>\n"
@@ -128,34 +157,14 @@ pub fn render(config: &Config, v: &Variant) -> Result<String> {
         String::new()
     };
 
-    let mut commands = vec![
-        (format!("cmd.exe /c \"reg import {setup}\\shell.reg > {setup}\\firstlogon.log 2>&1\""), "Replace explorer.exe as the shell"),
-        (format!("cmd.exe /c \"{setup}\\wsl\\wsl-install.cmd >> {setup}\\firstlogon.log 2>&1\""), "Install WSL"),
-    ];
-    if crate::apps::needed(config) {
-        commands.push((
-            format!("cmd.exe /c \"schtasks /create /tn {} /xml {setup}\\apps\\task.xml >> {setup}\\firstlogon.log 2>&1\"", crate::apps::TASK),
-            "Install the apps at the next logon",
-        ));
-    }
-    if crate::reboot_to_linux::enabled(config) {
-        commands.push((
-            {
-                let (powershell, args) = tasks::powershell(&format!("{setup}\\reboot\\register.ps1"), Window::Console);
-                format!("cmd.exe /c \"{powershell} {args} -Task {} >> {setup}\\firstlogon.log 2>&1\"", crate::reboot_to_linux::TASK)
-            },
-            "Register Reboot to Linux",
-        ));
-        commands.push((
-            format!("cmd.exe /c \"schtasks /create /tn {} /xml {setup}\\reboot\\linux-first.xml >> {setup}\\firstlogon.log 2>&1\"", crate::reboot_to_linux::LINUX_FIRST_TASK),
-            "Keep Linux first in the boot order",
-        ));
-    }
+    let log = on_c(&SETUP_DIR.join("firstlogon.log"));
+    let mut commands = vec![(format!("cmd.exe /c \"reg import {} > {log} 2>&1\"", on_c(&SETUP_DIR.join("shell.reg"))), "Replace explorer.exe as the shell")];
+    commands.extend(first_logon.iter().map(|c| (format!("cmd.exe /c \"{} >> {log} 2>&1\"", c.command), c.description)));
     commands.push(match v.first_logon_end {
         FirstLogonEnd::Reboot => ("shutdown.exe /r /t 0".into(), "Log in again under the new shell"),
         FirstLogonEnd::Poweroff => ("shutdown.exe /s /t 0".into(), "Done; the next logon gets the new shell"),
     });
-    let first_logon: String = commands
+    let first_logon_xml: String = commands
         .iter()
         .enumerate()
         .map(|(i, (cmd, desc))| {
@@ -175,7 +184,7 @@ pub fn render(config: &Config, v: &Variant) -> Result<String> {
                 r#"{auto_logon}<!-- Runs elevated in the first real user session, after OOBE is done.
      That session still gets explorer; the reboot makes the next one ours. -->
 <FirstLogonCommands>
-{first_logon}</FirstLogonCommands>
+{first_logon_xml}</FirstLogonCommands>
 <OOBE>
 <HideEULAPage>true</HideEULAPage>
 <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
