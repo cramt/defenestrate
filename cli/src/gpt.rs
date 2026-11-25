@@ -46,9 +46,19 @@ impl ImagePart {
     }
 }
 
-/// A GUID, held in the textual (big-endian) byte order.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// A GUID, held in the textual (big-endian) byte order. From a config it's
+/// a string, either case: Windows prints GUIDs in uppercase, lsblk in
+/// lowercase.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Deserialize)]
+#[serde(try_from = "String")]
 pub struct Guid([u8; 16]);
+
+impl TryFrom<String> for Guid {
+    type Error = String;
+    fn try_from(s: String) -> Result<Self, String> {
+        Guid::parse(&s).ok_or_else(|| format!("{s:?} isn't a GUID (8-4-4-4-12 hex digits)"))
+    }
+}
 
 impl Guid {
     const fn parse_const(s: &str) -> Guid {

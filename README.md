@@ -907,7 +907,8 @@ under `registry.defaultUser`).
 2. wimlib exports the one edition we want from `install.wim`.
 3. Each hive's `.reg` file is merged into a scratch copy of that hive with
    hivex. This is only a check: a malformed `.reg` fails the build instead
-   of a VM install.
+   of a VM install. `timeZone` and `language` are checked against the
+   image's time zones and languages the same way.
 4. The `.reg` files and `specialize.cmd` are added to the image under
    `C:\Windows\Setup\defenestrate`, and the shell under
    `C:\Program Files\defenestrate`. During the specialize pass, Windows runs

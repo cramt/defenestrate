@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 
-use crate::config::{Config, Disk};
+use crate::config::{Config, SetupDisk};
 use crate::gpt::ImagePart;
 use crate::tasks::{self, Window};
 
@@ -18,7 +18,7 @@ impl Variant {
     /// disks). The prompt goes because the disk is first in the VM's boot
     /// order, so the CD only boots while the disk is blank.
     pub fn for_image() -> Self {
-        Self { disk: Disk::Wipe { disk_id: 0 }, first_logon_end: FirstLogonEnd::Poweroff, boot_prompt: false }
+        Self { disk: SetupDisk::Wipe { disk_id: 0 }, first_logon_end: FirstLogonEnd::Poweroff, boot_prompt: false }
     }
 }
 
@@ -32,7 +32,7 @@ pub enum FirstLogonEnd {
 }
 
 pub struct Variant {
-    pub disk: Disk,
+    pub disk: SetupDisk,
     pub first_logon_end: FirstLogonEnd,
     pub boot_prompt: bool,
 }
@@ -47,15 +47,15 @@ pub fn render(config: &Config, v: &Variant) -> Result<String> {
     };
     let locales = format!(
         "<InputLocale>{}</InputLocale>\n<SystemLocale>{lang}</SystemLocale>\n<UILanguage>{lang}</UILanguage>\n<UserLocale>{lang}</UserLocale>\n",
-        x(&config.input_locale),
-        lang = x(&config.language),
+        x(config.input_locale.as_str()),
+        lang = x(config.language.as_str()),
     );
     let password = format!("<Password>\n<Value>{}</Value>\n<PlainText>true</PlainText>\n</Password>\n", x(&config.user.password));
 
     // Setup creates partitions in Order, so Order is the partition number.
     let (disk_configuration, install_to) = match v.disk {
-        Disk::Interactive => (String::new(), String::new()),
-        Disk::Wipe { disk_id } => {
+        SetupDisk::Interactive => (String::new(), String::new()),
+        SetupDisk::Wipe { disk_id } => {
             let (mut create, mut modify) = (String::new(), String::new());
             for part in ImagePart::ALL {
                 let n = part.number();
@@ -81,7 +81,7 @@ pub fn render(config: &Config, v: &Variant) -> Result<String> {
 
     let windows_pe = component(
         "Microsoft-Windows-International-Core-WinPE",
-        format!("<SetupUILanguage><UILanguage>{}</UILanguage></SetupUILanguage>\n{locales}", x(&config.language)),
+        format!("<SetupUILanguage><UILanguage>{}</UILanguage></SetupUILanguage>\n{locales}", x(config.language.as_str())),
     ) + &component(
         "Microsoft-Windows-Setup",
         format!(
@@ -110,7 +110,7 @@ pub fn render(config: &Config, v: &Variant) -> Result<String> {
 
     let specialize = component(
         "Microsoft-Windows-Shell-Setup",
-        format!("<ComputerName>{}</ComputerName>\n<TimeZone>{}</TimeZone>\n", x(config.computer_name.as_str()), x(&config.time_zone)),
+        format!("<ComputerName>{}</ComputerName>\n<TimeZone>{}</TimeZone>\n", x(config.computer_name.as_str()), x(config.time_zone.as_str())),
     ) + &component(
         "Microsoft-Windows-Deployment",
         format!(

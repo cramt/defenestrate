@@ -18,20 +18,22 @@ pub struct Config {
     pub iso: IsoPin,
     #[serde(default)]
     pub edition: Edition,
-    /// Setup and OS UI language. Must be one the source ISO ships.
+    /// Setup and OS UI language. Must be one the source ISO ships, which
+    /// `build iso` checks.
     #[serde(default = "defaults::language")]
-    pub language: String,
+    pub language: Language,
     /// Keyboard layout(s), e.g. 0406:00000406 for Danish.
     #[serde(default = "defaults::input_locale")]
-    pub input_locale: String,
-    /// Windows time zone ID (tzutil /l), not an IANA name.
+    pub input_locale: InputLocale,
+    /// Windows time zone ID (tzutil /l), not an IANA name. Must be one the
+    /// image knows, which `build iso` checks.
     #[serde(default = "defaults::time_zone")]
-    pub time_zone: String,
+    pub time_zone: TimeZone,
     #[serde(default = "defaults::computer_name")]
     pub computer_name: WindowsName,
     pub user: User,
     #[serde(default)]
-    pub disk: Disk,
+    pub disk: SetupDisk,
     /// Whole disk `flash` erases when given none. Ignored by the ISO, which
     /// goes by `disk`.
     pub install_target: Option<ByIdPath>,
@@ -140,7 +142,7 @@ pub struct Linux {
     pub user: LinuxName,
     /// GPT disk GUIDs (`lsblk -dno PTUUID /dev/…`) of the disks the install
     /// is on. Windows and Linux both name a disk by this.
-    pub disks: Vec<Guid>,
+    pub disks: Vec<crate::gpt::Guid>,
     /// Mounted in order; the first must be "/".
     pub mounts: Vec<Mount>,
     /// Copied from the install into the Windows user's profile at every
@@ -196,15 +198,15 @@ impl fmt::Display for Device {
 }
 
 mod defaults {
-    use super::WindowsName;
-    pub fn language() -> String {
-        "en-US".into()
+    use super::{InputLocale, Language, TimeZone, WindowsName};
+    pub fn language() -> Language {
+        Language("en-US".into())
     }
-    pub fn input_locale() -> String {
-        "0409:00000409".into()
+    pub fn input_locale() -> InputLocale {
+        InputLocale("0409:00000409".into())
     }
-    pub fn time_zone() -> String {
-        "UTC".into()
+    pub fn time_zone() -> TimeZone {
+        TimeZone("UTC".into())
     }
     pub fn computer_name() -> WindowsName {
         WindowsName("defenestrated".into())
@@ -226,19 +228,28 @@ pub struct IsoPin {
 }
 
 #[derive(Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(try_from = "String")]
 pub enum Edition {
-    #[serde(rename = "Windows 11 Home")]
     Home,
     #[default]
-    #[serde(rename = "Windows 11 Pro")]
     Pro,
-    #[serde(rename = "Windows 11 Education")]
     Education,
-    #[serde(rename = "Windows 11 Pro for Workstations")]
     ProForWorkstations,
 }
 
+impl TryFrom<String> for Edition {
+    type Error = String;
+    fn try_from(s: String) -> Result<Self, String> {
+        Self::ALL.into_iter().find(|e| e.name() == s).ok_or_else(|| {
+            let names: Vec<String> = Self::ALL.iter().map(|e| format!("{:?}", e.name())).collect();
+            format!("{s:?} isn't one of {}", names.join(", "))
+        })
+    }
+}
+
 impl Edition {
+    const ALL: [Edition; 4] = [Self::Home, Self::Pro, Self::Education, Self::ProForWorkstations];
+
     /// What wimlib and the WIM's metadata call it.
     pub fn name(self) -> &'static str {
         match self {
@@ -274,9 +285,10 @@ pub struct User {
     pub auto_logon: bool,
 }
 
+/// Which disk setup installs to. Not disk::Disk, a disk on this machine.
 #[derive(Deserialize, Debug, Clone, Copy, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub enum Disk {
+pub enum SetupDisk {
     /// Setup shows its disk picker.
     #[default]
     Interactive,
@@ -298,45 +310,61 @@ pub enum Shell {
     Exe(FileSource),
 }
 
-/// A file the build needs. Fetched ones are checked against their hash and
-/// cached by it, which is also how Nix hands them over: it fills the cache
-/// from fixed-output derivations. Tracked ones are whatever's newest when
-/// dfnstrate runs, which Nix can't do: `dfnstrate pins` turns them
-/// into Fetched ones.
+/// A file the build needs, or with `member` the file of that path inside
+/// it (a .tar.xz).
 #[derive(Deserialize, Debug, Clone)]
-#[serde(untagged)]
-pub enum FileSource {
-    Fetched(Fetched),
-    Tracked(Tracked),
-    Local(Local),
-}
-
-#[derive(Deserialize, Debug, Clone)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Fetched {
-    pub url: String,
-    pub hash: Sri,
-    /// Path of the file wanted inside a .tar.xz.
-    pub member: Option<String>,
-    /// What `dfnstrate pins` moves this pin along with. The build ignores
-    /// it (a pin is a pin) but parses it, so a malformed one fails there
-    /// too rather than only when pins runs, which reads the file itself.
-    #[allow(dead_code)]
-    pub track: Option<Track>,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Tracked {
-    pub track: Track,
+#[serde(try_from = "RawFileSource")]
+pub struct FileSource {
+    pub origin: Origin,
     pub member: Option<String>,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+/// Fetched ones are checked against their hash and cached by it, which is
+/// also how Nix hands them over: it fills the cache from fixed-output
+/// derivations. Tracked ones are whatever's newest when dfnstrate runs,
+/// which Nix can't do: `dfnstrate pins` turns them into Fetched ones.
+#[derive(Debug, Clone)]
+pub enum Origin {
+    Fetched {
+        url: String,
+        hash: Sri,
+        /// What `dfnstrate pins` moves this pin along with. The build
+        /// ignores it (a pin is a pin) but parses it, so a malformed one
+        /// fails there too rather than only when pins runs, which reads the
+        /// file itself.
+        #[allow(dead_code)]
+        track: Option<Track>,
+    },
+    Tracked(Track),
+    Local(PathBuf),
+}
+
+/// Every key a file source may have, so a wrong combination gets an error
+/// that says which, rather than serde's "did not match any variant".
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Local {
-    pub path: PathBuf,
-    pub member: Option<String>,
+struct RawFileSource {
+    url: Option<String>,
+    hash: Option<Sri>,
+    track: Option<Track>,
+    path: Option<PathBuf>,
+    member: Option<String>,
+}
+
+impl TryFrom<RawFileSource> for FileSource {
+    type Error = &'static str;
+    fn try_from(r: RawFileSource) -> Result<Self, Self::Error> {
+        let origin = match (r.url, r.hash, r.track, r.path) {
+            (Some(url), Some(hash), track, None) => Origin::Fetched { url, hash, track },
+            (None, None, Some(track), None) => Origin::Tracked(track),
+            (None, None, None, Some(path)) => Origin::Local(path),
+            (Some(_), None, _, None) => return Err("a url needs its hash (`dfnstrate pins` finds it)"),
+            (None, Some(_), _, None) => return Err("a hash without the url it's of"),
+            (_, _, _, Some(_)) => return Err("a path is a local file: no url, hash or track with it"),
+            (None, None, None, None) => return Err("a file is a url and hash, a track, or a path"),
+        };
+        Ok(Self { origin, member: r.member })
+    }
 }
 
 /// Where the newest version of a download is found.
@@ -363,16 +391,6 @@ impl fmt::Display for Track {
             Self::Github { github, asset } => write!(f, "github {github} {asset}"),
             Self::Catalog { catalog } => write!(f, "catalog {catalog}"),
             Self::Update { update } => write!(f, "update {update}"),
-        }
-    }
-}
-
-impl FileSource {
-    pub fn member(&self) -> Option<&str> {
-        match self {
-            Self::Fetched(f) => f.member.as_deref(),
-            Self::Tracked(t) => t.member.as_deref(),
-            Self::Local(l) => l.member.as_deref(),
         }
     }
 }
@@ -537,11 +555,28 @@ checked_string!(LinuxName, "a Linux user name", |s| {
         && s.starts_with(|c: char| c.is_ascii_lowercase() || c == '_')
         && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"-_".contains(&b))
 });
-// Lowercase: Windows prints GUIDs in uppercase, lsblk in lowercase, and the
-// logon script compares them case-insensitively anyway.
-checked_string!(Guid, "a GUID (8-4-4-4-12 hex digits)", |s| {
-    let parts: Vec<&str> = s.split('-').collect();
-    parts.iter().map(|p| p.len()).eq([8, 4, 4, 4, 12]) && parts.iter().all(|p| p.bytes().all(|b| b.is_ascii_hexdigit()))
+// What unattend's <UILanguage> takes: a BCP-47 tag like en-US or
+// sr-Latn-RS. Whether the ISO has it, only the ISO can say (iso.rs).
+checked_string!(Language, "a language tag like en-US", |s| {
+    let mut parts = s.split('-');
+    parts.next().is_some_and(|p| (2..=3).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_alphabetic()))
+        && s.contains('-')
+        && parts.all(|p| (1..=8).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_alphanumeric()))
+});
+// Up to five, ;-separated, each language:layout in hex (0406:00000406), or
+// an IME's language:{profile GUID}{TIP GUID}.
+checked_string!(InputLocale, "keyboard layouts like 0406:00000406, separated by ;", |s| {
+    let hex = |p: &str, n: usize| p.len() == n && p.bytes().all(|b| b.is_ascii_hexdigit());
+    let guid = |p: &str| p.strip_prefix('{').and_then(|p| p.strip_suffix('}')).and_then(crate::gpt::Guid::parse).is_some();
+    let ime = |p: &str| p.len() == 76 && p.find("}{").is_some_and(|i| guid(&p[..=i]) && guid(&p[i + 1..]));
+    let one = |l: &str| l.split_once(':').is_some_and(|(lang, layout)| hex(lang, 4) && (hex(layout, 8) || ime(layout)));
+    (1..=5).contains(&s.split(';').count()) && s.split(';').all(one)
+});
+// Windows' IDs are names like "W. Europe Standard Time" and never have a /;
+// an IANA name (Europe/Copenhagen) almost always does. The image lists the
+// real ones, which iso.rs checks against.
+checked_string!(TimeZone, "a Windows time zone ID (tzutil /l), like \"W. Europe Standard Time\", not an IANA name like Europe/Copenhagen", |s| {
+    (1..=128).contains(&s.len()) && s.trim() == s && !s.contains(['/', '\\']) && !s.chars().any(char::is_control) && s.is_ascii()
 });
 // Absolute and plain, since it goes into a shell script.
 checked_string!(AbsPath, "an absolute path of plain components", |s| {
@@ -859,6 +894,57 @@ mod tests {
         );
         assert!(parse("linuxBootEntry = { description = \"\" }").is_err());
         assert!(parse("linuxBootEntry = \"Linux Boot Manager\"").is_err());
+    }
+
+    #[test]
+    fn file_sources_say_what_is_wrong() {
+        let parse = |s: &str| toml::from_str::<FileSource>(s).map_err(|e| e.to_string());
+        let hash = "hash = \"sha256-h3aIe3mSWrvdQH/N/iV9g4K1TiS+UqZGZCa5WoBNZ5A=\"";
+        assert!(matches!(parse(&format!("url = \"https://x/y\"\n{hash}\nmember = \"a.ttf\"")).unwrap(), FileSource { origin: Origin::Fetched { .. }, member: Some(_) }));
+        assert!(matches!(parse("path = \"/a\"").unwrap().origin, Origin::Local(_)));
+        assert!(matches!(parse("track = { github = \"a/b\", asset = \"*.msi\" }").unwrap().origin, Origin::Tracked(_)));
+        for (bad, says) in [
+            ("url = \"https://x/y\"", "needs its hash"),
+            (hash, "without the url"),
+            ("path = \"/a\"\nurl = \"https://x/y\"", "no url, hash or track"),
+            ("member = \"a\"", "a url and hash, a track, or a path"),
+            ("pth = \"/a\"", "unknown field"),
+        ] {
+            let err = parse(bad).unwrap_err();
+            assert!(err.contains(says), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn editions_by_their_wim_names() {
+        let parse = |s: &str| Edition::try_from(s.to_owned());
+        assert_eq!(parse("Windows 11 Pro for Workstations").unwrap(), Edition::ProForWorkstations);
+        for e in Edition::ALL {
+            assert_eq!(parse(e.name()).unwrap(), e);
+        }
+        assert!(parse("Windows 11 Enterprise").unwrap_err().contains("\"Windows 11 Home\""));
+    }
+
+    #[test]
+    fn locales_and_time_zones_are_shaped_right() {
+        for ok in ["en-US", "da-DK", "sr-Latn-RS"] {
+            assert!(Language::try_from(ok.to_owned()).is_ok(), "{ok}");
+        }
+        for bad in ["en", "english", "en_US", "en-US-", "0409"] {
+            assert!(Language::try_from(bad.to_owned()).is_err(), "{bad}");
+        }
+        for ok in ["0409:00000409", "0406:00000406;0409:00000409", "0411:{03B5835F-F03C-411B-9CE2-AA23E1171E36}{A76C93D9-5523-4E90-AAFA-4DB112F9AC76}"] {
+            assert!(InputLocale::try_from(ok.to_owned()).is_ok(), "{ok}");
+        }
+        for bad in ["", "da-DK", "0406", "0406:406", "0406:00000406;", "0411:{03B5835F-F03C-411B-9CE2-AA23E1171E36}"] {
+            assert!(InputLocale::try_from(bad.to_owned()).is_err(), "{bad}");
+        }
+        for ok in ["UTC", "W. Europe Standard Time", "Romance Standard Time"] {
+            assert!(TimeZone::try_from(ok.to_owned()).is_ok(), "{ok}");
+        }
+        for bad in ["Europe/Copenhagen", "", " UTC"] {
+            assert!(TimeZone::try_from(bad.to_owned()).is_err(), "{bad}");
+        }
     }
 
     #[test]

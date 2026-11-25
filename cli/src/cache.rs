@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 
-use crate::config::{self, FileSource, Sri};
+use crate::config::{self, FileSource, Origin, Sri};
 use crate::track;
 
 pub struct Cache {
@@ -147,25 +147,25 @@ impl Cache {
     /// The file a source names, as a path on disk, and the name it gets on
     /// Windows. Members of archives are unpacked into `work`.
     pub fn materialize(&self, source: &FileSource, work: &Path) -> Result<Materialized> {
-        let (whole, from) = match source {
-            FileSource::Fetched(f) => (self.get(&f.url, &f.hash)?, f.url.clone()),
-            FileSource::Tracked(t) => {
+        let (whole, from) = match &source.origin {
+            Origin::Fetched { url, hash, .. } => (self.get(url, hash)?, url.clone()),
+            Origin::Tracked(track) => {
                 if self.offline {
-                    bail!("{} isn't pinned, so it can't be built with --offline; pin it with `dfnstrate pins`", t.track);
+                    bail!("{track} isn't pinned, so it can't be built with --offline; pin it with `dfnstrate pins`");
                 }
-                let url = track::resolve(&t.track)?;
-                eprintln!("{} is {url}", t.track);
+                let url = track::resolve(track)?;
+                eprintln!("{track} is {url}");
                 (self.get_unpinned(&url)?.0, url)
             }
-            FileSource::Local(l) => {
-                if !l.path.exists() {
-                    bail!("{} doesn't exist", l.path.display());
+            Origin::Local(path) => {
+                if !path.exists() {
+                    bail!("{} doesn't exist", path.display());
                 }
-                (l.path.clone(), l.path.to_str().context("non-UTF-8 path")?.to_owned())
+                (path.clone(), path.to_str().context("non-UTF-8 path")?.to_owned())
             }
         };
-        let name = config::file_name(source.member(), &from)?;
-        let Some(member) = source.member() else { return Ok(Materialized { path: whole, name }) };
+        let name = config::file_name(source.member.as_deref(), &from)?;
+        let Some(member) = source.member.as_deref() else { return Ok(Materialized { path: whole, name }) };
         let dest_dir = work.join("members");
         std::fs::create_dir_all(&dest_dir)?;
         let dest = dest_dir.join(&name);

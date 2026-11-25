@@ -41,7 +41,8 @@ pub fn render(config: &Config, cache: &Cache, work: &Path, dir: &Path) -> Result
     let busybox = std::fs::read(cache.materialize(&wsl.busybox, work)?.path)?;
     write("rootfs.tar", &rootfs(&busybox, linux)?, ReadAt::EveryLogon)?;
     write("wsl-logon.ps1", include_bytes!("../assets/wsl-logon.ps1"), ReadAt::EveryLogon)?;
-    let disks: Vec<&str> = linux.disks.iter().map(|g| g.as_str()).collect();
+    // Lowercase, as lsblk prints them; the logon script ignores case.
+    let disks: Vec<String> = linux.disks.iter().map(|g| g.to_string().to_ascii_lowercase()).collect();
     let copies: Vec<_> = linux.files.iter().map(|(to, from)| serde_json::json!({ "to": to, "from": from })).collect();
     write("wsl.json", serde_json::to_string(&serde_json::json!({ "disks": disks, "files": copies }))?.as_bytes(), ReadAt::EveryLogon)?;
 

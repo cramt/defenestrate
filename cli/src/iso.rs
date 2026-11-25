@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::cache::Cache;
 use crate::config::Config;
+use crate::registry::Root;
 use crate::render::{self, REG_FILES};
 use crate::tools::{self, HIVEXREGEDIT, SEVENZIP, WIMLIB, XORRISO};
 use crate::unattend::Variant;
@@ -51,7 +52,7 @@ pub fn build(config: &Config, variant: &Variant, source: &Path, cache: &Cache, w
     tools::run(WIMLIB.cmd().arg("export").arg(wim_dir.join("sources/install.wim")).arg(config.edition.name()).arg(&install_wim))?;
     std::fs::remove_dir_all(&wim_dir)?;
 
-    check_registry(&install_wim, &r.dir, work)?;
+    check_registry(config, &install_wim, &r.dir, work)?;
     check_appx(config, &install_wim)?;
 
     // Only adds new files. Replacing an existing file this way drops its
@@ -207,8 +208,9 @@ fn has_inf(dir: &Path) -> Result<bool> {
 /// Merges each .reg into a scratch copy of the hive it targets. The copies
 /// are thrown away (specialize.cmd applies the real thing on Windows), this
 /// just makes a malformed .reg fail the build instead of a VM install 20
-/// minutes in.
-fn check_registry(install_wim: &Path, rendered: &Path, work: &Path) -> Result<()> {
+/// minutes in. The answer file's language and time zone are checked against
+/// the image while it's out, which is the only place that knows them.
+fn check_registry(config: &Config, install_wim: &Path, rendered: &Path, work: &Path) -> Result<()> {
     eprintln!("checking the registry config against the image's hives");
     let hives = work.join("hives");
     std::fs::create_dir_all(&hives)?;
@@ -222,7 +224,50 @@ fn check_registry(install_wim: &Path, rendered: &Path, work: &Path) -> Result<()
         tools::run(HIVEXREGEDIT.cmd().arg("--merge").arg("--prefix").arg(f.root.path()).arg(&hive).arg(rendered.join(format!("reg/ascii/{}.reg", f.name))))
             .with_context(|| format!("{}.reg doesn't merge into the image's hive", f.name))?;
     }
+    let software = hives.join(Path::new(Root::Software.hive_file()).file_name().unwrap());
+    let zones = tools::output_string(HIVEXREGEDIT.cmd().arg("--export").arg(&software).arg(format!("\\{TIME_ZONES}")))?;
+    check_time_zone(config.time_zone.as_str(), &time_zones(&zones))?;
     std::fs::remove_dir_all(&hives)?;
+    let info = tools::output_string(WIMLIB.cmd().arg("info").arg(install_wim).arg("1"))?;
+    check_language(config.language.as_str(), &info)?;
+    Ok(())
+}
+
+const TIME_ZONES: &str = "Microsoft\\Windows NT\\CurrentVersion\\Time Zones";
+
+/// The time zone IDs under SOFTWARE's Time Zones key, from hivexregedit's
+/// export of it: the keys right under it.
+fn time_zones(export: &str) -> BTreeSet<String> {
+    let under = format!("\\{TIME_ZONES}\\");
+    export
+        .lines()
+        .filter_map(|l| l.strip_prefix('[')?.strip_suffix(']'))
+        .filter_map(|key| Some(key[key.find(&under)? + under.len()..].to_owned()))
+        .filter(|zone| !zone.contains('\\'))
+        .collect()
+}
+
+/// An empty list means the export wasn't what this expects, not that the
+/// image has no time zones, so it only warns.
+fn check_time_zone(zone: &str, known: &BTreeSet<String>) -> Result<()> {
+    if known.is_empty() {
+        eprintln!("warning: found no time zones in the image to check timeZone against");
+    } else if !known.iter().any(|k| k.eq_ignore_ascii_case(zone)) {
+        bail!("config: timeZone: the image has no time zone {zone:?}; `tzutil /l` on Windows lists them (the IDs, not the descriptions)");
+    }
+    Ok(())
+}
+
+/// What `wimlib-imagex info` lists on its Languages line.
+fn check_language(language: &str, info: &str) -> Result<()> {
+    let Some(line) = info.lines().find_map(|l| l.strip_prefix("Languages:")) else {
+        eprintln!("warning: wimlib lists no languages for the image to check language against");
+        return Ok(());
+    };
+    let shipped: Vec<&str> = line.split_whitespace().collect();
+    if !shipped.iter().any(|l| l.eq_ignore_ascii_case(language)) {
+        bail!("config: language: the image has {}, not {language}; it comes from the ISO (iso.language)", shipped.join(", "));
+    }
     Ok(())
 }
 
@@ -287,6 +332,21 @@ fn walk(dir: &Path) -> Result<Vec<std::path::PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn time_zones_and_languages_from_the_image() {
+        let export = "Windows Registry Editor Version 5.00\n\n[\\Microsoft\\Windows NT\\CurrentVersion\\Time Zones]\n\"TzVersion\"=dword:1\n\n[\\Microsoft\\Windows NT\\CurrentVersion\\Time Zones\\Romance Standard Time]\n\"Std\"=\"x\"\n\n[\\Microsoft\\Windows NT\\CurrentVersion\\Time Zones\\Romance Standard Time\\Dynamic DST]\n\n[\\Microsoft\\Windows NT\\CurrentVersion\\Time Zones\\UTC]\n";
+        let zones = time_zones(export);
+        assert_eq!(zones.iter().map(String::as_str).collect::<Vec<_>>(), ["Romance Standard Time", "UTC"]);
+        assert!(check_time_zone("utc", &zones).is_ok());
+        assert!(check_time_zone("W. Europe Standard Time", &zones).unwrap_err().to_string().contains("tzutil"));
+        assert!(check_time_zone("anything", &BTreeSet::new()).is_ok());
+
+        let info = "Index:                  1\nName:                   Windows 11 Pro\nLanguages:              en-US da-DK\nDefault Language:       en-US\n";
+        assert!(check_language("da-DK", info).is_ok());
+        assert!(check_language("de-DE", info).unwrap_err().to_string().contains("en-US, da-DK"));
+        assert!(check_language("de-DE", "Index: 1\n").is_ok());
+    }
 
     #[test]
     fn finds_boot_files_past_4_gib() {
