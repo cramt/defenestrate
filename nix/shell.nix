@@ -29,5 +29,11 @@ in
 
   tests = craneLib.cargoTest (common // {
     cargoArtifacts = craneLib.buildDepsOnly common;
+    # settings.rs checks it reads what dfnstrate renders: the golden file,
+    # which lives beside the crate, not in it.
+    preBuild = ''
+      mkdir -p ../configs
+      cp ${../configs/shell-settings.json} ../configs/shell-settings.json
+    '';
   });
 }
