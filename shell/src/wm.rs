@@ -403,10 +403,6 @@ pub struct Wm<W> {
     recent: Vec<W>,
     peek: Option<Peek>,
     tiling: Tiling,
-    /// Windows that raised themselves on a workspace not shown and were
-    /// left there (`activation_policy`), until they get focus: COSMIC's
-    /// urgent workspace state. Nothing shows it yet.
-    urgent: Vec<W>,
 }
 
 /// COSMIC's tiling settings.
@@ -441,7 +437,7 @@ impl<W: Copy + Eq> Wm<W> {
 
     pub fn with_tiling(screens: Screens, tiling: Tiling) -> Self {
         let outputs = screens.0.into_iter().map(|(id, area)| Output::new(id, area, tiling.autotile)).collect();
-        Wm { outputs, active: 0, keyboard: None, recent: Vec::new(), peek: None, tiling, urgent: Vec::new() }
+        Wm { outputs, active: 0, keyboard: None, recent: Vec::new(), peek: None, tiling }
     }
 
     fn locate(&self, w: W) -> Option<(usize, usize)> {
@@ -711,19 +707,12 @@ impl<W: Copy + Eq> Wm<W> {
         }
         Some(match self.tiling.activation_policy {
             ActivationPolicy::Focus => self.activate(w),
+            // COSMIC marks it urgent too; with no workspace indicator,
+            // nothing here would show that.
             ActivationPolicy::FocusIfActiveWorkspace | ActivationPolicy::Urgent => {
-                if !self.urgent.contains(&w) {
-                    self.urgent.push(w);
-                }
                 Effects { hide: vec![w], focus: self.focused_window(), pace: Pace::Instant, ..Effects::default() }
             }
         })
-    }
-
-    // For a workspace indicator, which the shell doesn't have yet.
-    #[cfg(test)]
-    pub fn is_urgent(&self, w: W) -> bool {
-        self.urgent.contains(&w)
     }
 
     /// A window that was already minimized when the shell started.
@@ -755,7 +744,6 @@ impl<W: Copy + Eq> Wm<W> {
     /// raising itself). It needn't be managed: the switcher lists dialogs
     /// and full-screen games too, as COSMIC lists every toplevel.
     pub fn focused(&mut self, w: W) {
-        self.urgent.retain(|&x| x != w);
         self.touch(w);
         self.keyboard = Some(w);
         if let Some(o) = self.shown_at(w) {
@@ -2076,10 +2064,7 @@ mod tests {
         assert_eq!(wm.raised(2), None, "shown: nothing to decide");
         let fx = wm.raised(1).unwrap();
         assert_eq!((fx.hide, fx.focus, fx.activated.len()), (vec![1], Some(2), 0), "stays hidden, focus stays");
-        assert!(wm.is_urgent(1) && !wm.is_shown(1));
-        wm.activate(1);
-        wm.focused(1);
-        assert!(!wm.is_urgent(1), "focusing it clears it");
+        assert!(!wm.is_shown(1));
         let mut wm = Wm::with_tiling(one(), policy(ActivationPolicy::Focus));
         wm.add(1);
         cmd(&mut wm, Command::Switch(ws(2)));
