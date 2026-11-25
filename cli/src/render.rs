@@ -2,6 +2,7 @@
 //! written to a directory: what `dfnstrate render` shows and `build iso`
 //! puts in the image.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -18,7 +19,7 @@ use crate::wsl;
 /// turn (shell/src/handoff.rs).
 pub const BUILTIN_SHELL: &str = "defenestrate-shell.exe";
 pub const BUILTIN_SHELL_UIACCESS: &str = "defenestrate-shell-uiaccess.exe";
-const SHELL_DIR: &str = "Program Files/defenestrate";
+const SHELL_DIR: CPath = CPath::new("Program Files/defenestrate");
 /// The shell's settings (`cosmic`), next to its exe, where only admins can
 /// change them.
 pub const SHELL_SETTINGS: &str = "shell.json";
@@ -39,8 +40,60 @@ pub const REG_FILES: [RegFile; 4] = [
     RegFile { name: "shell", root: Root::Software },
 ];
 
-/// Where setup finds our registry files and scripts, relative to C:.
-pub const SETUP_DIR: &str = "Windows/Setup/defenestrate";
+/// Where setup finds our registry files and scripts.
+pub const SETUP_DIR: CPath = CPath::new("Windows/Setup/defenestrate");
+
+/// A path on the install's C:, `/`-separated, with no drive or leading
+/// slash: the form that joins onto a mounted volume or a WIM's root. Only
+/// [`CPath::windows`] spells it the way Windows reads it, so the two forms
+/// can't get mixed up in a format string.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CPath(Cow<'static, str>);
+
+impl CPath {
+    pub const fn new(path: &'static str) -> Self {
+        assert!(Self::plain(path), "a C: path is / separated, without a drive or leading slash");
+        Self(Cow::Borrowed(path))
+    }
+
+    const fn plain(path: &str) -> bool {
+        let b = path.as_bytes();
+        if b.is_empty() || b[0] == b'/' || b[b.len() - 1] == b'/' {
+            return false;
+        }
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'\\' || b[i] == b':' {
+                return false;
+            }
+            i += 1;
+        }
+        true
+    }
+
+    /// `rest` is one or more `/`-separated components: our own names, or a
+    /// file name config::file_name() already checked.
+    pub fn join(&self, rest: &str) -> Self {
+        assert!(Self::plain(rest), "{rest:?} isn't a relative C: path");
+        Self(Cow::Owned(format!("{}/{rest}", self.0)))
+    }
+
+    /// Relative to the volume's root.
+    pub fn rel(&self) -> &str {
+        &self.0
+    }
+
+    /// As Windows names it: C:\Windows\Setup\defenestrate.
+    pub fn windows(&self) -> String {
+        format!("C:\\{}", self.0.replace('/', "\\"))
+    }
+
+    /// Under C:\Windows, as %SystemRoot%\…: the answer file's commands name
+    /// our files that way.
+    pub fn system_root(&self) -> Option<String> {
+        self.0.strip_prefix("Windows/").map(|rest| format!("%SystemRoot%\\{}", rest.replace('/', "\\")))
+    }
+}
 
 pub struct Rendered {
     pub dir: PathBuf,
@@ -56,8 +109,7 @@ pub struct Rendered {
 /// A file the build puts on C:.
 #[derive(Debug)]
 pub struct InstallFile {
-    /// Path on C:, `/`-separated, without the drive or a leading slash.
-    pub dest: String,
+    pub dest: CPath,
     pub source: PathBuf,
     pub read: ReadAt,
     pub if_missing: IfMissing,
@@ -71,7 +123,7 @@ pub enum IfMissing {
     Reflash,
     /// Create it, with the NTFS security descriptor the file at this dest
     /// has, which setup made: for a file that needs nothing but to exist.
-    CreateLike(String),
+    CreateLike(CPath),
 }
 
 /// When Windows reads a file of ours, which decides whether replacing it on
@@ -85,8 +137,8 @@ pub enum ReadAt {
 }
 
 impl InstallFile {
-    pub fn new(dest: impl Into<String>, source: impl Into<PathBuf>, read: ReadAt) -> Self {
-        Self { dest: dest.into(), source: source.into(), read, if_missing: IfMissing::Reflash }
+    pub fn new(dest: CPath, source: impl Into<PathBuf>, read: ReadAt) -> Self {
+        Self { dest, source: source.into(), read, if_missing: IfMissing::Reflash }
     }
 }
 
@@ -115,13 +167,13 @@ impl BuiltinShell {
     /// the shell at each logon, so newer exes take effect; Program Files is
     /// also one of the locations uiAccess requires.
     fn install(self, files: &mut Vec<InstallFile>) -> (String, ShellCert) {
-        let launcher = format!("{SHELL_DIR}/{BUILTIN_SHELL}");
-        files.push(InstallFile::new(&launcher, self.launcher, ReadAt::EveryLogon));
+        let launcher = SHELL_DIR.join(BUILTIN_SHELL);
+        files.push(InstallFile::new(launcher.clone(), self.launcher, ReadAt::EveryLogon));
         // An install from before the uiAccess binary existed has the launcher
         // (then the whole shell) but not this; `update` can add it because
         // nothing needs registering, only the descriptor setup gives files
         // here, which it copies from the launcher's.
-        let mut uiaccess = InstallFile::new(format!("{SHELL_DIR}/{BUILTIN_SHELL_UIACCESS}"), self.uiaccess, ReadAt::EveryLogon);
+        let mut uiaccess = InstallFile::new(SHELL_DIR.join(BUILTIN_SHELL_UIACCESS), self.uiaccess, ReadAt::EveryLogon);
         uiaccess.if_missing = IfMissing::CreateLike(launcher);
         files.push(uiaccess);
         (program_files(BUILTIN_SHELL), self.cert)
@@ -140,7 +192,7 @@ pub fn render(config: &Config, variant: &Variant, cache: &Cache, work: &Path, di
     let mut fonts = Vec::new();
     for source in &config.fonts {
         let font = cache.materialize(source, work)?;
-        files.push(InstallFile::new(format!("Windows/Fonts/{}", font.name), font.path, ReadAt::EveryLogon));
+        files.push(InstallFile::new(CPath::new("Windows/Fonts").join(&font.name), font.path, ReadAt::EveryLogon));
         fonts.push(font.name);
     }
 
@@ -153,7 +205,7 @@ pub fn render(config: &Config, variant: &Variant, cache: &Cache, work: &Path, di
         // Someone else's shell, or ours as a single exe: no uiAccess.
         Shell::Exe(source) => {
             let exe = cache.materialize(source, work)?;
-            files.push(InstallFile::new(format!("{SHELL_DIR}/{}", exe.name), exe.path, ReadAt::EveryLogon));
+            files.push(InstallFile::new(SHELL_DIR.join(&exe.name), exe.path, ReadAt::EveryLogon));
             (program_files(&exe.name), None)
         }
     };
@@ -161,7 +213,7 @@ pub fn render(config: &Config, variant: &Variant, cache: &Cache, work: &Path, di
     // an `exe` shell is usually ours, built some other way.
     if !matches!(config.shell, Shell::Command(_)) {
         std::fs::write(dir.join(SHELL_SETTINGS), config.cosmic.render(&config.displays, &config.autostart, &config.default_apps))?;
-        files.push(InstallFile::new(format!("{SHELL_DIR}/{SHELL_SETTINGS}"), dir.join(SHELL_SETTINGS), ReadAt::EveryLogon));
+        files.push(InstallFile::new(SHELL_DIR.join(SHELL_SETTINGS), dir.join(SHELL_SETTINGS), ReadAt::EveryLogon));
     }
 
     let mut software = config.registry.software.clone();
@@ -192,7 +244,7 @@ pub fn render(config: &Config, variant: &Variant, cache: &Cache, work: &Path, di
         std::fs::write(dir.join(format!("reg/ascii/{}.reg", f.name)), &text)?;
         let reg = dir.join(format!("reg/{}.reg", f.name));
         std::fs::write(&reg, registry::utf16(&text))?;
-        files.push(InstallFile::new(format!("{SETUP_DIR}/{}.reg", f.name), reg, ReadAt::Setup));
+        files.push(InstallFile::new(SETUP_DIR.join(&format!("{}.reg", f.name)), reg, ReadAt::Setup));
     }
 
     let appx: String = config.appx.remove.iter().map(|n| format!("{n}\r\n")).collect();
@@ -203,7 +255,7 @@ pub fn render(config: &Config, variant: &Variant, cache: &Cache, work: &Path, di
     ];
     for (name, data) in setup_files {
         std::fs::write(dir.join(name), data)?;
-        files.push(InstallFile::new(format!("{SETUP_DIR}/{name}"), dir.join(name), ReadAt::Setup));
+        files.push(InstallFile::new(SETUP_DIR.join(name), dir.join(name), ReadAt::Setup));
     }
 
     files.extend(wsl::render(config, cache, work, dir)?);
@@ -221,7 +273,7 @@ pub fn crlf(s: &str) -> String {
 
 /// Shell is a plain REG_SZ, so no %ProgramFiles%; setup always installs to C:.
 fn program_files(exe: &str) -> String {
-    format!("\"C:\\Program Files\\defenestrate\\{exe}\"")
+    format!("\"{}\"", SHELL_DIR.join(exe).windows())
 }
 
 fn set(hive: &mut Hive, key: &str, name: &str, value: RegValue) {
@@ -290,7 +342,7 @@ mod tests {
         let cache = Cache { dir: d.join("cache"), offline: true };
 
         let r = render(&config, &Variant::from_config(&config), &cache, &d.join("work"), &d.join("out")).unwrap();
-        let mut got: Vec<(&str, ReadAt)> = r.files.iter().map(|f| (f.dest.as_str(), f.read)).collect();
+        let mut got: Vec<(&str, ReadAt)> = r.files.iter().map(|f| (f.dest.rel(), f.read)).collect();
         got.sort();
         let s = "Windows/Setup/defenestrate";
         let mut want = vec![
@@ -326,12 +378,12 @@ mod tests {
         want.sort();
         assert_eq!(got, want.iter().map(|(p, r)| (p.as_str(), *r)).collect::<Vec<_>>());
         for f in &r.files {
-            assert!(f.source.is_file(), "{} has no source", f.dest);
+            assert!(f.source.is_file(), "{} has no source", f.dest.rel());
         }
         // install-apps.ps1 registers it, so an install from before it existed gets it from `update`.
-        let limited = r.files.iter().find(|f| f.dest == format!("{s}/apps/limited-task.xml")).unwrap();
-        assert_eq!(limited.if_missing, IfMissing::CreateLike(format!("{s}/apps/install-apps.ps1")));
-        assert_eq!(std::fs::read(&r.files.iter().find(|f| f.dest.ends_with("wsl.msi")).unwrap().source).unwrap(), b"package");
+        let limited = r.files.iter().find(|f| f.dest.rel() == format!("{s}/apps/limited-task.xml")).unwrap();
+        assert_eq!(limited.if_missing, IfMissing::CreateLike(SETUP_DIR.join("apps/install-apps.ps1")));
+        assert_eq!(std::fs::read(&r.files.iter().find(|f| f.dest.rel().ends_with("wsl.msi")).unwrap().source).unwrap(), b"package");
         let shell_reg = std::fs::read_to_string(d.join("out/reg/ascii/shell.reg")).unwrap();
         assert!(shell_reg.contains(r#""Shell"="\"C:\\Program Files\\defenestrate\\my-shell.exe\"""#), "{shell_reg}");
         // The shell parses the same file in its tests (shell/src/settings.rs).
@@ -364,8 +416,8 @@ mod tests {
         let (command, cert) = BuiltinShell::new(launcher.clone(), uiaccess.clone()).unwrap().install(&mut files);
         assert_eq!(command, r#""C:\Program Files\defenestrate\defenestrate-shell.exe""#);
         assert_eq!(cert.thumbprint(), include_str!("../tests/fixtures/signed-headers.thumbprint").trim());
-        let got: Vec<_> = files.iter().map(|f| (f.dest.as_str(), f.source.as_path(), f.read, &f.if_missing)).collect();
-        let like = IfMissing::CreateLike("Program Files/defenestrate/defenestrate-shell.exe".into());
+        let got: Vec<_> = files.iter().map(|f| (f.dest.rel(), f.source.as_path(), f.read, &f.if_missing)).collect();
+        let like = IfMissing::CreateLike(CPath::new("Program Files/defenestrate/defenestrate-shell.exe"));
         assert_eq!(
             got,
             [

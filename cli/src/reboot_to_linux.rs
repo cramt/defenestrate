@@ -27,10 +27,9 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::config::{Config, LinuxBootEntry};
-use crate::render::{IfMissing, InstallFile, ReadAt};
+use crate::render::{IfMissing, InstallFile, ReadAt, SETUP_DIR};
 use crate::tasks::{self, AsUser, Logon, RunLevel, Task, Trigger};
 
-pub const DIR: &str = "Windows/Setup/defenestrate/reboot";
 pub const TASK: &str = "defenestrate-reboot-to-linux";
 pub const LINUX_FIRST_TASK: &str = "defenestrate-linux-first";
 
@@ -48,10 +47,11 @@ pub fn render(config: &Config, dir: &Path) -> Result<Vec<InstallFile>> {
     };
     let out = dir.join("reboot");
     std::fs::create_dir_all(&out)?;
+    let on_c = SETUP_DIR.join("reboot");
     let mut files = Vec::new();
     let mut write = |name: &str, data: &[u8], read: ReadAt| -> Result<()> {
         std::fs::write(out.join(name), data)?;
-        files.push(InstallFile::new(format!("{DIR}/{name}"), out.join(name), read));
+        files.push(InstallFile::new(on_c.join(name), out.join(name), read));
         Ok(())
     };
     // Read at each run, so `update` reaches them like the per-logon files.
@@ -68,8 +68,8 @@ pub fn render(config: &Config, dir: &Path) -> Result<Vec<InstallFile>> {
             // Session 0: nothing to see, and no console window flashing up
             // over the game the user is quitting.
             trigger: Trigger::OnDemand(AsUser { user, logon: Logon::Session0, level: RunLevel::Elevated }),
-            command: "powershell.exe",
-            arguments: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\\Windows\\Setup\\defenestrate\\reboot\\reboot-to-linux.ps1".into(),
+            script: &on_c.join("reboot-to-linux.ps1"),
+            script_args: "",
         })?,
         ReadAt::Setup,
     )?;
@@ -82,15 +82,16 @@ pub fn render(config: &Config, dir: &Path) -> Result<Vec<InstallFile>> {
             // run when Fast Startup resumes instead of booting; default.toml
             // turns it off.
             trigger: Trigger::Startup,
-            command: "powershell.exe",
-            arguments: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\\Windows\\Setup\\defenestrate\\reboot\\linux-first.ps1".into(),
+            script: &on_c.join("linux-first.ps1"),
+            script_args: "",
         })?,
         ReadAt::Setup,
     )?;
     // `update` rewrites reboot-to-linux.ps1 on an install from before it
     // dot-sourced linux-entry.ps1, so it must be able to add that too; it
     // needs nothing but to exist.
-    let entry = files.iter_mut().find(|f| f.dest.ends_with("/linux-entry.ps1")).expect("written above");
-    entry.if_missing = IfMissing::CreateLike(format!("{DIR}/reboot-to-linux.ps1"));
+    let entry = on_c.join("linux-entry.ps1");
+    let entry = files.iter_mut().find(|f| f.dest == entry).expect("written above");
+    entry.if_missing = IfMissing::CreateLike(on_c.join("reboot-to-linux.ps1"));
     Ok(files)
 }

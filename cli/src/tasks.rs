@@ -3,11 +3,33 @@
 //! shell) or on demand (so the unelevated shell can start them without a
 //! UAC prompt), or as SYSTEM at every startup.
 
+use crate::render::CPath;
+
+/// Every task runs one of our PowerShell scripts, hidden.
 pub struct Task<'a> {
     pub description: &'a str,
     pub trigger: Trigger<'a>,
-    pub command: &'a str,
-    pub arguments: String,
+    pub script: &'a CPath,
+    /// After the script's path, if any.
+    pub script_args: &'a str,
+}
+
+/// Where a script started by [`powershell`] shows.
+pub enum Window {
+    Hidden,
+    /// In the console that started it (cmd.exe's, at first logon).
+    Console,
+}
+
+/// The program and arguments that run one of our scripts: no profile, which
+/// would slow it down and change what it sees, and past the execution
+/// policy, which refuses unsigned scripts.
+pub fn powershell(script: &str, window: Window) -> (&'static str, String) {
+    let window = match window {
+        Window::Hidden => "-WindowStyle Hidden ",
+        Window::Console => "",
+    };
+    ("powershell.exe", format!("-NoProfile -ExecutionPolicy Bypass {window}-File {script}"))
 }
 
 pub enum Trigger<'a> {
@@ -49,7 +71,11 @@ pub enum Logon {
 /// would skip a task on battery and stop it after 72 hours, hence the
 /// settings.
 pub fn xml(t: &Task) -> anyhow::Result<Vec<u8>> {
-    let Task { description, trigger, command, arguments } = t;
+    let Task { description, trigger, script, script_args } = t;
+    let (command, mut arguments) = powershell(&script.windows(), Window::Hidden);
+    if !script_args.is_empty() {
+        arguments = format!("{arguments} {script_args}");
+    }
     let x = crate::unattend::escape;
     let principal = |AsUser { user, logon, level }: &AsUser| {
         let logon_type = match logon {
@@ -104,7 +130,7 @@ pub fn xml(t: &Task) -> anyhow::Result<Vec<u8>> {
 </Task>
 "#,
         description = x(description),
-        arguments = x(arguments),
+        arguments = x(&arguments),
     )
     .replace('\n', "\r\n");
     roxmltree::Document::parse(&xml.replace("encoding=\"UTF-16\"", "encoding=\"UTF-8\""))
@@ -117,7 +143,8 @@ mod tests {
     use super::*;
 
     fn text(trigger: Trigger) -> String {
-        let t = Task { description: "d", trigger, command: "c.exe", arguments: "-x".into() };
+        let script = CPath::new("s.ps1");
+        let t = Task { description: "d", trigger, script: &script, script_args: "-x" };
         let bytes = xml(&t).unwrap();
         let units: Vec<u16> = bytes.as_chunks::<2>().0.iter().map(|&c| u16::from_le_bytes(c)).collect();
         String::from_utf16(&units).unwrap()

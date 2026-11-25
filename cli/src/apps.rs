@@ -14,10 +14,9 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::config::{AppId, Config};
-use crate::render::{IfMissing, InstallFile, ReadAt};
+use crate::render::{IfMissing, InstallFile, ReadAt, SETUP_DIR};
 use crate::tasks::{self, AsUser, Logon, RunLevel, Task, Trigger};
 
-pub const DIR: &str = "Windows/Setup/defenestrate/apps";
 pub const TASK: &str = "defenestrate-apps";
 
 /// What install-apps.ps1 reads.
@@ -27,8 +26,6 @@ struct Plan<'a> {
     apps: &'a [AppId],
     windows_update_display_drivers: bool,
 }
-
-const SCRIPT_ARGS: &str = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\\Windows\\Setup\\defenestrate\\apps\\install-apps.ps1";
 
 pub fn needed(config: &Config) -> bool {
     !config.apps.is_empty() || config.gpu.windows_update
@@ -44,10 +41,12 @@ pub fn render(config: &Config, dir: &Path) -> Result<Vec<InstallFile>> {
     }
     let out = dir.join("apps");
     std::fs::create_dir_all(&out)?;
+    let on_c = SETUP_DIR.join("apps");
+    let script = on_c.join("install-apps.ps1");
     let mut files = Vec::new();
     let mut write = |name: &str, data: &[u8], read: ReadAt| -> Result<()> {
         std::fs::write(out.join(name), data)?;
-        files.push(InstallFile::new(format!("{DIR}/{name}"), out.join(name), read));
+        files.push(InstallFile::new(on_c.join(name), out.join(name), read));
         Ok(())
     };
     write("apps.json", serde_json::to_string_pretty(&plan(config))?.as_bytes(), ReadAt::EveryLogon)?;
@@ -63,8 +62,8 @@ pub fn render(config: &Config, dir: &Path) -> Result<Vec<InstallFile>> {
             // doesn't run as SYSTEM anyway). The cost: while an installer
             // window is focused, the shell's keyboard hook gets no keys.
             trigger: Trigger::Logon(AsUser { user, logon: Logon::Interactive, level: RunLevel::Elevated }),
-            command: "powershell.exe",
-            arguments: SCRIPT_ARGS.into(),
+            script: &script,
+            script_args: "",
         })?,
         ReadAt::Setup,
     )?;
@@ -75,14 +74,14 @@ pub fn render(config: &Config, dir: &Path) -> Result<Vec<InstallFile>> {
         &tasks::xml(&Task {
             description: "Installs one winget app unelevated, for defenestrate-apps: some per-user installers crash elevated (Discord's).",
             trigger: Trigger::OnDemand(AsUser { user, logon: Logon::Interactive, level: RunLevel::Limited }),
-            command: "powershell.exe",
-            arguments: format!("{SCRIPT_ARGS} -Limited"),
+            script: &script,
+            script_args: "-Limited",
         })?,
         ReadAt::EveryLogon,
     )?;
     // Since the script registers it, it needs nothing but to exist, so
     // `update` can create it on an install from before it was added.
-    files.last_mut().expect("just written").if_missing = IfMissing::CreateLike(format!("{DIR}/install-apps.ps1"));
+    files.last_mut().expect("just written").if_missing = IfMissing::CreateLike(script);
     Ok(files)
 }
 

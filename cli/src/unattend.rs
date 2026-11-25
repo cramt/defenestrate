@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 
 use crate::config::{Config, Disk};
 use crate::gpt::ImagePart;
+use crate::tasks::{self, Window};
 
 impl Variant {
     /// What the config asks for: the ISO for a USB stick.
@@ -36,10 +37,9 @@ pub struct Variant {
     pub boot_prompt: bool,
 }
 
-const SETUP_DIR: &str = "%SystemRoot%\\Setup\\defenestrate";
-
 pub fn render(config: &Config, v: &Variant) -> Result<String> {
     let x = escape;
+    let setup = crate::render::SETUP_DIR.system_root().expect("under C:\\Windows");
     let component = |name: &str, body: String| {
         format!(
             "<component name=\"{name}\" processorArchitecture=\"amd64\" publicKeyToken=\"31bf3856ad364e35\" language=\"neutral\" versionScope=\"nonSxS\">\n{body}</component>\n"
@@ -115,7 +115,7 @@ pub fn render(config: &Config, v: &Variant) -> Result<String> {
         "Microsoft-Windows-Deployment",
         format!(
             "<RunSynchronous>\n<RunSynchronousCommand wcm:action=\"add\">\n<Order>1</Order>\n<Path>{}</Path>\n</RunSynchronousCommand>\n</RunSynchronous>\n",
-            x(&format!("cmd.exe /c \"{SETUP_DIR}\\specialize.cmd > {SETUP_DIR}\\specialize.log 2>&1\""))
+            x(&format!("cmd.exe /c \"{setup}\\specialize.cmd > {setup}\\specialize.log 2>&1\""))
         ),
     );
 
@@ -129,22 +129,25 @@ pub fn render(config: &Config, v: &Variant) -> Result<String> {
     };
 
     let mut commands = vec![
-        (format!("cmd.exe /c \"reg import {SETUP_DIR}\\shell.reg > {SETUP_DIR}\\firstlogon.log 2>&1\""), "Replace explorer.exe as the shell"),
-        (format!("cmd.exe /c \"{SETUP_DIR}\\wsl\\wsl-install.cmd >> {SETUP_DIR}\\firstlogon.log 2>&1\""), "Install WSL"),
+        (format!("cmd.exe /c \"reg import {setup}\\shell.reg > {setup}\\firstlogon.log 2>&1\""), "Replace explorer.exe as the shell"),
+        (format!("cmd.exe /c \"{setup}\\wsl\\wsl-install.cmd >> {setup}\\firstlogon.log 2>&1\""), "Install WSL"),
     ];
     if crate::apps::needed(config) {
         commands.push((
-            format!("cmd.exe /c \"schtasks /create /tn {} /xml {SETUP_DIR}\\apps\\task.xml >> {SETUP_DIR}\\firstlogon.log 2>&1\"", crate::apps::TASK),
+            format!("cmd.exe /c \"schtasks /create /tn {} /xml {setup}\\apps\\task.xml >> {setup}\\firstlogon.log 2>&1\"", crate::apps::TASK),
             "Install the apps at the next logon",
         ));
     }
     if crate::reboot_to_linux::enabled(config) {
         commands.push((
-            format!("cmd.exe /c \"powershell.exe -NoProfile -ExecutionPolicy Bypass -File {SETUP_DIR}\\reboot\\register.ps1 -Task {} >> {SETUP_DIR}\\firstlogon.log 2>&1\"", crate::reboot_to_linux::TASK),
+            {
+                let (powershell, args) = tasks::powershell(&format!("{setup}\\reboot\\register.ps1"), Window::Console);
+                format!("cmd.exe /c \"{powershell} {args} -Task {} >> {setup}\\firstlogon.log 2>&1\"", crate::reboot_to_linux::TASK)
+            },
             "Register Reboot to Linux",
         ));
         commands.push((
-            format!("cmd.exe /c \"schtasks /create /tn {} /xml {SETUP_DIR}\\reboot\\linux-first.xml >> {SETUP_DIR}\\firstlogon.log 2>&1\"", crate::reboot_to_linux::LINUX_FIRST_TASK),
+            format!("cmd.exe /c \"schtasks /create /tn {} /xml {setup}\\reboot\\linux-first.xml >> {setup}\\firstlogon.log 2>&1\"", crate::reboot_to_linux::LINUX_FIRST_TASK),
             "Keep Linux first in the boot order",
         ));
     }

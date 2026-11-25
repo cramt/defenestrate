@@ -58,8 +58,8 @@ pub fn run(config: &Config, cache: &Cache, args: &Args) -> Result<()> {
     ntfs::probe(&volume, !args.dry_run)?;
     let mount = Mount::new(&volume, std::env::temp_dir().join(format!("dfnstrate-update-{}", std::process::id())), !args.dry_run)?;
     let root = mount.dir.as_path();
-    if !root.join(SETUP_DIR).is_dir() {
-        bail!("{} has no C:\\{}; not a defenestrate install", volume.display(), windows(SETUP_DIR));
+    if !root.join(SETUP_DIR.rel()).is_dir() {
+        bail!("{} has no {}; not a defenestrate install", volume.display(), SETUP_DIR.windows());
     }
 
     let changes = files.iter().map(|f| change(f, root).map(|c| (f, c))).collect::<Result<Vec<_>>>()?;
@@ -79,23 +79,23 @@ pub fn run(config: &Config, cache: &Cache, args: &Args) -> Result<()> {
     }
     let mut written = 0;
     for (f, c) in &changes {
-        let dest = root.join(&f.dest);
+        let dest = root.join(f.dest.rel());
         let done = match (c, &f.if_missing) {
             (Change::Write, _) => {
                 if !args.dry_run {
-                    write_in_place(&f.source, &dest).with_context(|| format!("writing C:\\{}", windows(&f.dest)))?;
+                    write_in_place(&f.source, &dest).with_context(|| format!("writing {}", f.dest.windows()))?;
                 }
                 if args.dry_run { "would update" } else { "updated" }
             }
             (Change::Create, IfMissing::CreateLike(like)) => {
                 if !args.dry_run {
-                    create_like(&f.source, &dest, &root.join(like)).with_context(|| format!("creating C:\\{}", windows(&f.dest)))?;
+                    create_like(&f.source, &dest, &root.join(like.rel())).with_context(|| format!("creating {}", f.dest.windows()))?;
                 }
                 if args.dry_run { "would create" } else { "created" }
             }
             _ => continue,
         };
-        println!("{done} C:\\{}", windows(&f.dest));
+        println!("{done} {}", f.dest.windows());
         written += 1;
     }
     if !trust.remove.is_empty() {
@@ -110,7 +110,7 @@ pub fn run(config: &Config, cache: &Cache, args: &Args) -> Result<()> {
 
     let unchanged = changes.iter().filter(|(_, c)| *c == Change::None).count();
     println!("{written} {}, {unchanged} already up to date", if args.dry_run { "to update" } else { "updated" });
-    let list = |want: Change| changes.iter().filter(|(_, c)| *c == want).map(|(f, _)| format!("\n  C:\\{}", windows(&f.dest))).collect::<String>();
+    let list = |want: Change| changes.iter().filter(|(_, c)| *c == want).map(|(f, _)| format!("\n  {}", f.dest.windows())).collect::<String>();
     let setup_only = list(Change::SetupOnly);
     if !setup_only.is_empty() {
         eprintln!("left alone, since only setup reads them; these changes take a reflash:{setup_only}");
@@ -200,19 +200,19 @@ enum Change {
 }
 
 fn change(file: &InstallFile, root: &Path) -> Result<Change> {
-    let dest = root.join(&file.dest);
+    let dest = root.join(file.dest.rel());
     let meta = match std::fs::symlink_metadata(&dest) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Ok(match &file.if_missing {
-                IfMissing::CreateLike(like) if root.join(like).is_file() => Change::Create,
+                IfMissing::CreateLike(like) if root.join(like.rel()).is_file() => Change::Create,
                 _ => Change::Missing,
             });
         }
         Err(e) => return Err(e).with_context(|| dest.display().to_string()),
     };
     if !meta.is_file() {
-        bail!("C:\\{} on the install isn't a file", windows(&file.dest));
+        bail!("{} on the install isn't a file", file.dest.windows());
     }
     if same_contents(&file.source, &dest)? {
         return Ok(Change::None);
@@ -276,10 +276,6 @@ fn write_in_place(source: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-fn windows(dest: &str) -> String {
-    dest.replace('/', "\\")
-}
-
 /// A directory for rendering into, removed on drop. Never holds a mount.
 struct Scratch(PathBuf);
 
@@ -307,6 +303,7 @@ impl Drop for Scratch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::CPath;
     use std::os::unix::fs::MetadataExt;
 
     fn tmp(name: &str) -> PathBuf {
@@ -342,7 +339,7 @@ mod tests {
             if let Some(t) = theirs {
                 std::fs::write(root.join("x").join(name), t).unwrap();
             }
-            InstallFile::new(format!("x/{name}"), src.join(name), read)
+            InstallFile::new(CPath::new("x").join(name), src.join(name), read)
         };
         let cases = [
             (file("same", "a", Some("a"), ReadAt::EveryLogon), Change::None),
@@ -353,7 +350,7 @@ mod tests {
             (file("missing", "b", None, ReadAt::EveryLogon), Change::Missing),
         ];
         for (f, want) in &cases {
-            assert_eq!(change(f, &root).unwrap(), *want, "{}", f.dest);
+            assert_eq!(change(f, &root).unwrap(), *want, "{}", f.dest.rel());
         }
         std::fs::create_dir(root.join("x/dir")).unwrap();
         assert!(change(&file("dir", "a", None, ReadAt::EveryLogon), &root).is_err());
@@ -407,10 +404,10 @@ mod tests {
         let d = tmp("create");
         std::fs::create_dir_all(d.join("c/pf")).unwrap();
         std::fs::write(d.join("new"), "uiaccess").unwrap();
-        let mut f = InstallFile::new("pf/uiaccess.exe", d.join("new"), ReadAt::EveryLogon);
+        let mut f = InstallFile::new(CPath::new("pf/uiaccess.exe"), d.join("new"), ReadAt::EveryLogon);
         // Not marked: like any other file the install lacks.
         assert_eq!(change(&f, &d.join("c")).unwrap(), Change::Missing);
-        f.if_missing = IfMissing::CreateLike("pf/launcher.exe".into());
+        f.if_missing = IfMissing::CreateLike(CPath::new("pf/launcher.exe"));
         // Nothing to take the descriptor from: an install too old, or not ours.
         assert_eq!(change(&f, &d.join("c")).unwrap(), Change::Missing);
         std::fs::write(d.join("c/pf/launcher.exe"), "launcher").unwrap();

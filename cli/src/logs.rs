@@ -32,7 +32,7 @@ const USAGE: &str = "dfnstrate logs -c CONFIG... --out DIR /dev/disk/by-id/<the 
 
 /// Where defenestrate's own logs are, under C:\.
 fn ours(user: &str) -> [String; 3] {
-    [format!("Users/{user}/AppData/Local/defenestrate"), "ProgramData/defenestrate".into(), "Windows/Setup/defenestrate".into()]
+    [format!("Users/{user}/AppData/Local/defenestrate"), "ProgramData/defenestrate".into(), crate::render::SETUP_DIR.rel().into()]
 }
 
 /// Plain relative components only: `--also` mustn't reach outside the volume.

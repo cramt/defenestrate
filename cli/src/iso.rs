@@ -65,14 +65,14 @@ pub fn build(config: &Config, variant: &Variant, source: &Path, cache: &Cache, w
         .iter()
         .map(|f| {
             let source = std::fs::canonicalize(&f.source).with_context(|| f.source.display().to_string())?;
-            Ok(format!("add {} {}\n", quote(&source)?, quote(Path::new(&format!("/{}", f.dest)))?))
+            Ok(format!("add {} {}\n", quote(&source)?, quote(Path::new(&format!("/{}", f.dest.rel())))?))
         })
         .collect::<Result<String>>()?;
     // Here rather than in render's file list: `update` would only ever see
     // these as missing, since specialize deletes them once they're in the
     // driver store, and `render` has no use for gigabytes of drivers.
     for (i, dir) in drivers.iter().enumerate() {
-        commands += &format!("add {} {}\n", quote(dir)?, quote(Path::new(&format!("/{}/{DRIVERS_DIR}/{i}", render::SETUP_DIR)))?);
+        commands += &format!("add {} {}\n", quote(dir)?, quote(Path::new(&format!("/{}", render::SETUP_DIR.join(&format!("{DRIVERS_DIR}/{i}")).rel())))?);
     }
     tools::run_with_input(WIMLIB.cmd().arg("update").arg(&install_wim).arg("1"), &commands)?;
 

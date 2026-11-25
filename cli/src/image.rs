@@ -17,6 +17,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::config::Config;
 use crate::gpt;
+use crate::render::SETUP_DIR;
 use crate::tools::{self, ICAT, IFIND, MDIR, QEMU, SFDISK, SWTPM};
 use crate::vm::{self, Firmware, Tpm};
 
@@ -228,14 +229,14 @@ fn verify(config: &Config, disk: &Path) -> Result<()> {
         Ok(inode.to_owned())
     };
     if !config.updates.is_empty() {
-        let inode = find("/Windows/Setup/defenestrate/updates.log").context("setup's WinPE never ran updates.cmd")?;
+        let inode = find(&format!("/{}", SETUP_DIR.join("updates.log").rel())).context("setup's WinPE never ran updates.cmd")?;
         let log = String::from_utf8_lossy(&tools::output(ICAT.cmd().arg("-o").arg(windows.to_string()).arg(disk).arg(&inode))?).into_owned();
         eprint!("updates.log:\n{log}");
         if !log.lines().any(|l| l.trim() == "all installed") {
             bail!("the updates didn't go in (updates.log above; DISM's own logs are dism-*.log next to it)");
         }
     }
-    let inode = find("/Windows/Setup/defenestrate/firstlogon.log").context("setup didn't finish: first logon never ran (or C: isn't readable NTFS)")?;
+    let inode = find(&format!("/{}", SETUP_DIR.join("firstlogon.log").rel())).context("setup didn't finish: first logon never ran (or C: isn't readable NTFS)")?;
     let log = tools::output(ICAT.cmd().arg("-o").arg(windows.to_string()).arg(disk).arg(&inode))?;
     let log = String::from_utf8_lossy(&log);
     eprint!("first logon's log:\n{log}");

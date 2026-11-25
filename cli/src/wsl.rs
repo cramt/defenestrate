@@ -16,11 +16,9 @@ use anyhow::Result;
 
 use crate::cache::Cache;
 use crate::config::{Config, Linux};
-use crate::render::{InstallFile, ReadAt};
+use crate::render::{InstallFile, ReadAt, SETUP_DIR};
 use crate::tasks::{self, AsUser, Logon, RunLevel, Task, Trigger};
 
-/// Relative to C:.
-pub const DIR: &str = "Windows/Setup/defenestrate/wsl";
 pub const TASK: &str = "defenestrate-wsl";
 
 /// Writes the payload to `dir`/wsl, except the MSI, which stays in the
@@ -29,10 +27,12 @@ pub fn render(config: &Config, cache: &Cache, work: &Path, dir: &Path) -> Result
     let wsl = &config.wsl;
     let out = dir.join("wsl");
     std::fs::create_dir_all(&out)?;
-    let mut files = vec![InstallFile::new(format!("{DIR}/wsl.msi"), cache.materialize(&wsl.package, work)?.path, ReadAt::Setup)];
+    let on_c = SETUP_DIR.join("wsl");
+    let logon_script = on_c.join("wsl-logon.ps1");
+    let mut files = vec![InstallFile::new(on_c.join("wsl.msi"), cache.materialize(&wsl.package, work)?.path, ReadAt::Setup)];
     let mut write = |name: &str, data: &[u8], read: ReadAt| -> Result<()> {
         std::fs::write(out.join(name), data)?;
-        files.push(InstallFile::new(format!("{DIR}/{name}"), out.join(name), read));
+        files.push(InstallFile::new(on_c.join(name), out.join(name), read));
         Ok(())
     };
     write("wsl-install.cmd", crate::render::crlf(include_str!("../assets/wsl-install.cmd")).as_bytes(), ReadAt::Setup)?;
@@ -62,8 +62,8 @@ pub fn render(config: &Config, cache: &Cache, work: &Path, dir: &Path) -> Result
             // anyway under this shell (README), so this stays until both are
             // solved.
             trigger: Trigger::Logon(AsUser { user, logon: Logon::Session0, level: RunLevel::Elevated }),
-            command: "powershell.exe",
-            arguments: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\\Windows\\Setup\\defenestrate\\wsl\\wsl-logon.ps1".into(),
+            script: &logon_script,
+            script_args: "",
         })?,
         ReadAt::Setup,
     )?;
