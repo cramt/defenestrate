@@ -4,10 +4,7 @@
 //! choice (switcher.rs) are carried out here too. Runs entirely on the
 //! shell's one GUI thread.
 //!
-//! Monitors come from EnumDisplayMonitors, in physical pixels (the shell is
-//! Per-Monitor V2 DPI aware, main.rs), each known to the `Wm` by its monitor
-//! device's interface path, which stays the same when it's unplugged and
-//! plugged back into the same port. WM_DISPLAYCHANGE reads them again.
+//! Monitors come from monitors.rs; WM_DISPLAYCHANGE reads them again.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -16,11 +13,7 @@ use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
-use windows::Win32::Graphics::Gdi::{
-    ClientToScreen, DISPLAY_DEVICEW, EnumDisplayDevicesW, EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR,
-    MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW, MonitorFromWindow,
-};
-use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow};
 use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_INFORMATION_CLASS, TOKEN_QUERY, TokenElevation, TokenUIAccess};
 use windows::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentProcessId, OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -30,24 +23,24 @@ use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, INPUT, INPUT_MOUSE, SendInput, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON};
 use windows::Win32::UI::Shell::{QUNS_RUNNING_D3D_FULL_SCREEN, SHQueryUserNotificationState};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EDD_GET_DEVICE_INTERFACE_NAME, EVENT_OBJECT_CLOAKED, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_SHOW, EVENT_OBJECT_UNCLOAKED,
-    EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART,
-    EnumWindows, GA_ROOT, GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClassNameW, GetClientRect, GetCursorPos, GetForegroundWindow,
-    GetPropW, GetSystemMetrics, GetWindow, GetWindowLongPtrW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, HWND_BOTTOM,
-    HWND_TOP, IsHungAppWindow, IsIconic, IsWindow, IsWindowVisible, IsZoomed, KillTimer, MONITORINFOF_PRIMARY, PostMessageW,
-    RemovePropW, SM_CXSCREEN, SM_CYSCREEN, SPI_SETWORKAREA, SW_HIDE, SW_RESTORE, SW_SHOWNA, SW_SHOWNOACTIVATE, SWP_ASYNCWINDOWPOS,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SetCursorPos, SetForegroundWindow,
-    SetPropW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindowAsync, SystemParametersInfoW, WINEVENT_OUTOFCONTEXT,
-    WINEVENT_SKIPOWNPROCESS, WM_APP, WM_CLOSE, WS_CAPTION, WS_THICKFRAME, WindowFromPoint,
+    EVENT_OBJECT_CLOAKED, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_SHOW, EVENT_OBJECT_UNCLOAKED, EVENT_SYSTEM_FOREGROUND,
+    EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART, EnumWindows, GA_ROOT,
+    GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClassNameW, GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindow,
+    GetWindowLongPtrW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, HWND_BOTTOM, HWND_TOP, IsIconic, IsWindow,
+    IsWindowVisible, IsZoomed, KillTimer, PostMessageW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_RESTORE, SW_SHOWNA, SW_SHOWNOACTIVATE,
+    SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SetCursorPos, SetForegroundWindow,
+    SetTimer, SetWindowPos, ShowWindowAsync, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP, WM_CLOSE, WindowFromPoint,
 };
-use windows::core::{BOOL, PCWSTR, PWSTR, w};
+use windows::core::{BOOL, PWSTR};
 
 use crate::classify::{Facts, Process, Verdict, app_id, classify};
 use crate::keys::{Button, Drag};
 use crate::motion::{Animator, Pace, Scene};
 use crate::follow::{Follow, Timer};
+use crate::geometry::{carried, clipped, corner_resized, shifted};
 use crate::throttle::{Ask, Moves};
-use crate::{hint, preview};
+use crate::monitors::{self, Monitor};
+use crate::{captions, hint, preview};
 use crate::overlay::{self, Look};
 use crate::settings;
 use crate::tree::{Axis, Direction, Gaps, Point, Rect};
@@ -97,13 +90,6 @@ const SETTLE: Duration = Duration::from_millis(100);
 /// How close to the screen's edge, or to the line between two tiles, a
 /// dragged window has to be dropped to join that group (COSMIC's 32).
 const DROP_BAND: i32 = 32;
-/// Marks a window whose title bar the shell took, on the window itself, so
-/// a shell that crashed can give it back when it starts again.
-const CAPTIONLESS: PCWSTR = w!("defenestrate.captionless");
-/// What a tiled window loses. The sizing border goes with the caption:
-/// without a caption, Windows 11 paints the top sizing border as a white
-/// strip across the window.
-const TITLE_BAR: u32 = WS_CAPTION.0 | WS_THICKFRAME.0;
 
 #[derive(Clone, Copy)]
 enum Dragging {
@@ -172,83 +158,6 @@ thread_local! {
     static MONITORS: RefCell<Vec<Monitor>> = const { RefCell::new(Vec::new()) };
     /// Windows whose verdict is in the log already.
     static LOGGED: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
-}
-
-#[derive(Clone)]
-struct Monitor {
-    id: OutputId,
-    rect: Rect,
-    dpi: u32,
-    primary: bool,
-    /// The display adapter driving it, for the log: "Microsoft Basic Display
-    /// Adapter" there means the GPU's driver isn't in (yet).
-    adapter: String,
-    /// The adapter output, \\.\DISPLAYn, which display modes are set on.
-    device: String,
-}
-
-/// Every monitor, the primary first: it's where an unplugged monitor's
-/// workspaces go when the shell starts with them all there.
-fn monitors() -> Vec<Monitor> {
-    let mut found: Vec<Monitor> = Vec::new();
-    unsafe {
-        let _ = EnumDisplayMonitors(None, None, Some(found_monitor), LPARAM((&raw mut found) as isize));
-    }
-    found.sort_by_key(|m| !m.primary);
-    if found.is_empty() {
-        log("EnumDisplayMonitors found nothing; using the primary screen's size");
-        let rect = unsafe { Rect { left: 0, top: 0, right: GetSystemMetrics(SM_CXSCREEN), bottom: GetSystemMetrics(SM_CYSCREEN) } };
-        found.push(Monitor { id: OutputId("primary".into()), rect, dpi: 96, primary: true, adapter: "?".into(), device: String::new() });
-    }
-    found
-}
-
-unsafe extern "system" fn found_monitor(m: HMONITOR, _: HDC, _: *mut RECT, out: LPARAM) -> BOOL {
-    let mut info = MONITORINFOEXW { monitorInfo: MONITORINFO { cbSize: size_of::<MONITORINFOEXW>() as u32, ..Default::default() }, ..Default::default() };
-    if !unsafe { GetMonitorInfoW(m, (&raw mut info).cast()) }.as_bool() {
-        return true.into();
-    }
-    let device = String::from_utf16_lossy(&info.szDevice[..info.szDevice.iter().position(|&c| c == 0).unwrap_or(32)]);
-    // The adapter's \\.\DISPLAYn gets handed out again in a different
-    // order after a change; the monitor behind it has a path that doesn't.
-    let mut dd = DISPLAY_DEVICEW { cb: size_of::<DISPLAY_DEVICEW>() as u32, ..Default::default() };
-    let path = unsafe { EnumDisplayDevicesW(windows::core::PCWSTR(info.szDevice.as_ptr()), 0, &mut dd, EDD_GET_DEVICE_INTERFACE_NAME) }
-        .as_bool()
-        .then(|| String::from_utf16_lossy(&dd.DeviceID[..dd.DeviceID.iter().position(|&c| c == 0).unwrap_or(128)]))
-        .filter(|p| !p.is_empty());
-    let (mut x, mut y) = (96, 96);
-    let _ = unsafe { GetDpiForMonitor(m, MDT_EFFECTIVE_DPI, &mut x, &mut y) };
-    // No taskbar or other appbar reserves any of it: tile the whole monitor.
-    let r = info.monitorInfo.rcMonitor;
-    let adapter = adapter_of(&device).unwrap_or_else(|| "?".into());
-    unsafe { &mut *(out.0 as *mut Vec<Monitor>) }.push(Monitor {
-        id: OutputId(path.unwrap_or_else(|| device.clone())),
-        rect: Rect { left: r.left, top: r.top, right: r.right, bottom: r.bottom },
-        dpi: x,
-        primary: info.monitorInfo.dwFlags & MONITORINFOF_PRIMARY != 0,
-        adapter,
-        device,
-    });
-    true.into()
-}
-
-/// The name of the adapter whose output is `device` (\\.\DISPLAYn).
-fn adapter_of(device: &str) -> Option<String> {
-    let wide = |a: &[u16]| String::from_utf16_lossy(&a[..a.iter().position(|&c| c == 0).unwrap_or(a.len())]);
-    (0..).map_while(|i| {
-        let mut dd = DISPLAY_DEVICEW { cb: size_of::<DISPLAY_DEVICEW>() as u32, ..Default::default() };
-        unsafe { EnumDisplayDevicesW(PCWSTR::null(), i, &mut dd, 0) }.as_bool().then_some(dd)
-    })
-    .find(|dd| wide(&dd.DeviceName) == device)
-    .map(|dd| wide(&dd.DeviceString))
-}
-
-/// Sets the configured modes. A monitor with no interface path (only its
-/// \\.\DISPLAYn) has no EDID to match by, and is left as it is.
-fn set_modes(list: &[Monitor]) {
-    for m in list.iter().filter(|m| m.id.0.starts_with(r"\\?\")) {
-        crate::modes::apply(&m.device, &m.id.0);
-    }
 }
 
 fn screens(list: &[Monitor]) -> Screens {
@@ -355,11 +264,11 @@ pub fn start(events_to: HWND) {
         log("Windows started the uiAccess build without uiAccess: is its certificate (CN=defenestrate shell) in the machine's Trusted Root store?");
     }
     REACH.set(reach);
-    let found = monitors();
-    log(&format!("monitors: {}", describe(&found)));
+    let found = monitors::monitors();
+    log(&format!("monitors: {}", monitors::describe(&found)));
     // Its WM_DISPLAYCHANGE lays out the tiles again at the new size.
-    set_modes(&found);
-    reset_work_area(&found);
+    monitors::set_modes(&found);
+    monitors::reset_work_area(&found);
     // One size for every monitor: the primary's, which is first.
     let dpi = found.first().map_or(96, |m| m.dpi);
     let config = settings::get();
@@ -392,7 +301,7 @@ pub fn start(events_to: HWND) {
         let _ = EnumWindows(Some(collect), LPARAM((&raw mut existing) as isize));
     }
     for &w in &existing {
-        restore_caption(w);
+        captions::restore(w);
     }
     // EnumWindows goes top of the z-order down; adding bottom-up leaves
     // the topmost window focused, as it was.
@@ -581,35 +490,16 @@ pub fn activate(w: HWND) {
 
 /// WM_DISPLAYCHANGE: a monitor came or went, or one changed resolution.
 pub fn screen_changed() {
-    let found = monitors();
-    log(&format!("monitors changed: {}", describe(&found)));
-    set_modes(&found);
-    reset_work_area(&found);
+    let found = monitors::monitors();
+    log(&format!("monitors changed: {}", monitors::describe(&found)));
+    monitors::set_modes(&found);
+    monitors::reset_work_area(&found);
     let list = screens(&found);
     MONITORS.set(found);
     // Windows has moved what was on a monitor that went away onto another,
     // and those moves aren't ours to animate.
     cut();
     update(|wm| Some(wm.set_screens(list)));
-}
-
-fn describe(list: &[Monitor]) -> String {
-    list.iter().map(|m| format!("{} {:?} at {} dpi on {}", m.id.0, m.rect, m.dpi, m.adapter)).collect::<Vec<_>>().join(", ")
-}
-
-/// A shell that sets the work area owns it; the previous shell (or the bar
-/// this one used to have) may have left part of it reserved. Windows only
-/// has one to set, the primary monitor's. No SPIF_SENDCHANGE: that
-/// broadcasts WM_SETTINGCHANGE and waits on every window, and on a first
-/// boot a busy installer stalled it long enough that the shell never got as
-/// far as its keyboard hook.
-fn reset_work_area(list: &[Monitor]) {
-    let Some(primary) = list.iter().find(|m| m.primary).or(list.first()) else { return };
-    let r = primary.rect;
-    let mut full = RECT { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
-    if let Err(e) = unsafe { SystemParametersInfoW(SPI_SETWORKAREA, 0, Some((&raw mut full).cast()), Default::default()) } {
-        log(&format!("resetting the work area failed: {e}"));
-    }
 }
 
 /// Gives focus back to the workspace's focused window, e.g. after the
@@ -629,7 +519,7 @@ pub fn release() {
         }
     }
     for w in STRIPPED.take() {
-        restore_caption(w);
+        captions::restore(w);
     }
 }
 
@@ -875,7 +765,7 @@ fn apply(fx: Effects<HWND>) {
         }
         for &(w, from, to) in &fx.carry {
             if let Some(r) = window_rect(w) {
-                move_to(w, carried(r, from, to));
+                move_to(w, to_win(carried(from_win(r), from, to)));
                 crossed = true;
             }
         }
@@ -921,17 +811,12 @@ fn now() -> Duration {
     EPOCH.get().map(|e| e.elapsed()).unwrap_or_default()
 }
 
-/// COSMIC keeps a floating window's place relative to its output when it
-/// moves it to another (`position_relative`).
-fn carried(r: RECT, from: Rect, to: Rect) -> RECT {
-    let (w, h) = (r.right - r.left, r.bottom - r.top);
-    let along = |at: i32, start: i32, len: i32, size: i32, to_start: i32, to_len: i32| {
-        let room = (len - size).max(1);
-        to_start + ((at - start).clamp(0, room) as i64 * (to_len - size).max(0) as i64 / room as i64) as i32
-    };
-    let left = along(r.left, from.left, from.width(), w, to.left, to.width());
-    let top = along(r.top, from.top, from.height(), h, to.top, to.height());
-    RECT { left, top, right: left + w, bottom: top + h }
+fn from_win(r: RECT) -> Rect {
+    Rect { left: r.left, top: r.top, right: r.right, bottom: r.bottom }
+}
+
+fn to_win(r: Rect) -> RECT {
+    RECT { left: r.left, top: r.top, right: r.right, bottom: r.bottom }
 }
 
 /// Hands the window manager's new state to the animator and, if anything
@@ -1077,7 +962,7 @@ fn draw(frame: &Scene<HWND>) {
                 bottom: seen.bottom - outer.top,
             };
             let (at, source) = match clip {
-                Some(clip) => clipped(at, source, clip)?,
+                Some(clip) => clipped(at, from_win(source), clip).map(|(at, source)| (at, to_win(source)))?,
                 None => (at, source),
             };
             let at = Rect { left: at.left - bounds.left, top: at.top - bounds.top, right: at.right - bounds.left, bottom: at.bottom - bounds.top };
@@ -1085,27 +970,6 @@ fn draw(frame: &Scene<HWND>) {
         })
         .collect();
     overlay::draw(&looks);
-}
-
-/// The part of a thumbnail drawn at `at` that's inside `clip`, and the
-/// part of its `source` that shows there; None if none of it is.
-fn clipped(at: Rect, source: RECT, clip: Rect) -> Option<(Rect, RECT)> {
-    let vis = Rect { left: at.left.max(clip.left), top: at.top.max(clip.top), right: at.right.min(clip.right), bottom: at.bottom.min(clip.bottom) };
-    if vis.width() <= 0 || vis.height() <= 0 || at.width() <= 0 || at.height() <= 0 {
-        return None;
-    }
-    if vis == at {
-        return Some((at, source));
-    }
-    let scale = |d: i32, src: i32, dst: i32| (i64::from(d) * i64::from(src) / i64::from(dst)) as i32;
-    let (sw, sh) = (source.right - source.left, source.bottom - source.top);
-    let src = RECT {
-        left: source.left + scale(vis.left - at.left, sw, at.width()),
-        top: source.top + scale(vis.top - at.top, sh, at.height()),
-        right: source.right - scale(at.right - vis.right, sw, at.width()),
-        bottom: source.bottom - scale(at.bottom - vis.bottom, sh, at.height()),
-    };
-    Some((vis, src))
 }
 
 /// The pacing thread's tick: one composited frame went by.
@@ -1255,12 +1119,6 @@ fn move_to(w: HWND, r: RECT) {
     let _ = set_pos(w, r);
 }
 
-/// `r` moved by how far the pointer went since `from`.
-fn shifted(r: RECT, from: Point, to: Point) -> RECT {
-    let (dx, dy) = (to.x - from.x, to.y - from.y);
-    RECT { left: r.left + dx, top: r.top + dy, right: r.right + dx, bottom: r.bottom + dy }
-}
-
 /// COSMIC's Super+drag: left moves the window under the pointer, right
 /// resizes it from the corner nearest the pointer. A tile picked up with
 /// left follows the pointer and drops back into the tiling where it's let
@@ -1293,29 +1151,19 @@ pub fn drag(d: Drag) {
         }
         Drag::Move(to) => match DRAGGING.get() {
             Some(Dragging::Tile { w, from, start }) => {
-                move_to(w, shifted(start, from, to));
+                move_to(w, to_win(shifted(from_win(start), from, to)));
                 let band = scaled_at(DROP_BAND, dpi_at(to));
                 let target = WM.with_borrow(|wm| wm.as_ref().and_then(|wm| wm.drop_preview(w, to, band)));
                 preview::show(target);
             }
-            Some(Dragging::Float { w, from, start }) => move_to(w, shifted(start, from, to)),
+            Some(Dragging::Float { w, from, start }) => move_to(w, to_win(shifted(from_win(start), from, to))),
             Some(Dragging::TileEdge { w, from, corner, axis, at }) => {
                 let at = at + axis.coord(to) - axis.coord(from);
                 update(|wm| Some(wm.move_edge(w, corner, at)));
             }
             Some(Dragging::FloatCorner { w, from, start, corner }) => {
-                let (dx, dy) = (to.x - from.x, to.y - from.y);
                 let min = scaled_at(100, dpi_at(to));
-                let mut r = start;
-                match corner[0] {
-                    Direction::Left => r.left = (r.left + dx).min(r.right - min),
-                    _ => r.right = (r.right + dx).max(r.left + min),
-                }
-                match corner[1] {
-                    Direction::Up => r.top = (r.top + dy).min(r.bottom - min),
-                    _ => r.bottom = (r.bottom + dy).max(r.top + min),
-                }
-                move_to(w, r);
+                move_to(w, to_win(corner_resized(from_win(start), corner, from, to, min)));
             }
             None => {}
         },
@@ -1341,7 +1189,7 @@ fn sync_captions() {
     let tiled = WM.with_borrow(|wm| wm.as_ref().map(Wm::tiled).unwrap_or_default());
     let mut changed = false;
     for &w in &tiled {
-        if strip_caption(w) {
+        if captions::strip(w) {
             STRIPPED.with_borrow_mut(|s| s.push(w));
             changed = true;
         }
@@ -1352,77 +1200,9 @@ fn sync_captions() {
         gone
     });
     for w in gone {
-        changed |= restore_caption(w);
+        changed |= captions::restore(w);
     }
     if changed {
         TimerId::Replace.set(250);
-    }
-}
-
-/// True if `w` had a system title bar and now hasn't. Windows that draw
-/// their own in the client area (Firefox, Chromium, Electron) keep it:
-/// styles can't take that away, so they're left alone.
-fn strip_caption(w: HWND) -> bool {
-    unsafe {
-        if !GetPropW(w, CAPTIONLESS).is_invalid() || draws_own_title_bar(w) {
-            return false;
-        }
-        let style = GetWindowLongPtrW(w, GWL_STYLE) as u32;
-        // Changing another process's window's style waits on its thread.
-        // A caption is enough: fixed-size windows (League's game, windowed)
-        // have no sizing border, and requiring both left them their title
-        // bar (saturn, 2026-11-20).
-        if style & WS_CAPTION.0 != WS_CAPTION.0 || IsHungAppWindow(w).as_bool() {
-            return false;
-        }
-        // What's taken is kept on the window, so exactly that comes back.
-        let taken = style & TITLE_BAR;
-        if SetPropW(w, CAPTIONLESS, Some(HANDLE(taken as usize as *mut c_void))).is_err() {
-            log(&format!("couldn't mark {w:?} as captionless; leaving its title bar"));
-            return false;
-        }
-        SetWindowLongPtrW(w, GWL_STYLE, (style & !taken) as isize);
-        frame_changed(w);
-        true
-    }
-}
-
-/// Gives `w` back the title bar the shell took, if it took one: true if so.
-fn restore_caption(w: HWND) -> bool {
-    unsafe {
-        let taken = GetPropW(w, CAPTIONLESS).0 as usize as u32 & TITLE_BAR;
-        if RemovePropW(w, CAPTIONLESS).is_err() {
-            return false;
-        }
-        // Shells from before kept a plain 1 here, having taken both.
-        let taken = if taken == 0 { TITLE_BAR } else { taken };
-        let style = GetWindowLongPtrW(w, GWL_STYLE) as u32;
-        SetWindowLongPtrW(w, GWL_STYLE, (style | taken) as isize);
-        frame_changed(w);
-        true
-    }
-}
-
-fn frame_changed(w: HWND) {
-    let flags = SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS;
-    unsafe {
-        let _ = SetWindowPos(w, None, 0, 0, 0, 0, flags);
-    }
-}
-
-/// A window whose client area reaches the top of its visible frame has no
-/// system title bar to take: it draws its own.
-fn draws_own_title_bar(w: HWND) -> bool {
-    unsafe {
-        let mut visible = RECT::default();
-        let mut client = RECT::default();
-        let mut origin = POINT::default();
-        if DwmGetWindowAttribute(w, DWMWA_EXTENDED_FRAME_BOUNDS, (&raw mut visible).cast(), size_of::<RECT>() as u32).is_err()
-            || GetClientRect(w, &mut client).is_err()
-            || !ClientToScreen(w, &mut origin).as_bool()
-        {
-            return false;
-        }
-        origin.y <= visible.top + 1
     }
 }

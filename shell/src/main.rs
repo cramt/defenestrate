@@ -12,6 +12,7 @@ mod classify;
 mod cycle;
 mod display;
 mod follow;
+mod geometry;
 mod fuzzy;
 mod motion;
 mod settings;
@@ -19,6 +20,8 @@ mod throttle;
 mod tree;
 mod wm;
 
+#[cfg(windows)]
+mod captions;
 #[cfg(windows)]
 mod desktop;
 #[cfg(windows)]
@@ -33,6 +36,8 @@ mod keys;
 mod launcher;
 #[cfg(windows)]
 mod modes;
+#[cfg(windows)]
+mod monitors;
 #[cfg(windows)]
 mod overlay;
 #[cfg(windows)]
