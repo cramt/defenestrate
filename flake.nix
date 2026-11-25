@@ -19,8 +19,8 @@
       };
       inherit (pkgs) lib;
 
-      windowsExe = src: mainProgram: import ./nix/shell.nix { inherit pkgs crane src mainProgram; };
-      shell = pkgs.callPackage ./nix/sign.nix { unsigned = windowsExe ./shell "defenestrate-shell.exe"; };
+      shellBuild = import ./nix/shell.nix { inherit pkgs crane; src = ./shell; mainProgram = "defenestrate-shell.exe"; };
+      shell = pkgs.callPackage ./nix/sign.nix { unsigned = shellBuild.exe; };
 
       # The Linux-side tool everything goes through, Nix builds included.
       dfnstrate = pkgs.callPackage ./nix/dfnstrate.nix { inherit crane shell; };
@@ -36,7 +36,6 @@
 
       packages.${system} = {
         inherit shell dfnstrate;
-        cosmic-bar-prototype = windowsExe ./prototypes/cosmic-bar "cosmic-bar.exe";
         vm-iso = vm.build.iso;
         vm = vm.build.vm;
         vm-image = vm.build.image;
@@ -51,10 +50,13 @@
       };
 
       checks.${system} = {
-        # Renders the VM config, which fetches only fonts and Firefox, not the
+        # Renders the VM config, which fetches only small downloads, not the
         # ISO: catches config and generator breakage without a 25 GB build.
         vm-rendered = vm.build.rendered;
         dfnstrate-tests = dfnstrate.passthru.tests;
+        # The shell's pure modules (tiling, classification, settings) build
+        # and test natively; only the Win32 glue needs Windows.
+        shell-tests = shellBuild.tests;
         # dfn against a Linux install, in a VM; no Windows needed.
         dfn = import ./nix/tests/dfn.nix { inherit pkgs; rendered = vm.build.rendered; linuxDisk = testLinuxDisk; };
         # dfnstrate logs reading an NTFS volume, in a VM.

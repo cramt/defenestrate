@@ -1,6 +1,6 @@
 # dfn, the Linux half of wsl.linux, without Windows: a VM unpacks the
 # defenestrate distro that `dfnstrate render` made, stands in for what WSL
-# gives a distro (API filesystems, WSLg's sockets, resolv.conf), attaches
+# gives a distro (API filesystems, resolv.conf), attaches
 # the test disk, and drives dfn the way the logon task and shortcuts do.
 { pkgs, rendered, linuxDisk }:
 
@@ -25,9 +25,7 @@ pkgs.vmTools.runInLinuxVM (pkgs.runCommand "dfn-test"
     # onto itself first: binding over it later would hide what's under it.
     mount --bind $d $d
     for fs in proc sys dev; do mount --rbind /$fs $d/$fs; done
-    mkdir -p $d/dev/pts $d/dev/shm $d/tmp/.X11-unix $d/mnt/wslg/runtime-dir/pulse
-    # dfn waits for WSLg's compositor socket before starting an app.
-    python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' $d/mnt/wslg/runtime-dir/wayland-0
+    mkdir -p $d/dev/pts $d/dev/shm
     echo "nameserver 192.0.2.1" > $d/etc/resolv.conf
 
     # Enter the distro the way WSL does: a mount namespace with the distro
@@ -39,6 +37,8 @@ pkgs.vmTools.runInLinuxVM (pkgs.runCommand "dfn-test"
     inside() { nsenter -t $holder -m -r -w -- "$@"; }
     for _ in $(seq 50); do inside /bin/busybox true 2>/dev/null && break; sleep 0.2; done
     dfn() { inside /defenestrate/dfn "$@"; }
+    # The "Linux terminal": the user's login shell, here fed a command.
+    term() { echo "$1" | dfn shell; }
 
     # wsl.conf's boot command, as the instance starts: the disks are
     # attached, so it mounts the install. The logon task's dfn mount runs at
@@ -76,19 +76,16 @@ pkgs.vmTools.runInLinuxVM (pkgs.runCommand "dfn-test"
     if inside /bin/busybox test -e /defenestrate/user-added; then echo "user-added again with the user already in passwd: every logon would restart"; exit 1; fi
     inside /bin/busybox grep -q '^default = user$' /etc/wsl.conf
 
-    uid=$(dfn run id -u)
+    uid=$(term 'id -u')
     [ "$uid" = 1000 ] || { echo "ran as uid $uid, not the user's 1000"; exit 1; }
-    dfn run sh -c 'touch ~/written-from-wsl'
+    term 'touch ~/written-from-wsl'
     [ "$(inside /bin/busybox stat -c %u /linux/home/user/written-from-wsl)" = 1000 ]
 
     # Supplementary groups, as op-secrets' group-readable secrets need.
-    [ "$(dfn run cat /var/lib/test-secret/key)" = s3cret ]
-    # User namespaces, which Firefox-family sandboxes need and the kernel
-    # refuses to a chrooted process.
-    dfn run unshare -U true
-
-    # The "Linux terminal": the user's login shell, here fed a command.
-    [ "$(echo 'id -u' | dfn shell)" = 1000 ]
+    [ "$(term 'cat /var/lib/test-secret/key')" = s3cret ]
+    # User namespaces, which sandboxes and rootless tools need and the
+    # kernel refuses to a chrooted process.
+    term 'unshare -U true'
 
     # What the logon task copies over: symlinks into the store resolved
     # inside the install (os-release is /etc/static/… -> /nix/store/…), and
@@ -100,19 +97,16 @@ pkgs.vmTools.runInLinuxVM (pkgs.runCommand "dfn-test"
     [ "$(cat packed/test-secret/key)" = s3cret ]
     if dfn pack /no/such/path > /dev/null; then echo "pack of a missing path succeeded"; exit 1; fi
 
-    dfn run firefox --version | tee version
-    grep -q 'Mozilla Firefox' version
-
-    # The session environment a desktop would give it.
-    dfn run sh -c 'echo "$XDG_RUNTIME_DIR $WAYLAND_DISPLAY $PULSE_SERVER"; ls -l "$XDG_RUNTIME_DIR"' | tee env
-    grep -q '/run/wslg/runtime-dir wayland-0 unix:/run/wslg/runtime-dir/pulse/native' env
-    grep -q 'wayland-0' env
+    # A runtime dir of the user's own, as logind would make.
+    term 'echo "$XDG_RUNTIME_DIR"; stat -c "%u %a" "$XDG_RUNTIME_DIR"; touch "$XDG_RUNTIME_DIR/probe"' | tee env
+    [ "$(cat env)" = "/run/user/1000
+1000 700" ]
     [ "$(inside /bin/busybox cat /linux/etc/resolv.conf)" = "nameserver 192.0.2.1" ]
 
     # Before Windows reboots: unmounted, flushed, whatever was using it gone.
     inside /bin/busybox sh -c 'cd /linux/home/user && exec /bin/busybox sleep 1000' &
     holder2=$!
-    dfn run sh -c 'echo kept > ~/written-before-reboot'
+    term 'echo kept > ~/written-before-reboot'
     sleep 1
     dfn release
     if inside /bin/busybox grep -q ' /linux' /proc/mounts; then inside /bin/busybox grep ' /linux' /proc/mounts; echo "dfn release left mounts"; exit 1; fi
@@ -122,5 +116,5 @@ pkgs.vmTools.runInLinuxVM (pkgs.runCommand "dfn-test"
     [ "$(inside /bin/busybox cat /linux/home/user/written-before-reboot)" = kept ]
 
     mkdir $out
-    cp version env $out/
+    cp env $out/
   '')

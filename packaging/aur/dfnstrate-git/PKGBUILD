@@ -1,7 +1,7 @@
 # Maintainer: cramt <https://github.com/cramt>
 #
-# VCS package: there are no tagged releases yet. See packaging/aur/README.md
-# for what a tagged `dfnstrate` package would change.
+# VCS package, built from main. See packaging/aur/README.md for what a
+# `dfnstrate` package built from release tags would change.
 
 pkgname=dfnstrate-git
 _pkgname=dfnstrate

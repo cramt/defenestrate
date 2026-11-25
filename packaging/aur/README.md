@@ -41,9 +41,9 @@ when users rebuild.
 
 ## A tagged release package
 
-For a `dfnstrate` (non-git) package next to this one, the project needs:
+Version tags exist (`v0.1.0`, matching `cli/Cargo.toml`). A `dfnstrate`
+(non-git) package next to this one would need:
 
-- Version tags, `v0.1.0` style, matching `cli/Cargo.toml`'s version.
 - A PKGBUILD whose `source` is the tag's tarball,
   `$url/archive/refs/tags/v$pkgver.tar.gz`, with a real `sha256sums`
   (`updpkgsums`) in place of `SKIP`, no `pkgver()`, and no
@@ -53,5 +53,4 @@ For a `dfnstrate` (non-git) package next to this one, the project needs:
   but that needs an AUR SSH key in the repo's secrets.
 
 `dfnstrate-git`'s version starts with the Cargo version
-(`0.1.0.r<commits>.g<hash>`), so it keeps sorting above the release once
-tags exist.
+(`0.1.0.r<commits>.g<hash>`), so it sorts above the matching release.

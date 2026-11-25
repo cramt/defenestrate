@@ -2,6 +2,12 @@
 result*
 /windows-iso.gcroot
 /target/
-/.playwright-mcp/
 # shell/ is its own crate (Windows target), outside the root workspace
 /shell/target
+# README's from-source build signs into here
+/shell-signed/
+# makepkg's work in the AUR package dir
+/packaging/aur/*/src/
+/packaging/aur/*/pkg/
+/packaging/aur/*/*.pkg.tar.*
+/packaging/aur/*/dfnstrate/

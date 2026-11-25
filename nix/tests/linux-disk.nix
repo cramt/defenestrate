@@ -1,5 +1,5 @@
 # A Linux install shaped like saturn's 980 (one btrfs pool with @root, @nix
-# and @home subvolumes), with Firefox for user "user", as a raw disk image to
+# and @home subvolumes), for user "user", as a raw disk image to
 # attach to a defenestrate VM. configs/vm.toml's wsl.linux describes it.
 #
 #   nix build .#test-linux-disk   →   result/disk.raw
@@ -30,10 +30,6 @@ let
         isNormalUser = true;
         uid = 1000;
         extraGroups = [ "secrets" ];
-        # Firefox is the point; the others are the smallest Wayland (weston's
-        # demo clients) and X11 (xeyes) programs, for telling WSLg trouble
-        # from Firefox trouble.
-        packages = [ pkgs.firefox pkgs.weston pkgs.xeyes ];
       };
       documentation.enable = false;
       system.stateVersion = "26.05";
@@ -81,7 +77,7 @@ pkgs.vmTools.runInLinuxVM (pkgs.runCommand "test-linux-disk"
     # first boot. This one never boots, so activate it here.
     nixos-enter --root /mnt -c /nix/var/nix/profiles/system/activate
     grep '^user:' /mnt/etc/passwd
-    # dfn runs Firefox as uid 1000, which needs a home it can write.
+    # dfn's terminal runs as uid 1000, which needs a home it can write.
     [ "$(stat -c %u /mnt/home/user)" = 1000 ]
     mkdir -p /mnt/var/lib/test-secret
     echo s3cret > /mnt/var/lib/test-secret/key

@@ -2,14 +2,14 @@
 # Inside the defenestrate WSL distro (busybox and this script, nothing else).
 # Runs programs from the machine's Linux install: its disks are attached to
 # WSL by the Windows logon task (`wsl --mount --bare`), mounted here like its
-# own fileSystems, and programs run chrooted in it as its user, so Firefox is
-# the same binary with the same profile as when Linux is booted.
+# own fileSystems, and the user's login shell runs chrooted in it as them,
+# with the same home and tools as when Linux is booted. Terminal programs
+# only: WSLg's windows never show under our shell (README).
 #
 #   dfn boot           wsl.conf's boot command: share mounts, then mount
 #   dfn mount          mount the install at /linux (idempotent)
 #   dfn release        unmount it, flushed, before Windows reboots
 #   dfn pack <path>    a tar of the install's <path> on stdout, symlinks followed
-#   dfn run <cmd>...   run a command as the user, through a login shell
 #   dfn shell          the user's own login shell (the "Linux terminal")
 #
 # Two OSes never run at once on a dual boot machine, so sharing the home
@@ -64,17 +64,12 @@ mount_all() {
 	bind /dev "$ROOT/dev"
 	bind /dev/pts "$ROOT/dev/pts"
 	bind /dev/shm "$ROOT/dev/shm"
-	# X11's socket; a booted install makes this directory itself.
-	bind /tmp/.X11-unix "$ROOT/tmp/.X11-unix"
 
 	# The install's /run is a tmpfs when it's booted; give it a fresh one with
 	# what a booted system would have there.
 	if ! is_mounted "$ROOT/run"; then
 		$bb mount -t tmpfs -o mode=755 tmpfs "$ROOT/run"
 		$bb ln -s "$(in_root /nix/var/nix/profiles/system)" "$ROOT/run/current-system"
-		# WSLg's Wayland and PulseAudio sockets, here rather than at
-		# /mnt/wslg so nothing is created on the install's own disk.
-		bind /mnt/wslg "$ROOT/run/wslg"
 		$bb mkdir -p "$ROOT/run/defenestrate"
 		resolv
 	fi
@@ -138,24 +133,13 @@ user_field() {
 		{ echo "dfn: no user $USER_NAME in the install's /etc/passwd" >&2; exit 1; }
 }
 
-# WSLg starts with WSL's VM, which stops a minute after the last distro
-# does, so a launch often comes before its compositor is up.
-wait_for_wslg() {
-	i=0
-	while [ ! -S /mnt/wslg/runtime-dir/wayland-0 ] && [ $i -lt 60 ]; do
-		$bb sleep 0.5
-		i=$((i + 1))
-	done
-}
-
 # as_user COMMAND: runs a bash -lc COMMAND (with "$@" after it) as the user,
-# inside the install, with the environment a desktop session would give it.
-# The runtime dir is WSLg's own (world-writable, its sockets made by its uid
-# 1000, which is also the usual first Linux user).
+# inside the install, with the environment a login session would give it.
 #
 # Not a plain chroot: the kernel refuses user namespaces to a chrooted
 # process (EPERM from clone(CLONE_NEWUSER), "CanCreateUserNamespace()
-# clone() failure"), and Firefox-family sandboxes need them. In a private
+# clone() failure"), and plenty of tools (Firefox-family sandboxes, bwrap,
+# rootless containers) need them. In a private
 # mount namespace the install is moved onto / and then chrooted into, which
 # the kernel counts as the namespace's root: WSL's own init enters a distro
 # this way (src/linux/init/main.cpp).
@@ -166,6 +150,7 @@ as_user() {
 # The second half of as_user, in its own mount namespace: switch root to
 # the install the way WSL's init does.
 enter() {
+	uid=$(user_field 3)
 	gid=$(user_field 4)
 	home=$(user_field 6)
 	$bb mount --make-rprivate /
@@ -174,15 +159,19 @@ enter() {
 	# Absolute paths still resolve from the old root until the chroot (the
 	# kernel doesn't follow a mount on a lookup's starting point); the
 	# working directory is the install, so go through it.
-	exec ./run/defenestrate/busybox chroot . /run/defenestrate/busybox sh /run/defenestrate/dfn _session "$USER_NAME" "$gid" "$home" "$@"
+	exec ./run/defenestrate/busybox chroot . /run/defenestrate/busybox sh /run/defenestrate/dfn _session "$USER_NAME" "$uid" "$gid" "$home" "$@"
 }
 
 # Inside the install, as root: drop to the user and run COMMAND (with "$@"
 # after it) through a login shell.
 session() {
-	user=$1 gid=$2 home=$3 cmd=$4
-	shift 4
+	user=$1 uid=$2 gid=$3 home=$4 cmd=$5
+	shift 5
 	bb=/run/defenestrate/busybox
+	# What logind would make: the user's own runtime dir, on /run's tmpfs.
+	$bb mkdir -p "/run/user/$uid"
+	$bb chown "$uid:$gid" "/run/user/$uid"
+	$bb chmod 700 "/run/user/$uid"
 	# setpriv --init-groups gives the user their supplementary groups too
 	# (secrets are often group-readable: onepassword-secrets for op-secrets);
 	# busybox chpst only sets the primary one, so it's just the fallback.
@@ -195,8 +184,7 @@ session() {
 	# shellcheck disable=SC2086
 	exec $drop $bb env -i \
 		HOME="$home" USER="$user" LOGNAME="$user" \
-		XDG_RUNTIME_DIR=/run/wslg/runtime-dir WAYLAND_DISPLAY=wayland-0 DISPLAY=:0 \
-		PULSE_SERVER=unix:/run/wslg/runtime-dir/pulse/native \
+		XDG_RUNTIME_DIR="/run/user/$uid" \
 		/run/current-system/sw/bin/bash -lc "cd ~; $cmd" dfn "$@"
 }
 
@@ -268,20 +256,12 @@ pack)
 	# the user's to read.
 	exec $bb chroot "$ROOT" /run/defenestrate/busybox tar -ch -C "$($bb dirname "$2")" "$($bb basename "$2")"
 	;;
-run)
-	shift
-	[ $# -ge 1 ] || { echo "usage: dfn run <command> [args]" >&2; exit 2; }
-	do_mount
-	wait_for_wslg
-	as_user 'exec "$@"' "$@"
-	;;
 shell)
 	do_mount
-	wait_for_wslg
 	as_user 'exec "$1" -l' "$(user_field 7)"
 	;;
 *)
-	echo "usage: dfn boot | mount | release | pack <path> | run <command> [args] | shell" >&2
+	echo "usage: dfn boot | mount | release | pack <path> | shell" >&2
 	exit 2
 	;;
 esac
