@@ -15,6 +15,7 @@ mod gpt;
 mod image;
 mod iso;
 mod logs;
+mod ntfs;
 mod pins;
 mod reboot;
 mod reboot_to_linux;

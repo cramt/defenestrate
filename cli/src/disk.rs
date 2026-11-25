@@ -1,4 +1,4 @@
-//! What `flash` and `update` share: finding the disk Windows is on and
+//! What `flash`, `update` and `logs` share: finding the disk Windows is on and
 //! refusing one that's in use, and getting root only once that's settled.
 
 use std::ffi::OsString;
@@ -30,6 +30,18 @@ impl Disk {
     pub fn partition(&self, n: u32) -> String {
         format!("{}-part{n}", self.target.as_str())
     }
+}
+
+/// Where Windows is on a disk `flash` wrote, for everything that finds an
+/// installed Windows (update, logs). Only the whole-disk layout so far: one
+/// `flash --into-free-space` wrote has it at whatever number sfdisk gave
+/// it, which is for here to find.
+pub fn windows_partition(disk: &Disk) -> Result<PathBuf> {
+    let part = disk.partition(WINDOWS_PART);
+    if !std::fs::metadata(&part).is_ok_and(|m| m.file_type().is_block_device()) {
+        bail!("{} has no partition {WINDOWS_PART}; is Windows on it?", disk.target.as_str());
+    }
+    Ok(PathBuf::from(part))
 }
 
 /// The target given on the command line, else the config's installTarget.

@@ -4,21 +4,19 @@
 //! on the Linux side saying why). defenestrate's own logs always; anything
 //! else under C:\ with `--also`.
 
-use std::ffi::OsString;
-use std::os::unix::fs::{FileTypeExt, chown};
+use std::os::unix::fs::chown;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 
 use crate::config::Config;
-use crate::disk;
-use crate::tools::{self, FINDMNT, LSBLK, NTFS3G, NTFS3G_PROBE};
-use crate::update::{Mount, probe};
+use crate::ntfs::{self, Mount, VolumeArgs};
+use crate::tools::{self, NTFS3G, NTFS3G_PROBE};
 
 #[derive(clap::Args)]
 pub struct Args {
-    /// Whole disk Windows is installed on, by /dev/disk/by-id/ [default: the config's installTarget]
-    target: Option<String>,
+    #[command(flatten)]
+    volume: VolumeArgs,
     /// Where the copies go, as C:\'s layout under it.
     #[arg(short, long)]
     out: PathBuf,
@@ -26,10 +24,6 @@ pub struct Args {
     /// (Users/me/.claude/projects, say). Missing ones are skipped.
     #[arg(long, value_name = "PATH")]
     also: Vec<String>,
-    /// Read the NTFS volume in this file instead of a disk's Windows
-    /// partition, skipping every disk check. For tests.
-    #[arg(long, hide = true, value_name = "FILE", conflicts_with = "target")]
-    volume_image: Option<PathBuf>,
 }
 
 const MAX_SIZE: u64 = 50 << 20;
@@ -54,25 +48,7 @@ pub fn run(config: &Config, args: &Args) -> Result<()> {
         wanted.push(plain(p).with_context(|| format!("--also {p:?} isn't a plain path under C:\\"))?);
     }
     let out = std::path::absolute(&args.out)?;
-    let volume = match &args.volume_image {
-        Some(file) => file.clone(),
-        None => {
-            tools::require(&[LSBLK, FINDMNT])?;
-            let disk = disk::unused(disk::target(args.target.as_deref(), config.install_target.clone(), USAGE)?)?;
-            let part = disk.partition(disk::WINDOWS_PART);
-            if !std::fs::metadata(&part).is_ok_and(|m| m.file_type().is_block_device()) {
-                bail!("{} has no partition {}; is Windows on it?", disk.target.as_str(), disk::WINDOWS_PART);
-            }
-            if !disk::is_root() {
-                let mut extra: Vec<OsString> = Vec::new();
-                if args.target.is_none() {
-                    extra.push(disk.target.as_str().into());
-                }
-                disk::rerun_as_root(extra)?;
-            }
-            PathBuf::from(part)
-        }
-    };
+    let volume = args.volume.volume(config, USAGE, || Ok(Vec::new()))?;
 
     // The copies are the caller's, not root's, when sudo ran this: --out
     // and whichever of its parents this makes, never one that was there.
@@ -85,7 +61,7 @@ pub fn run(config: &Config, args: &Args) -> Result<()> {
         }
     }
 
-    probe(&volume, false)?;
+    ntfs::probe(&volume, false)?;
     let mount = Mount::new(&volume, std::env::temp_dir().join(format!("dfnstrate-logs-{}", std::process::id())), false)?;
     let mut copied = 0;
     for rel in &wanted {
