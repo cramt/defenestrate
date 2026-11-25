@@ -3,6 +3,7 @@
 use anyhow::{Context, Result};
 
 use crate::config::{Config, Disk};
+use crate::gpt::ImagePart;
 
 impl Variant {
     /// What the config asks for: the ISO for a USB stick.
@@ -51,35 +52,31 @@ pub fn render(config: &Config, v: &Variant) -> Result<String> {
     );
     let password = format!("<Password>\n<Value>{}</Value>\n<PlainText>true</PlainText>\n</Password>\n", x(&config.user.password));
 
-    // EFI + MSR + Windows. No recovery partition: WinRE stays inside the
-    // Windows partition, and it's one less partition for Linux to step around.
+    // Setup creates partitions in Order, so Order is the partition number.
     let (disk_configuration, install_to) = match v.disk {
         Disk::Interactive => (String::new(), String::new()),
-        Disk::Wipe { disk_id } => (
-            format!(
-                r#"<DiskConfiguration>
-<Disk wcm:action="add">
-<DiskID>{disk_id}</DiskID>
-<WillWipeDisk>true</WillWipeDisk>
-<CreatePartitions>
-<CreatePartition wcm:action="add"><Order>1</Order><Type>EFI</Type><Size>300</Size></CreatePartition>
-<CreatePartition wcm:action="add"><Order>2</Order><Type>MSR</Type><Size>16</Size></CreatePartition>
-<CreatePartition wcm:action="add"><Order>3</Order><Type>Primary</Type><Extend>true</Extend></CreatePartition>
-</CreatePartitions>
-<ModifyPartitions>
-<ModifyPartition wcm:action="add"><Order>1</Order><PartitionID>1</PartitionID><Format>FAT32</Format><Label>EFI</Label></ModifyPartition>
-<ModifyPartition wcm:action="add"><Order>2</Order><PartitionID>2</PartitionID></ModifyPartition>
-<ModifyPartition wcm:action="add"><Order>3</Order><PartitionID>3</PartitionID><Format>NTFS</Format><Label>Windows</Label><Letter>C</Letter></ModifyPartition>
-</ModifyPartitions>
-</Disk>
-<WillShowUI>Never</WillShowUI>
-</DiskConfiguration>
-"#
-            ),
-            format!(
-                "<InstallTo>\n<DiskID>{disk_id}</DiskID>\n<PartitionID>3</PartitionID>\n</InstallTo>\n<InstallToAvailablePartition>false</InstallToAvailablePartition>\n<WillShowUI>Never</WillShowUI>\n"
-            ),
-        ),
+        Disk::Wipe { disk_id } => {
+            let (mut create, mut modify) = (String::new(), String::new());
+            for part in ImagePart::ALL {
+                let n = part.number();
+                let (kind, format) = match part {
+                    ImagePart::Esp => ("<Type>EFI</Type><Size>300</Size>", "<Format>FAT32</Format><Label>EFI</Label>"),
+                    ImagePart::Msr => ("<Type>MSR</Type><Size>16</Size>", ""),
+                    ImagePart::Windows => ("<Type>Primary</Type><Extend>true</Extend>", "<Format>NTFS</Format><Label>Windows</Label><Letter>C</Letter>"),
+                };
+                create += &format!("<CreatePartition wcm:action=\"add\"><Order>{n}</Order>{kind}</CreatePartition>\n");
+                modify += &format!("<ModifyPartition wcm:action=\"add\"><Order>{n}</Order><PartitionID>{n}</PartitionID>{format}</ModifyPartition>\n");
+            }
+            (
+                format!(
+                    "<DiskConfiguration>\n<Disk wcm:action=\"add\">\n<DiskID>{disk_id}</DiskID>\n<WillWipeDisk>true</WillWipeDisk>\n<CreatePartitions>\n{create}</CreatePartitions>\n<ModifyPartitions>\n{modify}</ModifyPartitions>\n</Disk>\n<WillShowUI>Never</WillShowUI>\n</DiskConfiguration>\n"
+                ),
+                format!(
+                    "<InstallTo>\n<DiskID>{disk_id}</DiskID>\n<PartitionID>{}</PartitionID>\n</InstallTo>\n<InstallToAvailablePartition>false</InstallToAvailablePartition>\n<WillShowUI>Never</WillShowUI>\n",
+                    ImagePart::Windows.number()
+                ),
+            )
+        }
     };
 
     let windows_pe = component(

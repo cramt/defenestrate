@@ -13,7 +13,7 @@ use anyhow::{Context, Result, bail};
 use crate::config;
 use crate::disk::{self, Disk};
 use crate::firmware;
-use crate::gpt;
+use crate::gpt::{self, ImagePart};
 use crate::image::{IMAGE_FILE, SIZE_FILE};
 use crate::tools::{self, BLKDISCARD, BLOCKDEV, EFIBOOTMGR, FINDMNT, LSBLK, MCOPY, NTFSCAT, NTFSRESIZE, PARTX, SFDISK, UDEVADM};
 
@@ -97,14 +97,14 @@ fn whole_disk(disk: &Disk, image: &Path, image_size: u64) -> Result<(u32, u32)> 
     // real end, then grow Windows, the last partition, into the rest. sfdisk
     // resizes in place, keeping the partition GUID the BCD boots by.
     tools::run(SFDISK.cmd().args(["--relocate", "gpt-bak-std"]).arg(dev))?;
-    tools::run_with_input(SFDISK.cmd().args(["--wipe-partitions", "never", "-N", &disk::WINDOWS_PART.to_string()]).arg(dev), ", +\n")?;
+    tools::run_with_input(SFDISK.cmd().args(["--wipe-partitions", "never", "-N", &ImagePart::Windows.number().to_string()]).arg(dev), ", +\n")?;
     // sfdisk re-reads the table itself; a second BLKRRPART races udev's probe
     // of the new partitions and fails with EBUSY. partx updates the kernel's
     // view partition by partition, which works on a busy disk.
     tools::run(UDEVADM.cmd().arg("settle"))?;
     tools::run(PARTX.cmd().arg("-u").arg(dev))?;
     tools::run(UDEVADM.cmd().arg("settle"))?;
-    let windows = disk.partition(disk::WINDOWS_PART);
+    let windows = disk.partition(ImagePart::Windows.number());
     if !std::fs::metadata(&windows).is_ok_and(|m| m.file_type().is_block_device()) {
         bail!("{windows} didn't show up after the resize");
     }
@@ -115,7 +115,7 @@ fn whole_disk(disk: &Disk, image: &Path, image_size: u64) -> Result<(u32, u32)> 
         bail!("the kernel still sees {windows} at its old size; rerun to finish");
     }
     grow_ntfs(&windows)?;
-    Ok((1, disk::WINDOWS_PART))
+    Ok((ImagePart::Esp.number(), ImagePart::Windows.number()))
 }
 
 /// Adds the image's partitions in the disk's one big free region, leaving

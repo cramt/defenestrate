@@ -9,11 +9,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use crate::config::ByIdPath;
+use crate::gpt::ImagePart;
 use crate::tools::{self, FINDMNT, LSBLK, SUDO};
-
-/// Windows' partition on a `build image` disk: ESP, MSR, then Windows, last
-/// so `flash` can grow it.
-pub const WINDOWS_PART: u32 = 3;
 
 /// A whole disk nothing on this machine is using.
 pub struct Disk {
@@ -37,9 +34,10 @@ impl Disk {
 /// `flash --into-free-space` wrote has it at whatever number sfdisk gave
 /// it, which is for here to find.
 pub fn windows_partition(disk: &Disk) -> Result<PathBuf> {
-    let part = disk.partition(WINDOWS_PART);
+    let n = ImagePart::Windows.number();
+    let part = disk.partition(n);
     if !std::fs::metadata(&part).is_ok_and(|m| m.file_type().is_block_device()) {
-        bail!("{} has no partition {WINDOWS_PART}; is Windows on it?", disk.target.as_str());
+        bail!("{} has no partition {n}; is Windows on it?", disk.target.as_str());
     }
     Ok(PathBuf::from(part))
 }

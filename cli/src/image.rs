@@ -16,6 +16,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 
 use crate::config::Config;
+use crate::gpt;
 use crate::tools::{self, ICAT, IFIND, MDIR, QEMU, SFDISK, SWTPM};
 use crate::vm::{self, Firmware, Tpm};
 
@@ -212,9 +213,8 @@ fn watch_events(socket: PathBuf) -> std::sync::Arc<std::sync::Mutex<Option<Strin
 /// writes, read straight off NTFS. That last one also fails on a volume
 /// BitLocker got to, which would be a brick once flashed.
 fn verify(config: &Config, disk: &Path) -> Result<()> {
-    let table: serde_json::Value = serde_json::from_slice(&tools::output(SFDISK.cmd().arg("--json").arg(disk))?)?;
-    let start = |i: usize| table["partitiontable"]["partitions"][i]["start"].as_u64().with_context(|| format!("the image has no partition {}", i + 1));
-    let (esp, windows) = (start(0)?, start(2)?);
+    let image = gpt::Image::from_table(gpt::parse(&tools::output_string(SFDISK.cmd().arg("--json").arg(disk))?)?)?;
+    let (esp, windows) = (image.esp.start, image.windows.start);
 
     tools::run(MDIR.cmd().arg("-i").arg(format!("{}@@{}", disk.display(), esp * 512)).arg("::/EFI/Microsoft/Boot/bootmgfw.efi"))
         .context("setup didn't finish: no Windows Boot Manager on the image's ESP")?;

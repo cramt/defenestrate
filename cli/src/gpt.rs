@@ -16,6 +16,36 @@ const ESP_TYPE: Guid = Guid::parse_const("C12A7328-F81F-11D2-BA4B-00A0C93EC93B")
 const MSR_TYPE: Guid = Guid::parse_const("E3C9E316-0B5C-4DB8-817D-F92DF00215AE");
 const BASIC_DATA_TYPE: Guid = Guid::parse_const("EBD0A0A2-B9E5-4433-87C0-68B6B72699C7");
 
+/// The partitions of a `build image` disk, in partition-number order:
+/// what the answer file has setup create, and what everything after it
+/// (verify, flash, update, logs) finds again. No recovery partition: WinRE
+/// stays inside Windows', and it's one less for Linux to step around.
+/// Windows comes last so `flash` can grow it into the rest of the disk.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ImagePart {
+    Esp = 1,
+    Msr = 2,
+    Windows = 3,
+}
+
+impl ImagePart {
+    pub const ALL: [ImagePart; 3] = [ImagePart::Esp, ImagePart::Msr, ImagePart::Windows];
+
+    /// Its GPT partition number on the image (and on a whole disk `flash`
+    /// wrote).
+    pub const fn number(self) -> u32 {
+        self as u32
+    }
+
+    fn kind(self) -> Guid {
+        match self {
+            Self::Esp => ESP_TYPE,
+            Self::Msr => MSR_TYPE,
+            Self::Windows => BASIC_DATA_TYPE,
+        }
+    }
+}
+
 /// A GUID, held in the textual (big-endian) byte order.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Guid([u8; 16]);
@@ -181,8 +211,8 @@ pub struct Image {
 
 impl Image {
     pub fn from_table(t: Table) -> Result<Image> {
-        let kinds: Vec<Guid> = t.parts.iter().map(|p| p.kind).collect();
-        if kinds != [ESP_TYPE, MSR_TYPE, BASIC_DATA_TYPE] {
+        let kinds: Vec<(u32, Guid)> = t.parts.iter().map(|p| (p.number, p.kind)).collect();
+        if kinds != ImagePart::ALL.map(|p| (p.number(), p.kind())) {
             bail!("the image isn't laid out as ESP, MSR, Windows; was it made by `build image`?");
         }
         let mut parts = t.parts.into_iter();
@@ -359,6 +389,12 @@ mod tests {
 
     fn image() -> Image {
         Image::from_table(parse(IMAGE).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn the_image_is_laid_out_as_image_part_says() {
+        let i = image();
+        assert_eq!([i.esp.number, i.msr.number, i.windows.number], ImagePart::ALL.map(ImagePart::number));
     }
 
     #[test]
