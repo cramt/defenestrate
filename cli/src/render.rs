@@ -250,6 +250,17 @@ pub fn render(config: &Config, variant: &Variant, cache: &Cache, work: &Path, di
     if let Some(cert) = &shell_cert {
         set(&mut software, &cert.root_key(), "Blob", RegValue::Binary(cert.blob()));
     }
+    let mut default_user = config.registry.default_user.clone();
+    let c = &config.cosmic.compositor;
+    // Over the distro's own Control Panel\Mouse values (acceleration off).
+    let input = [
+        config.display_scale.map(|s| s.registry()),
+        c.input_default.map(|i| crate::input::pointer(&i, config.display_scale.expect("checked with the config"))).transpose()?,
+        c.xkb_config.map(|r| crate::input::keyboard(&r)),
+    ];
+    for (key, name, value) in input.into_iter().flatten().flatten() {
+        set(&mut default_user, key, name, value);
+    }
     let mut shell = Hive::new();
     set(&mut shell, "Microsoft\\Windows NT\\CurrentVersion\\Winlogon", "Shell", RegValue::Sz(shell_command));
 
@@ -257,7 +268,7 @@ pub fn render(config: &Config, variant: &Variant, cache: &Cache, work: &Path, di
         let keys = match f.keys {
             RegKeys::Software => &software,
             RegKeys::System => &config.registry.system,
-            RegKeys::DefaultUser => &config.registry.default_user,
+            RegKeys::DefaultUser => &default_user,
             RegKeys::Shell => &shell,
         };
         let text = registry::render(f.root, keys);

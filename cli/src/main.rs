@@ -13,6 +13,7 @@ mod firmware;
 mod flash;
 mod gpt;
 mod image;
+mod input;
 mod iso;
 mod logs;
 mod ntfs;

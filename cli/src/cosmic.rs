@@ -64,7 +64,7 @@ fn enabled() -> bool {
     true
 }
 
-#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Compositor {
     /// New workspaces tile.
@@ -78,6 +78,13 @@ pub struct Compositor {
     /// The pointer jumps to the middle of a window focused from the keyboard.
     pub cursor_follows_focus: bool,
     pub activation_policy: ActivationPolicy,
+    /// The pointer's speed, as Windows registry values (input.rs). Needs
+    /// `displayScale`.
+    #[serde(default)]
+    pub input_default: Option<crate::input::InputDefault>,
+    /// Key repeat, as Windows registry values (input.rs).
+    #[serde(default)]
+    pub xkb_config: Option<crate::input::XkbRepeat>,
 }
 
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
@@ -343,6 +350,9 @@ mod tests {
             focus_follows_cursor_delay = 250
             cursor_follows_focus = false
             activation_policy = "Focus"
+            [compositor.xkb_config]
+            repeat_delay = 600
+            repeat_rate = 25
             [theme]
             gaps = [0, 8]
             active_hint = 3

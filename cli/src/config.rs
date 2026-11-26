@@ -50,6 +50,11 @@ pub struct Config {
     /// monitor. Only with the built-in shell.
     #[serde(default)]
     pub displays: Vec<DisplayMode>,
+    /// Windows' one display scale for every monitor, as COSMIC writes an
+    /// output's (1.0 is 100 %); unset, Windows picks one per monitor. Set it
+    /// to the Linux output's scale: `cosmic.compositor.input_default` is
+    /// converted for the two being the same (input.rs).
+    pub display_scale: Option<crate::input::DisplayScale>,
     /// Command lines the shell runs once per logon, after the Run keys and
     /// Startup folders it runs as explorer would. Only with the built-in
     /// shell; carried in shell.json, so `update` brings changes.
@@ -727,6 +732,9 @@ fn merge(into: &mut toml::Table, from: toml::Table) {
 
 impl Config {
     fn check(&self) -> Result<()> {
+        if self.cosmic.compositor.input_default.is_some() && self.display_scale.is_none() {
+            bail!("config: cosmic.compositor.input_default: Windows' pointer speed depends on its display scale, so set displayScale (the Linux output's scale, 1.0 for 100 %)");
+        }
         if let Some(linux) = &self.wsl.linux {
             if linux.mounts.first().is_none_or(|m| m.target.as_str() != "/") {
                 bail!("config: wsl.linux.mounts: the first mount must be \"/\"");

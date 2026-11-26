@@ -45,6 +45,7 @@ values per hive. Every config is layered over the distro's own defaults,
 - [x] No automatic driver downloads either (PnP's Device Driver Retrieval Client ignores `NoAutoUpdate`; blocked with `ExcludeWUDriversInQualityUpdate`, `PreventDeviceMetadataFromNetwork` and `DriverSearching`, lifted only for the display-driver pass). Seen on saturn (2026-11-20): no Device Driver Retrieval Client installs, no RebootRequired, and the display-driver pass still ran
 - [ ] Default apps (`defaultApps`: extension or URL scheme -> ProgId), by asking: Windows 11 keeps the default the user's own choice (UserChoice is hashed and UCPD.sys guards it), and the DefaultAssociationsConfiguration policy did nothing on saturn, which isn't domain-joined (two sign-ins, https still Edge). At each logon, while one isn't set and the app registering its ProgId is installed, the shell opens Settings at that app's default-apps page once (`ms-settings:defaultapps?registeredAppMachine=`), for one click on "Set default". Not seen on hardware yet
 - [x] Updates baked into the image ([Windows updates](#windows-updates)): the newest cumulative update, tracked in the Update Catalog, added by DISM in setup's WinPE before Windows first starts. Seen in a `build image` run for saturn: KB5132061 (4.7 GB) went in, and the image's SOFTWARE hive says 26300.9974 against the ISO's 9457; the whole VM run took 15 minutes. The image grew from 35 to 42 GB compressed, since the update's superseded components stay in WinSxS
+- [ ] Pointer speed and key repeat from COSMIC's (`cosmic.compositor.input_default`, `xkb_config`, `displayScale`): libinput's flat multiplier as a straight Enhance-pointer-precision curve that Windows' own 16.16 arithmetic turns into the same multiplier, and the nearest Windows repeat steps. Unit-tested against MarkC's 1-to-1 curves and every libinput speed at the scales Settings offers; the pixels-per-count ratio against Linux's not measured on hardware yet
 - [x] Gaming defaults for the new user: mouse acceleration ("Enhance pointer precision") off, and the Sticky/Filter/Toggle Keys hotkeys that pop a dialog over the game off. Seen in the user's hive after a fresh `build image` booted in the VM: MouseSpeed/MouseThreshold1/MouseThreshold2 0/0/0, StickyKeys 506, Keyboard Response 122, ToggleKeys 58
 - [x] Windows apps (`apps`): winget IDs, unpinned, installed by winget at the first real boot from a logon task first logon registers. Seen in the VM under our shell, online: the script installed Firefox elevated, and an equivalent logon task fired at the next logon, installed 7-Zip and deleted itself. From a fresh `build image`: first logon registered the task, and it ran at the first real boot and removed itself (the VM config has no apps, so only the GPU pass below ran)
   - Pinned drivers (`drivers`): .cabs from the Update Catalog (or any archive 7-Zip opens), added to the image and installed by pnputil at specialize. Seen in a `build image` for saturn: specialize added AMD's three packages to the driver store and removed the staged copy (pnputil exit 3010, "reboot to finish"). Binding to a real GPU not seen yet
@@ -861,6 +862,8 @@ shell has no counterpart for, fail the build.
 | `theme.accent` | #8b8683 | blue | Focus border colour, as COSMIC's `{ red, green, blue }` from 0 to 1 |
 | `shortcuts` | see [Keys](#keys) | none | `"Super+Shift+space" = { System = "PlayPause" }`: keys in COSMIC's spelling, then `"Disable"`, `{ Spawn = "command line" }`, `{ System = ... }` (`Launcher`, `AppLibrary`, `Terminal`, `HomeFolder`, `LockScreen`, `LogOut`, `PlayPause`, `PlayNext`, `PlayPrev`, `Mute`, `VolumeRaise`, `VolumeLower`, `Screenshot`), or a window action (`Close`, `Maximize`, `ToggleTiling`, `ToggleWindowFloating`, `ToggleOrientation`, `Focus`/`Move` with a direction, `Workspace`/`MoveToWorkspace` with 1-9, `NextWorkspace`, `PreviousWorkspace`, `MoveToNextWorkspace`, `MoveToPreviousWorkspace`, `SwitchOutput`/`MoveToOutput` with a direction) |
 | `mode.is_dark` | `true` | `true` | Windows' dark mode for apps and the system, set by the shell as it starts, before the apps the logon opens |
+| `compositor.input_default` | unset | libinput's adaptive | `{ state = "Enabled", acceleration = { profile = "Flat", speed = 0.6 } }`: libinput's flat profile (a count is `1 + speed` pixels) as Windows' pointer settings, below. Needs `displayScale`. Other profiles and InputConfig keys fail the build |
+| `compositor.xkb_config` | unset | 600 ms, 25 Hz | `{ repeat_delay = 600, repeat_rate = 25 }`: key repeat as Windows' nearest `KeyboardDelay` (250 ms steps) and `KeyboardSpeed` (0-31, about 2.5-30 Hz). Only these two keys: the layout is `inputLocale` |
 | `window_rules.tiling_exception_custom` | Discord's updater | none | Windows that float although they'd tile: `[{ appid = "^LeagueClientUx$", title = "" }]`, both unanchored regexes as in COSMIC (`""` matches anything), `enabled = false` to keep one around unused. The app ID is the exe's name without `.exe`; `shell.log` names it for every window |
 
 Pixel sizes are scaled by the display's DPI. Keys are named as xkb keysyms
@@ -908,10 +911,40 @@ from before the file existed doesn't get it from `update` (it never creates
 files) and runs with COSMIC's stock settings until it's reflashed.
 
 COSMIC settings without a Windows meaning aren't there: `show_minimize`
-(tiles have no title bar), the panel and dock, fonts and density (no libcosmic
-UI), and the keyboard and pointer settings, which are per machine and are
-Windows' own registry values (`Control Panel\Keyboard`, `Control Panel\Mouse`
-under `registry.defaultUser`).
+(tiles have no title bar), the panel and dock, and fonts and density (no
+libcosmic UI).
+
+The pointer and key repeat aren't the shell's: `dfnstrate` writes them as
+the new user's registry values (`Control Panel\Mouse`, `Control
+Panel\Keyboard`) at install, over the distro's acceleration-off defaults, so
+`update` doesn't carry a change; a reflash does. The aim is that the same
+hand movement moves the pointer as far on both systems (`cli/src/input.rs`
+has the maths and its sources). libinput's flat profile multiplies raw counts
+by `1 + speed` with no DPI normalising, in COSMIC's logical pixels.
+Windows' pointer speed slider only has steps (1.25x, 1.5x, 1.75x), so the
+multiplier goes into "Enhance pointer precision" instead, as a straight line
+through the origin (`SmoothMouseXCurve`/`SmoothMouseYCurve`, MarkC's fix),
+with the slider in the middle. That reaches any multiplier to within
+1/65536. Windows scales the curve by its display DPI as COSMIC scales motion
+by the output's, so the two match when the scales do: `displayScale` is the
+Linux output's scale, which Windows then uses for every monitor
+(`Win8DpiScaling`, `LogPixels`):
+
+```toml
+displayScale = 1.0
+[cosmic.compositor.input_default]
+state = "Enabled"
+acceleration = { profile = "Flat", speed = 0.6042271248762552 }
+[cosmic.compositor.xkb_config]
+repeat_delay = 600
+repeat_rate = 25
+```
+
+Raw-input games ignore all of this, as on Linux. Enhance pointer precision
+being on is visible to programs that read it (SPI_GETMOUSE); a game that
+turns it off for itself while it runs gets Windows' 1x. FilterKeys could
+repeat at the exact millisecond values, but only with SlowKeys' acceptance
+delay on every keystroke, so key repeat is the nearest step instead.
 
 ## How it works
 
