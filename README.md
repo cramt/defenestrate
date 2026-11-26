@@ -59,7 +59,7 @@ values per hive. Every config is layered over the distro's own defaults,
 - [x] Updating an install from Linux without a reflash (`dfnstrate update`, `build.update`): the shell, fonts and WSL payload are rewritten in place on the shut-down Windows partition, each keeping its NTFS security descriptor, and the logon task re-imports the distro when `rootfs.tar` changed. Registry config that changed goes onto the boot queue, below
 - [x] The boot queue ([Boot queue](#boot-queue)): what Linux asks Windows to do once at its next boot, typed by phase (HKLM imports as SYSTEM at startup, HKCU imports as the user at logon), run once each by `boot.ps1` with a done marker per action, logged to `%ProgramData%\defenestrate\boot-*.log`. A build's image starts with the registry config on it, so the first boot runs the queue as every `update` will; `update` queues a hive's import only when its rendered .reg changed since the last one queued. Unit-tested (hashing and change detection, numbering and replacing, done markers, which phase each action gets, which values get a settings refresh); `checks.boot-queue` runs `update` against an NTFS image in a VM (created files inherit `C:\Windows\Setup\defenestrate`'s ACL, a second run queues nothing, a keyboard change queues only the user import) and then the runner on that queue under pwsh on Linux with Windows' calls faked (each action once and in order, a failure resuming where it stopped, the refreshes, refusals outside a phase's root or of a payload not matching its hash). Not run on Windows yet: `reg import` from the tasks, the ACL check, the SystemParametersInfo calls, and the registration from `linux-first.ps1` on an install from before the queue
 - [x] Reading what the last Windows boot logged, from Linux (`dfnstrate logs --out DIR`, `build.logs`): defenestrate's logs (shell, wsl, apps, reboot, linux-first, setup) copied off the shut-down partition through a read-only ntfs-3g mount, plus any `--also` path under C:\\, owned by the caller rather than root. Checked in a VM (`checks.logs`) against an NTFS image; not yet on a real disk
-- [x] Firefox survives a reflash, and the first install starts logged in ([Firefox across reflashes](#firefox-across-reflashes), `persist.firefox`): `flash` copies the old install's `%APPDATA%\Mozilla\Firefox` to a store on Linux before erasing it and writes it onto the new one before its first boot; with nothing kept yet, it seeds a new profile with a Linux browser's cookies, logins and containers. Unit-tested (which files go and come back, kept over seed over nothing, the seeded profiles.ini/installs.ini, container ids against cookies), and `checks.persist` runs save, restore and seed against NTFS images in a VM: the copy-off leaves the volume untouched, the restored files inherit the profile directory's ACL instead of Everyone: full control, compatibility.ini stays behind, a seed taken from a WAL database a browser hasn't checkpointed has every row, and a browser holding its database fails the seed before anything is written. Not run by `flash` onto a real disk, and not seen in a Windows Firefox yet: that it opens the restored or seeded profile and is still logged in is for a real boot
+- [x] Firefox survives a reflash, and the first install starts logged in ([Firefox across reflashes](#firefox-across-reflashes), `persist.firefox`): `flash` copies the old install's `%APPDATA%\Mozilla\Firefox` to a store on Linux before erasing it and writes it onto the new one before its first boot; with nothing kept yet, it seeds a new profile with a Linux browser's cookies, logins and containers. `update` seeds an existing install's profile too, once per profile ([Seeding an existing install](#seeding-an-existing-install)), and the seed is taken while the browser runs. Unit-tested (which files go and come back, kept over seed over nothing, the seeded profiles.ini/installs.ini, container ids against cookies, which profile the machine-wide install opens, seeding once per profile and moving the profile's own files aside, when a live copy is whole), and `checks.persist` runs save, restore, seed and `update` against NTFS images in a VM: the copy-off leaves the volume untouched, the restored files inherit the profile directory's ACL instead of Everyone: full control, compatibility.ini stays behind, a seed taken from a WAL database a browser hasn't checkpointed has every row, also while a browser holds it as Firefox and Zen do and writes to it, a database held in rollback-journal mode fails the seed before anything is written, and `update` seeds the install's profile once (its own files moved aside, a stale -wal included), warns and carries on when the seed fails, and `persist seed --force` seeds again. The live copy read saturn's running Zen consistently in 30 of 30 tries (2026-11-26), but never had to retry, so the retry path is only unit-tested. Not run by `flash` or `update` onto a real disk, and not seen in a Windows Firefox yet: that it opens the restored or seeded profile and is still logged in is for a real boot
 - [x] "Reboot to Linux" unmounts the Linux install inside WSL first (`dfn release`: flush, ask then make whatever uses it quit, unmount deepest first, read-only if something won't let go), then shuts WSL down. Without it, the last 30 s of what Windows wrote to the install were lost, since btrfs writes back every 30 s and the reboot killed WSL's VM with it mounted (seen on saturn: a report's last items and a rename, done and then missing on Linux). Checked in the dfn VM test; a plain Windows shutdown or a reboot from elsewhere still doesn't release it
   - Seen on a `build image` output booted in the VM: `update` rewrote `rootfs.tar` and `wsl-logon.ps1` with their descriptors unchanged; at the next logon the distro was re-imported with the new `dfn` and mounted the test install, which the image's older distro had failed to; the logon after that didn't re-import. The partition was reached through ntfs-3g in a user namespace, so the by-id disk route has only been run as far as its refusals (a mounted disk, a partition, a non-by-id path), not onto a real disk
 - [x] `dfnstrate reboot`: into Windows once, by the firmware's BootNext, so the boot after it is Linux again. Picks the Windows Boot Manager entry whose ESP is on a disk that's attached, refuses to guess between two Windows (`--entry`); entries sharing an ESP count as one, `--no-reboot` only sets it. Seen in the VM on a `flash --into-free-space` disk: with dfnstrate's entry and Windows' own on one ESP it set BootNext without asking; not yet run on real hardware
@@ -161,7 +161,7 @@ them all.
 | `build iso` | `7zip wimlib hivex libisoburn` | `7zip wimtools libwin-hivex-perl xorriso` |
 | `build image`, `vm` | the above, `qemu-desktop swtpm edk2-ovmf mtools sleuthkit util-linux` | the above, `qemu-system-x86 qemu-utils swtpm swtpm-tools ovmf mtools sleuthkit util-linux` |
 | `flash` | `util-linux ntfs-3g efibootmgr mtools sudo`, and `sqlite` with `persist.firefox.seed` | `util-linux ntfs-3g efibootmgr mtools sudo`, and `sqlite3` with `persist.firefox.seed` |
-| `update` | `util-linux ntfs-3g hivex sudo` | `util-linux ntfs-3g libwin-hivex-perl sudo` |
+| `update` | `util-linux ntfs-3g hivex sudo`, and `sqlite` with `persist.firefox.seed` | `util-linux ntfs-3g libwin-hivex-perl sudo`, and `sqlite3` with `persist.firefox.seed` |
 | `reboot` | `efibootmgr systemd sudo` | `efibootmgr systemd sudo` |
 
 `build image` and `vm` also need access to `/dev/kvm`. `build image` alone
@@ -487,6 +487,10 @@ edits the SOFTWARE hive (with hivex, in place like the files): the new
 certificate goes into the machine's Root store before the new shell is
 written, and the previous build's comes out after.
 
+With `persist.firefox.seed`, `update` also seeds the Linux browser's
+logins into the profile Windows' Firefox opens, once per profile
+([Seeding an existing install](#seeding-an-existing-install)).
+
 ### Boot queue
 
 Some changes can only be made by Windows itself: a registry import has to
@@ -611,9 +615,9 @@ seed = { profile = "/home/me/.config/zen/default", history = false }
    `key4.db`, `containers.json`, and with `history` `places.sqlite` and
    `favicons.sqlite`. The databases are copied with sqlite's `.backup`, as
    the profile's owner and read-only, so the copy is consistent and
-   includes what's still in the write-ahead log. Firefox and Zen keep their
-   databases locked while they run, so close the browser first; `flash`
-   fails before erasing anything if one is locked. A kept profile always
+   includes what's still in the write-ahead log. The browser can stay open
+   ([below](#taking-the-seed-from-a-running-browser)); `flash` fails before
+   erasing anything if a database can't be copied. A kept profile always
    wins over the seed: after the first install, Windows' Firefox is its own.
 
 Writing it before the first boot rather than through the logon copy
@@ -658,6 +662,70 @@ copy can't be read after a reflash. Carrying the DPAPI master keys
 the disk by-id like `update`) do either half on their own: save from an
 install without reflashing, or restore onto one that hasn't run Firefox
 yet. Restore refuses an install that already has a Firefox directory.
+
+#### Seeding an existing install
+
+On Windows, Linux is the spec: logged in on Linux, logged in on Windows.
+An install flashed before the seed existed, or whose Firefox made its own
+profile, has none of the seed's logins, so `update` (Windows shut down, as
+for the rest of it) seeds the profile Windows' Firefox opens: the one
+profiles.ini's `[Install308046B0AF4A39CB]` names (installs.ini's
+`[308046B0AF4A39CB]` if profiles.ini has none), the machine-wide install's.
+With no Firefox directory yet it writes a new seeded profile, as `flash`
+does. A per-user Firefox, or a profile outside the Firefox directory
+(IsRelative=0), is reported and left alone.
+
+Once per profile: the seed leaves `defenestrate-seed.txt` in it, and
+`update` skips a profile that has one (a `flash` seed writes it too).
+Seeding at every update would keep Windows following Linux, but it
+replaces cookies.sqlite whole, so every site logged into on Windows alone,
+and every password saved there, would be lost at the next update. A
+merge would avoid that, but cookies.sqlite's schema follows the Gecko
+version, which Zen and winget's Firefox don't share. So after the seed,
+Windows' Firefox is its own, and `dfnstrate persist seed --force` seeds it
+again on purpose (without `--force` it does what `update` does). A
+profile Firefox makes anew has no marker and gets seeded at the next
+update.
+
+The seed's files the profile has (cookies.sqlite, logins.json, logins.db,
+key4.db, containers.json, with `history` places.sqlite and favicons.sqlite,
+plus logins-backup.json, encrypted with the key4.db being replaced) move
+into `defenestrate-seed-replaced` in the profile, with their -wal and -shm
+(a stale log next to the new database would be replayed over it). They're
+renamed on the volume, so they keep their permissions, and moving them back
+undoes the seed. A forced seed keeps that first set, the profile's own,
+and drops the earlier seed's. New files inherit the profile's ACL, as a
+restore's do.
+
+Written offline, not queued for Windows to copy at logon (the [boot
+queue](#boot-queue)): a queued copy would have to finish before the shell
+autostarts Firefox, which the queue's user phase doesn't wait for, and the
+offline route is the one `flash` already writes the seed with, ACLs
+included, and the one a VM can test. Firefox is shut, since Windows is.
+
+A seed that fails (a browser's database that can't be copied, an install
+whose user hasn't logged on) is a warning: the rest of `update` is done.
+
+#### Taking the seed from a running browser
+
+Firefox and Zen open cookies.sqlite, places.sqlite and favicons.sqlite in
+WAL mode with `locking_mode=EXCLUSIVE`: they hold a write lock over
+sqlite's whole shared-lock range while they run and keep no `-shm` (seen
+on saturn's Zen, 2026-11-26), so no other connection can open them, and
+`.backup` fails with "database is locked". The files can still be read:
+dfnstrate copies the database and its `-wal` raw, and keeps the copy only
+when the database file didn't change (same inode, size and mtime) and the
+log is the same file with the same header (checkpoint sequence and salts,
+which change whenever the log starts over) and no shorter. In WAL mode a
+writer only appends to the log; the database file changes only at a
+checkpoint, after which the log starts over. Frames appended during the
+copy don't matter: each carries a checksum chained from the header, and
+opening the copy keeps everything up to the last whole commit. The copy is
+then opened on its own (which replays the log), must pass
+`PRAGMA integrity_check`, and is backed up into one file. A copy that
+changed or fails the check is retried, five times. A database held in
+rollback-journal mode, whose writer changes the file in place, isn't
+copied this way: the seed fails with a message to close the browser.
 
 ### Windows updates
 

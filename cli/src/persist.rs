@@ -288,7 +288,11 @@ fn orphans<'a>(origin_attributes: impl IntoIterator<Item = &'a str>, defined: &B
 /// The seed's files, copied out of its profile. Removed on drop.
 pub struct Snapshot {
     dir: PathBuf,
+    /// Those of seed_files the profile has.
     files: Vec<&'static str>,
+    history: bool,
+    /// The Linux profile, for the marker.
+    source: PathBuf,
 }
 
 impl Drop for Snapshot {
@@ -297,12 +301,17 @@ impl Drop for Snapshot {
     }
 }
 
-/// Runs sqlite3 as the profile's owner, read-only: as root it would leave
-/// root-owned -wal and -shm files in the profile, which the browser then
-/// can't open.
-fn sqlite(owner: (u32, u32), db: &Path, command: &str) -> Result<String> {
+/// Runs sqlite3 as the profile's owner, read-only on the browser's own
+/// files: as root it would leave root-owned -wal and -shm files in the
+/// profile, which the browser then can't open. Read-write only on copies.
+fn sqlite(owner: (u32, u32), db: &Path, access: Access, command: &str) -> Result<String> {
     let mut cmd = SQLITE3.cmd();
-    cmd.args(["-readonly", "-bail", "-cmd", ".timeout 3000"]).arg(db).arg(command);
+    if access == Access::ReadOnly {
+        cmd.arg("-readonly");
+    }
+    // Short: a browser that holds its database holds it until it exits, and
+    // the live copy reads around it rather than waiting.
+    cmd.args(["-bail", "-cmd", ".timeout 1000"]).arg(db).arg(command);
     if crate::disk::is_root() && owner.0 != 0 {
         cmd.uid(owner.0).gid(owner.1);
     }
@@ -311,6 +320,162 @@ fn sqlite(owner: (u32, u32), db: &Path, command: &str) -> Result<String> {
         bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Access {
+    ReadOnly,
+    /// Only ever on a copy in the snapshot's directory.
+    ReadWrite,
+}
+
+/// A database's -wal, -shm or -journal.
+fn sidecar(db: &Path, suffix: &str) -> PathBuf {
+    let mut s = db.as_os_str().to_owned();
+    s.push(suffix);
+    PathBuf::from(s)
+}
+
+/// A WAL database's files at one moment, to tell whether a copy taken in
+/// between holds one state of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Stamp {
+    db: FileStamp,
+    wal: Option<WalStamp>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileStamp {
+    ino: u64,
+    len: u64,
+    mtime: (i64, i64),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WalStamp {
+    ino: u64,
+    len: u64,
+    /// The first 32 bytes: magic, page size, checkpoint sequence and the
+    /// salts, which change whenever the log starts over from its start.
+    header: Vec<u8>,
+}
+
+impl Stamp {
+    fn of(db: &Path) -> Result<Self> {
+        let m = std::fs::metadata(db).with_context(|| db.display().to_string())?;
+        let db_stamp = FileStamp { ino: m.ino(), len: m.len(), mtime: (m.mtime(), m.mtime_nsec()) };
+        let wal = match File::open(sidecar(db, "-wal")) {
+            Ok(mut f) => {
+                let len = f.metadata()?.len();
+                let ino = f.metadata()?.ino();
+                let mut header = vec![0; 32];
+                let n = read_full(&mut f, &mut header)?;
+                header.truncate(n);
+                Some(WalStamp { ino, len, header })
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.into()),
+        };
+        Ok(Self { db: db_stamp, wal })
+    }
+
+    /// Whether files copied between `self` and `after` hold one state of
+    /// the database. In WAL mode a writer only appends frames to the log;
+    /// the database file is written only by a checkpoint, after which the
+    /// log starts over with new salts. So: the database file untouched, and
+    /// the log the same file with the same header and no shorter. Frames
+    /// appended while it was copied don't matter: each carries a checksum
+    /// chained from the header, and opening the copy keeps everything up to
+    /// the last whole commit.
+    fn still(&self, after: &Self) -> bool {
+        self.db == after.db
+            && match (&self.wal, &after.wal) {
+                (None, None) => true,
+                (Some(b), Some(a)) => b.ino == a.ino && b.header == a.header && a.len >= b.len,
+                _ => false,
+            }
+    }
+}
+
+fn read_full(f: &mut File, buf: &mut [u8]) -> std::io::Result<usize> {
+    use std::io::Read;
+    let mut n = 0;
+    while n < buf.len() {
+        match f.read(&mut buf[n..]) {
+            Ok(0) => break,
+            Ok(k) => n += k,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(n)
+}
+
+/// A database file whose header says WAL mode (bytes 18 and 19, the file
+/// format's write and read versions, are 2).
+fn is_wal(db: &Path) -> Result<bool> {
+    let mut header = [0u8; 20];
+    let n = read_full(&mut File::open(db)?, &mut header)?;
+    Ok(n == 20 && header[18] == 2 && header[19] == 2)
+}
+
+const LIVE_ATTEMPTS: u32 = 5;
+
+/// Copies a database the browser keeps locked while it runs. Firefox and
+/// Zen open cookies.sqlite, places.sqlite and favicons.sqlite with
+/// locking_mode=EXCLUSIVE in WAL mode: a write lock over sqlite's whole
+/// shared-lock range for as long as they run and no -shm (seen on saturn's
+/// Zen, 2026-11-26), so no other connection, sqlite's backup included, can
+/// open them. Their files can still be read: the database and its -wal are
+/// copied raw, kept only when neither changed in a way that could tear
+/// them (Stamp::still), and the copy is opened on its own, which replays
+/// the log's committed frames, then checked with integrity_check and
+/// backed up into one file. A database in rollback-journal mode gets no
+/// such guarantee, since a writer changes it in place, so that fails, as
+/// does one that changes through every attempt.
+fn copy_live(owner: (u32, u32), from: &Path, to: &Path, raw_dir: &Path) -> Result<()> {
+    let name = from.file_name().context("a database with no name")?.to_string_lossy().into_owned();
+    let raw = raw_dir.join(&name);
+    for attempt in 1..=LIVE_ATTEMPTS {
+        for f in [raw.clone(), sidecar(&raw, "-wal"), sidecar(&raw, "-shm")] {
+            match std::fs::remove_file(&f) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+                _ => {}
+            }
+        }
+        let before = Stamp::of(from)?;
+        copy_file(from, &raw)?;
+        if before.wal.is_some() {
+            match File::open(sidecar(from, "-wal")) {
+                Ok(mut src) => {
+                    let mut dst = File::options().write(true).create_new(true).open(sidecar(&raw, "-wal"))?;
+                    std::io::copy(&mut src, &mut dst)?;
+                }
+                // Checkpointed and removed in between, which Stamp::still sees.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        if !before.still(&Stamp::of(from)?) {
+            std::thread::sleep(std::time::Duration::from_millis(200 * u64::from(attempt)));
+            continue;
+        }
+        if !is_wal(&raw)? {
+            bail!("it isn't in WAL mode, so a copy of the file alone can be half a transaction");
+        }
+        if crate::disk::is_root() {
+            chown_tree(raw_dir, owner)?;
+        }
+        let check = sqlite(owner, &raw, Access::ReadWrite, "PRAGMA integrity_check;")?;
+        if check.trim() != "ok" {
+            eprintln!("{name}: the copy failed integrity_check (attempt {attempt}): {}", check.trim());
+            continue;
+        }
+        sqlite(owner, &raw, Access::ReadWrite, &format!(".backup '{}'", to.display()))?;
+        println!("{name}: held by the browser, so copied with its write-ahead log and checked (attempt {attempt})");
+        return Ok(());
+    }
+    bail!("it kept changing while it was copied ({LIVE_ATTEMPTS} attempts)")
 }
 
 /// Takes the seed's files out of its profile, while it's in use too.
@@ -330,7 +495,12 @@ pub fn snapshot(seed: &FirefoxSeed) -> Result<Snapshot> {
     if crate::disk::is_root() {
         chown(&dir, Some(owner.0), Some(owner.1))?;
     }
-    let mut snap = Snapshot { dir, files: Vec::new() };
+    let raw_dir = dir.join("raw");
+    let mut snap = Snapshot { dir, files: Vec::new(), history: seed.history, source: profile.to_owned() };
+    std::fs::create_dir(&raw_dir)?;
+    if crate::disk::is_root() {
+        chown(&raw_dir, Some(owner.0), Some(owner.1))?;
+    }
     for (name, kind) in seed_files(seed.history) {
         let from = profile.join(name);
         if !from.is_file() {
@@ -338,34 +508,35 @@ pub fn snapshot(seed: &FirefoxSeed) -> Result<Snapshot> {
         }
         let to = snap.dir.join(name);
         match kind {
-            Kind::Sqlite => {
-                sqlite(owner, &from, &format!(".backup '{}'", to.display())).map_err(|e| {
-                    if e.to_string().contains("locked") {
-                        anyhow::anyhow!(
-                            "{} is locked: the browser using {} keeps its databases to itself while it runs. Close it and rerun; nothing was written",
-                            name,
+            Kind::Sqlite => match sqlite(owner, &from, Access::ReadOnly, &format!(".backup '{}'", to.display())) {
+                Ok(_) => {}
+                Err(e) if e.to_string().contains("locked") => {
+                    std::fs::remove_file(&to).ok();
+                    copy_live(owner, &from, &to, &raw_dir).with_context(|| {
+                        format!(
+                            "{name} is locked by the browser using {}, and couldn't be copied around the lock. Close the browser and rerun; nothing was written",
                             profile.display()
                         )
-                    } else {
-                        e.context(format!("copying {}", from.display()))
-                    }
-                })?;
-            }
+                    })?;
+                }
+                Err(e) => return Err(e.context(format!("copying {}", from.display()))),
+            },
             Kind::Json => {
                 copy_file(&from, &to)?;
             }
         }
         snap.files.push(name);
     }
+    std::fs::remove_dir_all(&raw_dir)?;
     // The copy has been made, so this asks it, not the browser's database.
     if snap.files.contains(&"containers.json") {
-        let attrs = sqlite(owner, &snap.dir.join("cookies.sqlite"), "SELECT DISTINCT originAttributes FROM moz_cookies;")?;
+        let attrs = sqlite(owner, &snap.dir.join("cookies.sqlite"), Access::ReadOnly, "SELECT DISTINCT originAttributes FROM moz_cookies;")?;
         let defined = container_ids(&std::fs::read_to_string(snap.dir.join("containers.json"))?)?;
         let lost = orphans(attrs.lines(), &defined);
         if !lost.is_empty() {
             eprintln!("warning: the seed has cookies in containers containers.json doesn't define ({lost:?}); those sessions won't be reachable");
         }
-    } else if sqlite(owner, &snap.dir.join("cookies.sqlite"), "SELECT DISTINCT originAttributes FROM moz_cookies;")?
+    } else if sqlite(owner, &snap.dir.join("cookies.sqlite"), Access::ReadOnly, "SELECT DISTINCT originAttributes FROM moz_cookies;")?
         .lines()
         .any(|l| user_context_id(l).is_some())
     {
@@ -407,15 +578,10 @@ impl Prepared {
         if dest.exists() {
             bail!("the install already has a Firefox directory ({}); only an install without one gets a kept or seeded one", dest.display());
         }
-        let need = match self {
+        room_for(root, match self {
             Self::Kept(from) => tree_size(from)?,
             Self::Seed(s) => tree_size(&s.dir)?,
-        };
-        let free = free_space(root)?;
-        // Windows needs room of its own to boot.
-        if need + (1 << 30) > free {
-            bail!("the profile is {} MiB and the install has {} MiB free", need >> 20, free >> 20);
-        }
+        })?;
         std::fs::create_dir_all(dest.parent().unwrap())?;
         match self {
             Self::Kept(from) => {
@@ -430,21 +596,19 @@ impl Prepared {
                 let (files, bytes) = copy_tree(from, &dest, Path::new(""), restored)?;
                 println!("restored Firefox's profiles ({files} files, {} MiB)", bytes >> 20);
             }
-            Self::Seed(snap) => {
-                std::fs::create_dir(&dest)?;
-                let (profiles, installs) = seed_inis();
-                std::fs::write(dest.join("profiles.ini"), profiles)?;
-                std::fs::write(dest.join("installs.ini"), installs)?;
-                let profile = dest.join(SEED_PROFILE);
-                std::fs::create_dir_all(&profile)?;
-                for name in &snap.files {
-                    copy_file(&snap.dir.join(name), &profile.join(name))?;
-                }
-                println!("seeded a new Firefox profile with {}", snap.files.join(", "));
-            }
+            Self::Seed(snap) => snap.write_new(&dest)?,
         }
         Ok(())
     }
+}
+
+/// Windows needs room of its own to boot.
+fn room_for(root: &Path, need: u64) -> Result<()> {
+    let free = free_space(root)?;
+    if need + (1 << 30) > free {
+        bail!("the profile is {} MiB and the install has {} MiB free", need >> 20, free >> 20);
+    }
+    Ok(())
 }
 
 fn compatibility_inis(dir: &Path) -> Result<Vec<PathBuf>> {
@@ -483,6 +647,216 @@ fn free_space(dir: &Path) -> Result<u64> {
     }
 }
 
+// Seeding an install's existing Firefox (`update`, `persist seed`).
+
+/// Left in a profile the seed went into, so `update` seeds it once: after
+/// that, logging into a site on Windows stays logged in. A profile Firefox
+/// makes anew (a reflash without a kept one, or the user's own new profile)
+/// has none and gets seeded again. `persist seed --force` seeds over it.
+const SEED_MARKER: &str = "defenestrate-seed.txt";
+
+/// Where a seed puts the files it replaces in an existing profile: moved,
+/// not deleted, so a profile that had logins of its own gets them back by
+/// moving them home again.
+const REPLACED_DIR: &str = "defenestrate-seed-replaced";
+
+/// Also moved aside: Firefox restores logins.json from it when logins.json
+/// is missing, and it's encrypted with the key4.db being replaced.
+const ALSO_REPLACED: &[&str] = &["logins-backup.json"];
+
+/// One key's value in an ini's section.
+fn ini_get<'a>(ini: &'a str, section: &str, key: &str) -> Option<&'a str> {
+    let mut inside = false;
+    for line in ini.lines().map(str::trim) {
+        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            inside = name == section;
+        } else if inside
+            && let Some((k, v)) = line.split_once('=')
+            && k.trim() == key
+        {
+            return Some(v.trim());
+        }
+    }
+    None
+}
+
+/// A profile directory relative to the Firefox directory, as profiles.ini
+/// names one (IsRelative=1): Windows or Unix separators, nothing that leaves
+/// the Firefox directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileDir(PathBuf);
+
+impl ProfileDir {
+    fn parse(path: &str) -> Result<Self> {
+        let mut out = PathBuf::new();
+        for part in path.split(['/', '\\']) {
+            if part.is_empty() || part == "." || part == ".." || part.contains(':') {
+                bail!("{path:?} isn't a profile inside the Firefox directory (an absolute path, IsRelative=0, can't be reached offline)");
+            }
+            out.push(part);
+        }
+        if out.as_os_str().is_empty() {
+            bail!("an empty profile path");
+        }
+        Ok(Self(out))
+    }
+}
+
+/// The profile the machine-wide Firefox opens: profiles.ini's
+/// [Install<hash>] (what Firefox reads), else installs.ini's [<hash>] (its
+/// backup of the same).
+fn install_profile<'a>(profiles_ini: Option<&'a str>, installs_ini: Option<&'a str>) -> Option<&'a str> {
+    profiles_ini
+        .and_then(|i| ini_get(i, &format!("Install{FIREFOX_INSTALL_HASH}"), "Default"))
+        .or_else(|| installs_ini.and_then(|i| ini_get(i, FIREFOX_INSTALL_HASH, "Default")))
+}
+
+/// What `update` does with the seed, given the install's Firefox directory.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SeedPlan {
+    /// No Firefox has run yet: a new profile and the inis naming it, as
+    /// `flash` seeds a first install.
+    New,
+    /// Into the profile the machine-wide install opens.
+    Into(ProfileDir),
+    /// It was seeded before (SEED_MARKER), and Windows' logins are its own.
+    Seeded(ProfileDir),
+}
+
+pub fn plan_seed(firefox: &Path, force: bool) -> Result<SeedPlan> {
+    let read = |name: &str| match std::fs::read_to_string(firefox.join(name)) {
+        Ok(s) => Ok(Some(s)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(anyhow::Error::from(e).context(name.to_owned())),
+    };
+    let (profiles, installs) = (read("profiles.ini")?, read("installs.ini")?);
+    if profiles.is_none() && installs.is_none() {
+        return Ok(SeedPlan::New);
+    }
+    let Some(path) = install_profile(profiles.as_deref(), installs.as_deref()) else {
+        bail!(
+            "profiles.ini names no profile for C:\\Program Files\\Mozilla Firefox ([Install{FIREFOX_INSTALL_HASH}]); Firefox installed per user, or not run since its profiles were made?"
+        );
+    };
+    let profile = ProfileDir::parse(path)?;
+    let dir = firefox.join(&profile.0);
+    if !dir.is_dir() {
+        bail!("profiles.ini names {path} for the install, which isn't there");
+    }
+    Ok(if dir.join(SEED_MARKER).exists() && !force { SeedPlan::Seeded(profile) } else { SeedPlan::Into(profile) })
+}
+
+impl Snapshot {
+    fn marker(&self) -> String {
+        format!("Seeded by dfnstrate {} from {}.\r\n", env!("CARGO_PKG_VERSION"), self.source.display())
+    }
+
+    /// A Firefox directory with nothing but the seeded profile, which the
+    /// machine-wide install opens. `dest` may already exist, without inis.
+    fn write_new(&self, dest: &Path) -> Result<()> {
+        std::fs::create_dir_all(dest)?;
+        let (profiles, installs) = seed_inis();
+        for (name, text) in [("profiles.ini", profiles), ("installs.ini", installs)] {
+            File::options().write(true).create_new(true).open(dest.join(name))?;
+            write_file(&dest.join(name), text.as_bytes())?;
+        }
+        let profile = dest.join(SEED_PROFILE);
+        std::fs::create_dir_all(&profile)?;
+        for name in &self.files {
+            copy_file(&self.dir.join(name), &profile.join(name))?;
+        }
+        File::options().write(true).create_new(true).open(profile.join(SEED_MARKER))?;
+        write_file(&profile.join(SEED_MARKER), self.marker().as_bytes())?;
+        println!("seeded a new Firefox profile with {}", self.files.join(", "));
+        Ok(())
+    }
+
+    /// Replaces the seed's files in an existing profile with this one's.
+    /// What it had of them (databases with their -wal and -shm: a stale log
+    /// would be replayed over the new database) moves into REPLACED_DIR,
+    /// renamed on the same volume so they keep their permissions; a run
+    /// that replaces again keeps only the first, the profile's own.
+    fn write_into(&self, profile: &Path) -> Result<()> {
+        let replaced = profile.join(REPLACED_DIR);
+        let first = !replaced.exists();
+        let mut moved = Vec::new();
+        let names = seed_files(self.history).into_iter().map(|(n, _)| n).chain(ALSO_REPLACED.iter().copied());
+        for name in names {
+            for f in [name.to_owned(), format!("{name}-wal"), format!("{name}-shm"), format!("{name}-journal")] {
+                let from = profile.join(&f);
+                if !from.exists() {
+                    continue;
+                }
+                if first {
+                    std::fs::create_dir_all(&replaced)?;
+                    std::fs::rename(&from, replaced.join(&f)).with_context(|| format!("moving {f} aside"))?;
+                } else {
+                    std::fs::remove_file(&from).with_context(|| format!("removing {f}"))?;
+                }
+                moved.push(f);
+            }
+        }
+        for name in &self.files {
+            copy_file(&self.dir.join(name), &profile.join(name))?;
+        }
+        match File::options().write(true).create_new(true).open(profile.join(SEED_MARKER)) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e.into()),
+        }
+        write_file(&profile.join(SEED_MARKER), self.marker().as_bytes())?;
+        println!("seeded {} with {}", profile.file_name().unwrap_or_default().to_string_lossy(), self.files.join(", "));
+        if first && !moved.is_empty() {
+            println!("  the profile's own ({}) are in {REPLACED_DIR}", moved.join(", "));
+        }
+        Ok(())
+    }
+}
+
+/// Truncates and writes an existing file, never setting its permissions
+/// (copy_tree says why).
+fn write_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let mut f = File::options().write(true).truncate(true).open(path).with_context(|| path.display().to_string())?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    Ok(())
+}
+
+/// The seed into an install's Firefox, on C:\ mounted at `root` with
+/// Mount::inheriting (read-only for a dry run). What `update` runs, which
+/// only reports a failure here: the rest of the update still goes on.
+pub fn seed_install(root: &Path, user: &WindowsName, seed: &FirefoxSeed, force: bool, dry_run: bool) -> Result<()> {
+    let roaming = root.join("Users").join(user.as_str()).join("AppData/Roaming");
+    if !roaming.is_dir() {
+        bail!("the install has no C:\\Users\\{user}\\AppData\\Roaming; has {user} logged on?");
+    }
+    let firefox = root.join(firefox_dir(user));
+    let plan = plan_seed(&firefox, force)?;
+    let what = match &plan {
+        SeedPlan::Seeded(p) => {
+            println!(
+                "Firefox's {} was seeded before, so Windows' logins are its own (`dfnstrate persist seed --force` seeds it again)",
+                p.0.display()
+            );
+            return Ok(());
+        }
+        SeedPlan::New => "a new Firefox profile".to_owned(),
+        SeedPlan::Into(p) => format!("Firefox's {}", p.0.display()),
+    };
+    if dry_run {
+        println!("would seed {what} with {}'s logins", seed.profile.as_str());
+        return Ok(());
+    }
+    let snap = snapshot(seed)?;
+    room_for(root, tree_size(&snap.dir)?)?;
+    match plan {
+        SeedPlan::New => snap.write_new(&firefox),
+        SeedPlan::Into(p) => snap.write_into(&firefox.join(p.0)),
+        SeedPlan::Seeded(_) => unreachable!(),
+    }
+}
+
 // Commands.
 
 #[derive(clap::Args)]
@@ -515,6 +889,16 @@ pub enum Cmd {
     /// persist.firefox.seed, onto an install that has none. `flash` does
     /// this itself onto the install it writes.
     Restore(Args),
+    /// Seed the logins of persist.firefox.seed into the install's Firefox,
+    /// the profile it opens, replacing its own (moved aside, not deleted).
+    /// `update` does this itself, once per profile.
+    Seed {
+        #[command(flatten)]
+        args: Args,
+        /// Seed a profile seeded before too.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(clap::Args)]
@@ -528,13 +912,14 @@ pub struct Args {
     store: StoreArgs,
 }
 
-const USAGE: &str = "dfnstrate persist save|restore -c CONFIG... /dev/disk/by-id/<the disk Windows is on>";
+const USAGE: &str = "dfnstrate persist save|restore|seed -c CONFIG... /dev/disk/by-id/<the disk Windows is on>";
 
 pub fn run(cmd: &Cmd) -> Result<()> {
     tools::require(&[NTFS3G, NTFS3G_PROBE])?;
     let (saving, args) = match cmd {
         Cmd::Save(a) => (true, a),
         Cmd::Restore(a) => (false, a),
+        Cmd::Seed { args, force } => return seed(args, *force),
     };
     let config = &crate::config::load(&args.configs, true)?;
     let firefox = config.persist.firefox.as_ref().context("the config has no persist.firefox, so there's nothing to keep")?;
@@ -553,6 +938,17 @@ pub fn run(cmd: &Cmd) -> Result<()> {
         restore_onto(&volume, config, &prepared)?;
     }
     Ok(())
+}
+
+fn seed(args: &Args, force: bool) -> Result<()> {
+    tools::require(&[NTFS3G, NTFS3G_PROBE, SQLITE3])?;
+    let config = &crate::config::load(&args.configs, true)?;
+    let seed = config.persist.firefox.as_ref().and_then(|f| f.seed.as_ref()).context("the config has no persist.firefox.seed")?;
+    let volume = args.volume.volume(config, USAGE, || Ok(vec![]))?;
+    ntfs::probe(&volume, true)?;
+    let mount = Mount::inheriting(&volume, std::env::temp_dir().join(format!("dfnstrate-persist-{}", std::process::id())))?;
+    seed_install(&mount.dir, &config.user.name, seed, force, false)?;
+    mount.unmount()
 }
 
 /// Copies Firefox off a Windows volume into the store, mounted read-only.
@@ -718,6 +1114,117 @@ mod tests {
         std::fs::remove_dir_all(&d).unwrap();
     }
 
+    fn snapshot_at(dir: &Path, files: &[&'static str]) -> Snapshot {
+        Snapshot { dir: dir.to_owned(), files: files.to_vec(), history: false, source: "/home/me/.config/zen/default".into() }
+    }
+
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<_> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn finds_the_installs_profile() {
+        // saturn's, from its 2026-11-20 flash.
+        let installs = "[308046B0AF4A39CB]\r\nDefault=Profiles/kiq5zat0.default-release\r\nLocked=1\r\n";
+        let profiles = "[Profile1]\r\nName=default\r\nIsRelative=1\r\nPath=Profiles/abc.default\r\nDefault=1\r\n\r\n[Install308046B0AF4A39CB]\r\nDefault=Profiles/kiq5zat0.default-release\r\nLocked=1\r\n\r\n[Profile0]\r\nName=default-release\r\nIsRelative=1\r\nPath=Profiles/kiq5zat0.default-release\r\n";
+        assert_eq!(install_profile(Some(profiles), Some(installs)), Some("Profiles/kiq5zat0.default-release"));
+        assert_eq!(install_profile(None, Some(installs)), Some("Profiles/kiq5zat0.default-release"));
+        // profiles.ini is what Firefox reads.
+        assert_eq!(install_profile(Some("[Install308046B0AF4A39CB]\nDefault=Profiles/a"), Some(installs)), Some("Profiles/a"));
+        // A per-user install's hash isn't the machine-wide one.
+        assert_eq!(install_profile(Some("[InstallE7CF176E110C211B]\nDefault=Profiles/a"), Some("[E7CF176E110C211B]\nDefault=Profiles/a")), None);
+        assert_eq!(install_profile(Some(profiles), None), Some("Profiles/kiq5zat0.default-release"));
+
+        assert_eq!(ProfileDir::parse("Profiles/x.default-release").unwrap(), ProfileDir("Profiles/x.default-release".into()));
+        assert_eq!(ProfileDir::parse("Profiles\\x").unwrap(), ProfileDir("Profiles/x".into()));
+        for bad in ["", "Profiles/../../x", "C:\\Users\\x\\p", "/abs", "Profiles//x", "./x"] {
+            assert!(ProfileDir::parse(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn plans_the_seed_once_per_profile() {
+        let d = tmp("plan");
+        let ff = d.join("ff");
+        std::fs::create_dir_all(&ff).unwrap();
+        // Nothing run yet, or a directory with only crash reports in it.
+        assert_eq!(plan_seed(&ff, false).unwrap(), SeedPlan::New);
+        std::fs::write(ff.join("installs.ini"), "[308046B0AF4A39CB]\r\nDefault=Profiles/kiq5zat0.default-release\r\n").unwrap();
+        assert!(plan_seed(&ff, false).is_err(), "seeded a profile that isn't there");
+        let p = ff.join("Profiles/kiq5zat0.default-release");
+        std::fs::create_dir_all(&p).unwrap();
+        let profile = ProfileDir("Profiles/kiq5zat0.default-release".into());
+        assert_eq!(plan_seed(&ff, false).unwrap(), SeedPlan::Into(profile.clone()));
+        std::fs::write(p.join(SEED_MARKER), "").unwrap();
+        assert_eq!(plan_seed(&ff, false).unwrap(), SeedPlan::Seeded(profile.clone()));
+        assert_eq!(plan_seed(&ff, true).unwrap(), SeedPlan::Into(profile));
+        std::fs::write(ff.join("installs.ini"), "[E7CF176E110C211B]\r\nDefault=Profiles/kiq5zat0.default-release\r\n").unwrap();
+        assert!(plan_seed(&ff, false).is_err(), "seeded a per-user install's profile");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn seeds_into_a_profile_keeping_its_own() {
+        let d = tmp("into");
+        let snap = d.join("snap");
+        std::fs::create_dir_all(&snap).unwrap();
+        std::fs::write(snap.join("cookies.sqlite"), "linux").unwrap();
+        std::fs::write(snap.join("key4.db"), "linux key").unwrap();
+        let p = d.join("profile");
+        std::fs::create_dir_all(&p).unwrap();
+        for (f, c) in [("cookies.sqlite", "windows"), ("cookies.sqlite-wal", "stale"), ("logins.json", "w"), ("logins-backup.json", "w"), ("places.sqlite", "history"), ("prefs.js", "prefs")] {
+            std::fs::write(p.join(f), c).unwrap();
+        }
+        snapshot_at(&snap, &["cookies.sqlite", "key4.db"]).write_into(&p).unwrap();
+        assert_eq!(std::fs::read_to_string(p.join("cookies.sqlite")).unwrap(), "linux");
+        assert_eq!(std::fs::read_to_string(p.join("key4.db")).unwrap(), "linux key");
+        // A stale log would be replayed over the new database, and logins
+        // the seed has none of are encrypted with the key it replaced.
+        for gone in ["cookies.sqlite-wal", "logins.json", "logins-backup.json"] {
+            assert!(!p.join(gone).exists(), "{gone} stayed");
+        }
+        // Not a seed file without history.
+        assert_eq!(std::fs::read_to_string(p.join("places.sqlite")).unwrap(), "history");
+        assert_eq!(std::fs::read_to_string(p.join("prefs.js")).unwrap(), "prefs");
+        assert!(std::fs::read_to_string(p.join(SEED_MARKER)).unwrap().contains("from /home/me/.config/zen/default"));
+        let r = p.join(REPLACED_DIR);
+        assert_eq!(names_in(&r), ["cookies.sqlite", "cookies.sqlite-wal", "logins-backup.json", "logins.json"]);
+        assert_eq!(std::fs::read_to_string(r.join("cookies.sqlite")).unwrap(), "windows");
+
+        // A forced second seed keeps the profile's own, not the first seed's.
+        assert!(!snap.exists(), "the snapshot outlived its use");
+        std::fs::create_dir_all(&snap).unwrap();
+        std::fs::write(snap.join("cookies.sqlite"), "linux 2").unwrap();
+        snapshot_at(&snap, &["cookies.sqlite"]).write_into(&p).unwrap();
+        assert_eq!(std::fs::read_to_string(p.join("cookies.sqlite")).unwrap(), "linux 2");
+        assert_eq!(std::fs::read_to_string(r.join("cookies.sqlite")).unwrap(), "windows");
+        assert!(!p.join("key4.db").exists(), "the seed has no key4.db now, so neither has the profile");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_copy_is_whole_only_if_nothing_tore_it() {
+        let fs = |len, mtime| FileStamp { ino: 1, len, mtime: (mtime, 0) };
+        let wal = |ino, len, salt: u8| Some(WalStamp { ino, len, header: vec![salt; 32] });
+        let s = |db, wal| Stamp { db, wal };
+        let before = s(fs(10, 1), wal(2, 100, 0));
+        // Frames appended while copying: the copy ends at a commit before them.
+        assert!(before.still(&s(fs(10, 1), wal(2, 300, 0))));
+        assert!(before.still(&before.clone()));
+        // A checkpoint wrote the database.
+        assert!(!before.still(&s(fs(10, 2), wal(2, 100, 0))));
+        assert!(!before.still(&s(fs(12, 1), wal(2, 100, 0))));
+        // The log started over (new salts), was truncated, replaced or removed.
+        assert!(!before.still(&s(fs(10, 1), wal(2, 100, 1))));
+        assert!(!before.still(&s(fs(10, 1), wal(2, 50, 0))));
+        assert!(!before.still(&s(fs(10, 1), wal(3, 100, 0))));
+        assert!(!before.still(&s(fs(10, 1), None)));
+        assert!(s(fs(10, 1), None).still(&s(fs(10, 1), None)));
+        assert!(!s(fs(10, 1), None).still(&s(fs(10, 1), wal(2, 100, 0))));
+    }
+
     #[test]
     fn seed_writes_a_locked_profile() {
         let d = tmp("seed");
@@ -727,13 +1234,13 @@ mod tests {
         std::fs::write(snap_dir.join("key4.db"), "k").unwrap();
         let root = d.join("c");
         std::fs::create_dir_all(root.join("Users/cramt/AppData/Roaming")).unwrap();
-        let prepared = Prepared::Seed(Snapshot { dir: snap_dir.clone(), files: vec!["cookies.sqlite", "key4.db"] });
+        let prepared = Prepared::Seed(snapshot_at(&snap_dir, &["cookies.sqlite", "key4.db"]));
         prepared.write(&root, &user()).unwrap();
         let ff = root.join(firefox_dir(&user()));
         assert_eq!(std::fs::read_to_string(ff.join("installs.ini")).unwrap(), seed_inis().1);
-        let mut names: Vec<_> = std::fs::read_dir(ff.join(SEED_PROFILE)).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
-        names.sort();
-        assert_eq!(names, ["cookies.sqlite", "key4.db"]);
+        assert_eq!(names_in(&ff.join(SEED_PROFILE)), ["cookies.sqlite", SEED_MARKER, "key4.db"]);
+        // A flash's seed counts as the seed: update leaves it alone.
+        assert_eq!(plan_seed(&ff, false).unwrap(), SeedPlan::Seeded(ProfileDir(SEED_PROFILE.into())));
         drop(prepared);
         assert!(!snap_dir.exists(), "the snapshot outlived its use");
         std::fs::remove_dir_all(&d).unwrap();

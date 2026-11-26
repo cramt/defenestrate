@@ -19,6 +19,9 @@
 //! The registry config itself goes onto the boot queue (boot.rs) instead,
 //! for Windows' own `reg import` at the next boot, and only when it changed.
 //!
+//! With persist.firefox.seed, the seed's logins go into the profile
+//! Windows' Firefox opens, once per profile (persist.rs, seed_install).
+//!
 //! The volume is mounted so that what this creates (the boot queue's
 //! files, IfMissing::Inherit) gets what its parent directory hands down, as
 //! a file an elevated admin made on Windows would.
@@ -36,7 +39,7 @@ use crate::config::Config;
 use crate::ntfs::{self, Mount, VolumeArgs};
 use crate::registry::{self, Root};
 use crate::render::{self, IfMissing, InstallFile, ReadAt, Rendered, SETUP_DIR};
-use crate::tools::{self, HIVEXREGEDIT, NTFS3G, NTFS3G_PROBE};
+use crate::tools::{self, HIVEXREGEDIT, NTFS3G, NTFS3G_PROBE, SQLITE3};
 use crate::unattend::Variant;
 
 #[derive(clap::Args)]
@@ -51,7 +54,11 @@ pub struct Args {
 const USAGE: &str = "dfnstrate update -c CONFIG... /dev/disk/by-id/<the disk Windows is on>";
 
 pub fn run(config: &Config, cache: &Cache, args: &Args) -> Result<()> {
+    let seed = config.persist.firefox.as_ref().and_then(|f| f.seed.as_ref());
     tools::require(&[NTFS3G, NTFS3G_PROBE, HIVEXREGEDIT])?;
+    if seed.is_some() {
+        tools::require(&[SQLITE3])?;
+    }
     let volume = args.volume.volume(config, USAGE, || {
         // Rendered as the caller first: that fails early on a bad config, and
         // downloads into the caller's cache, which root then reads offline
@@ -137,6 +144,13 @@ pub fn run(config: &Config, cache: &Cache, args: &Args) -> Result<()> {
         for t in &trust.remove {
             println!("{} the earlier shell's certificate {t} from the Root store", if args.dry_run { "would remove" } else { "removed" });
         }
+    }
+    // Last, and only reported: a browser holding its databases, or an
+    // install without the profile, shouldn't cost the update the rest.
+    if let Some(seed) = seed
+        && let Err(e) = crate::persist::seed_install(root, &config.user.name, seed, false, args.dry_run)
+    {
+        eprintln!("warning: Windows' Firefox not seeded (the rest of the update is done): {e:#}");
     }
     mount.unmount()?;
 
