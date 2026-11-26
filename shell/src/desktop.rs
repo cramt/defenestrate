@@ -7,14 +7,17 @@
 //! Monitors come from monitors.rs; WM_DISPLAYCHANGE reads them again.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow};
-use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_INFORMATION_CLASS, TOKEN_QUERY, TokenElevation, TokenUIAccess};
+use windows::Win32::Security::{
+    GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TOKEN_ELEVATION, TOKEN_INFORMATION_CLASS, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+    TokenElevation, TokenIntegrityLevel, TokenUIAccess,
+};
 use windows::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentProcessId, OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
     QueryFullProcessImageNameW,
@@ -25,7 +28,7 @@ use windows::Win32::UI::Shell::{QUNS_RUNNING_D3D_FULL_SCREEN, SHQueryUserNotific
 use windows::Win32::UI::WindowsAndMessaging::{
     EVENT_OBJECT_CLOAKED, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_SHOW, EVENT_OBJECT_UNCLOAKED, EVENT_SYSTEM_FOREGROUND,
     EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART, EnumWindows, GA_ROOT,
-    GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClassNameW, GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindow,
+    GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClassNameW, GetClipCursor, GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindow,
     GetWindowLongPtrW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, HWND_BOTTOM, HWND_TOP, IsIconic, IsWindow,
     IsWindowVisible, IsZoomed, KillTimer, PostMessageW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_RESTORE, SW_SHOWNA, SW_SHOWNOACTIVATE,
     SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SetCursorPos, SetForegroundWindow,
@@ -33,10 +36,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{BOOL, PWSTR};
 
-use crate::classify::{Facts, Fit, Process, Verdict, app_id, classify};
+use crate::classify::{Facts, Process, Verdict, Why, app_id, classify};
 use crate::keys::{Button, Drag};
 use crate::motion::{Animator, Pace, Scene};
-use crate::follow::{Follow, Timer};
+use crate::follow::{Follow, Timer, confined};
 use crate::geometry::{Size, carried, clipped, corner_resized, shifted};
 use crate::throttle::{Ask, Moves};
 use crate::monitors::{self, Monitor};
@@ -168,8 +171,10 @@ thread_local! {
     static MOVING: Cell<bool> = const { Cell::new(false) };
     static FOLLOW: RefCell<Follow<HWND>> = RefCell::new(Follow::new());
     static MONITORS: RefCell<Vec<Monitor>> = const { RefCell::new(Vec::new()) };
-    /// Windows whose verdict is in the log already.
-    static LOGGED: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
+    /// Windows whose verdict is in the log already, with the title it had.
+    static LOGGED: RefCell<HashMap<usize, String>> = RefCell::new(HashMap::new());
+    /// Unowned dialogs on screen (Why::Dialog), kept above the tiles.
+    static DIALOGS: RefCell<Vec<HWND>> = const { RefCell::new(Vec::new()) };
     /// Windows placed whose size is to be read back, and how many times
     /// each has been put off.
     static CHECKS: RefCell<Vec<(HWND, u8)>> = const { RefCell::new(Vec::new()) };
@@ -274,7 +279,7 @@ pub fn start(events_to: HWND) {
     let me = unsafe { GetCurrentProcess() };
     let (elevated, ui_access) = (is_elevated(me), token_flag(me, TokenUIAccess));
     let reach = if elevated || ui_access { Reach::Every } else { Reach::SameLevel };
-    log(&format!("TokenElevation={} TokenUIAccess={}: managing {reach:?} windows", elevated as u8, ui_access as u8));
+    log(&format!("TokenElevation={} TokenUIAccess={} ({}): managing {reach:?} windows", elevated as u8, ui_access as u8, token_summary(me)));
     if crate::handoff::BUILD == crate::handoff::Build::UiAccess && !ui_access {
         log("Windows started the uiAccess build without uiAccess: is its certificate (CN=defenestrate shell) in the machine's Trusted Root store?");
     }
@@ -333,7 +338,6 @@ pub fn start(events_to: HWND) {
                 // A restarted shell keeps each window on its monitor.
                 let centre = visible_frame(w).map(|(_, r)| r.centre());
                 update(|wm| {
-                    opens_as(wm, w, judged.seen.style);
                     Some(match centre {
                         Some(c) => wm.add_at(w, c),
                         None => wm.add(w),
@@ -387,6 +391,7 @@ pub fn on_event(event: u32, w: HWND) {
         EVENT_OBJECT_DESTROY => {
             // Handles get reused; the next window with this one is new.
             LOGGED.with_borrow_mut(|seen| seen.remove(&(w.0 as usize)));
+            DIALOGS.with_borrow_mut(|d| d.retain(|&x| x != w));
             Some(wm.remove(w))
         }
         EVENT_OBJECT_SHOW | EVENT_OBJECT_UNCLOAKED | EVENT_SYSTEM_MINIMIZEEND => {
@@ -398,10 +403,14 @@ pub fn on_event(event: u32, w: HWND) {
             } else if on_screen(w) {
                 let judged = judge(w);
                 log_verdict(w, &judged);
-                (judged.verdict == Verdict::Tile).then(|| {
-                    opens_as(wm, w, judged.seen.style);
-                    wm.add_new(w)
-                })
+                if judged.verdict == Verdict::Float(Why::Dialog) {
+                    DIALOGS.with_borrow_mut(|d| {
+                        if !d.contains(&w) {
+                            d.push(w);
+                        }
+                    });
+                }
+                (judged.verdict == Verdict::Tile).then(|| wm.add_new(w))
             } else {
                 None
             }
@@ -436,14 +445,34 @@ pub fn on_event(event: u32, w: HWND) {
         if !root.is_invalid() && WM.with_borrow(|wm| wm.as_ref().is_some_and(|wm| !wm.manages(root))) && on_screen(root) {
             log_verdict(root, &judge(root));
         }
-        raise_over_tiles(w);
+        raise_over_tiles(w, "focused window");
+        keep_dialogs_up();
+        restyle_letterboxed();
     }
 }
 
-/// A focused window the shell doesn't place goes over any tile drawn over
-/// it (wm::tiles_over). Logged, since why Windows left it under one is
-/// still unknown.
-fn raise_over_tiles(w: HWND) {
+/// COSMIC draws floating windows above tiled ones, so a dialog is never
+/// hidden behind a tile; on Windows, focusing a tile put it over any
+/// unowned dialog. One that came up at logon without the foreground (as
+/// Firefox's did at autostart, saturn 2026-11-26) could sit behind a tile
+/// unseen, and an app waiting on it stays waiting. Not activated: only
+/// lifted over the tiles.
+fn keep_dialogs_up() {
+    let dialogs = DIALOGS.with_borrow_mut(|d| {
+        d.retain(|&w| visible(w));
+        d.clone()
+    });
+    for w in dialogs {
+        if on_screen(w) {
+            raise_over_tiles(w, "dialog");
+        }
+    }
+}
+
+/// A window the shell doesn't place goes over any tile drawn over it
+/// (wm::tiles_over). Logged, since why Windows left a focused one under
+/// one is still unknown.
+fn raise_over_tiles(w: HWND, what: &str) {
     let w = unsafe { GetAncestor(w, GA_ROOT) };
     if w.is_invalid() || WM.with_borrow(|wm| wm.as_ref().is_none_or(|wm| wm.manages(w))) {
         return;
@@ -460,7 +489,7 @@ fn raise_over_tiles(w: HWND) {
         return;
     }
     let over: Vec<String> = over.iter().map(|t| format!("{:#x}", t.0 as usize)).collect();
-    log(&format!("focused window {:#x} was under tile(s) {}; raising it", w.0 as usize, over.join(", ")));
+    log(&format!("{what} {:#x} was under tile(s) {}; raising it", w.0 as usize, over.join(", ")));
     let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS;
     unsafe {
         let _ = SetWindowPos(w, Some(HWND_TOP), 0, 0, 0, 0, flags);
@@ -550,6 +579,13 @@ fn window_under(p: Point) -> Option<HWND> {
     WM.with_borrow(|wm| wm.as_ref().is_some_and(|wm| wm.is_shown(w))).then_some(w)
 }
 
+/// The foreground app has clipped the cursor to less than the desktop
+/// (follow::confined).
+fn cursor_confined() -> bool {
+    let mut clip = RECT::default();
+    unsafe { GetClipCursor(&mut clip) }.is_ok() && confined(from_win(clip), desktop_bounds())
+}
+
 /// focus_follows_cursor: the pointer moved (keys.rs only says so while
 /// it's on). As COSMIC skips it while the pointer is grabbed, nothing
 /// happens during a drag or with a button held.
@@ -560,6 +596,13 @@ pub fn pointer_moved(p: Point) {
         return;
     }
     let under = window_under(p);
+    if cursor_confined() {
+        // Not the user pointing somewhere new: nothing is scheduled, and
+        // what was is dropped.
+        TimerId::Follow.kill();
+        FOLLOW.with_borrow_mut(|f| f.warped(under));
+        return;
+    }
     let timer = FOLLOW.with_borrow_mut(|f| f.moved(under));
     match timer {
         Timer::Restart => TimerId::Follow.set(ffc.delay_ms.try_into().unwrap_or(u32::MAX)),
@@ -574,6 +617,12 @@ fn follow_focus() {
     let Some(w) = FOLLOW.with_borrow_mut(Follow::fire) else { return };
     let foreground = unsafe { GetForegroundWindow() };
     if foreground == w || is_ours(pid_of(foreground)) {
+        return;
+    }
+    // Hit-tested again now: the window that was under the pointer when the
+    // delay started may have moved or gone over since, and a game may have
+    // clipped the cursor in between.
+    if cursor().and_then(window_under) != Some(w) || cursor_confined() {
         return;
     }
     update(|wm| wm.is_shown(w).then(|| Effects { focus: Some(w), ..Effects::default() }));
@@ -614,6 +663,7 @@ pub fn on_timer(id: usize) {
 /// fits as it did isn't placed again, so a window that refuses its size
 /// gets asked once per tile size, not in a loop.
 fn check_fits() {
+    restyle_letterboxed();
     let mut later = Vec::new();
     for (w, tries) in CHECKS.take() {
         if !on_screen(w) {
@@ -626,7 +676,7 @@ fn check_fits() {
             continue;
         }
         let Some((_, seen)) = visible_frame(w) else { continue };
-        let style = unsafe { GetWindowLongPtrW(w, GWL_STYLE) } as u32;
+        let style = captions::own_style(w);
         let mut changed = None;
         update(|wm| {
             let (fit, fx) = wm.took(w, style, Size::of(seen))?;
@@ -655,15 +705,25 @@ fn unhandled(w: HWND) -> bool {
     PENDING.with_borrow(|p| p.iter().any(|&(x, from, to)| x == w && now == Some(from) && from != to))
 }
 
-/// A window about to tile starts as it opened (Fit::at_first): one without
-/// a sizing border is placed at its own size from the first placement on.
-fn opens_as(wm: &mut Wm<HWND>, w: HWND, style: u32) {
-    let Some((_, r)) = visible_frame(w) else { return };
-    let fit = Fit::at_first(style, Size::of(r));
-    if fit != Fit::default() {
-        log(&format!("window {:#x}: {fit}", w.0 as usize));
+/// A letterboxed window whose app changed its style since it refused its
+/// tile is asked for it again (Fit::restyled). Windows says nothing when
+/// another process changes a window's style, so this is looked at when
+/// the shell would be checking anyway: after a placement's fit check and
+/// when a window takes the foreground.
+fn restyle_letterboxed() {
+    let boxed = WM.with_borrow(|wm| wm.as_ref().map(Wm::letterboxed).unwrap_or_default());
+    for w in boxed {
+        let style = captions::own_style(w);
+        let mut changed = None;
+        update(|wm| {
+            let (fit, fx) = wm.restyled(w, style)?;
+            changed = Some(fit);
+            Some(fx)
+        });
+        if changed.is_some() {
+            log(&format!("window {:#x}: its style is {style:#010x} now; asking it for its tile again", w.0 as usize));
+        }
     }
-    wm.set_fit(w, fit);
 }
 
 fn cloaked(w: HWND) -> bool {
@@ -795,14 +855,17 @@ fn class_name(w: HWND) -> String {
 
 /// One line per window the shell sees appear and doesn't already manage,
 /// with why it tiled or not, so a window that tiles wrongly can be told
-/// apart from one the shell never heard of. Each window once.
+/// apart from one the shell never heard of. Each window once, and again if
+/// its title changed: Firefox's untitled dialog at autostart (saturn
+/// 2026-11-26) couldn't be told from the log. The pid ties a dialog to a
+/// launch line.
 fn log_verdict(w: HWND, j: &Judged) {
-    if !j.verdict.worth_logging() || !LOGGED.with_borrow_mut(|seen| seen.insert(w.0 as usize)) {
+    let Judged { seen: Seen { pid, style, ex_style, owner, title, class, .. }, app, verdict, .. } = j;
+    if !verdict.worth_logging() || LOGGED.with_borrow_mut(|seen| seen.insert(w.0 as usize, title.clone())).as_ref() == Some(title) {
         return;
     }
-    let Judged { seen: Seen { style, ex_style, owner, title, class, .. }, app, verdict, .. } = j;
     log(&format!(
-        "window {:#x}: app {} class {class:?} title {title:?} style {style:#010x} exstyle {ex_style:#010x} owner {owner:#x}: {verdict}",
+        "window {:#x}: app {} pid {pid} class {class:?} title {title:?} style {style:#010x} exstyle {ex_style:#010x} owner {owner:#x}: {verdict}",
         w.0 as usize,
         app.as_deref().unwrap_or("?"),
     ));
@@ -826,6 +889,34 @@ fn token_flag(process: HANDLE, class: TOKEN_INFORMATION_CLASS) -> bool {
         let ok = GetTokenInformation(token, class, Some((&raw mut flag).cast::<c_void>()), size_of::<u32>() as u32, &mut len);
         let _ = CloseHandle(token);
         ok.is_ok() && flag != 0
+    }
+}
+
+/// The process's mandatory integrity level (0x2000 medium, 0x3000 high)
+/// and whether its token has uiAccess, for the log: whether what the shell
+/// starts inherits the shell's uiAccess token, which a second Firefox
+/// reaching the first one's remote window could depend on (UIPI).
+pub fn token_summary(process: HANDLE) -> String {
+    let ui_access = token_flag(process, TokenUIAccess) as u8;
+    let level = unsafe {
+        let mut token = HANDLE::default();
+        let mut level = None;
+        if OpenProcessToken(process, TOKEN_QUERY, &mut token).is_ok() {
+            let mut buf = [0u64; 16];
+            let mut len = 0;
+            if GetTokenInformation(token, TokenIntegrityLevel, Some(buf.as_mut_ptr().cast()), size_of_val(&buf) as u32, &mut len).is_ok() {
+                let label = &*buf.as_ptr().cast::<TOKEN_MANDATORY_LABEL>();
+                let sid = label.Label.Sid;
+                let n = *GetSidSubAuthorityCount(sid);
+                level = n.checked_sub(1).map(|last| *GetSidSubAuthority(sid, last.into()));
+            }
+            let _ = CloseHandle(token);
+        }
+        level
+    };
+    match level {
+        Some(l) => format!("integrity {l:#x}, uiAccess {ui_access}"),
+        None => format!("integrity ?, uiAccess {ui_access}"),
     }
 }
 

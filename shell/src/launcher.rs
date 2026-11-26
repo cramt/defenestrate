@@ -203,7 +203,7 @@ fn launch(what: Launch) {
                 },
                 Ok(()) if info.hProcess.is_invalid() => log(&format!("launched {target:?}: no new process")),
                 Ok(()) => {
-                    log(&format!("launched {target:?}: pid {}", GetProcessId(info.hProcess)));
+                    log(&format!("launched {target:?}: pid {} ({})", GetProcessId(info.hProcess), desktop::token_summary(info.hProcess)));
                     let _ = CloseHandle(info.hProcess);
                 }
             }

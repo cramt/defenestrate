@@ -67,6 +67,20 @@ pub fn restore(w: HWND) -> bool {
     }
 }
 
+/// `w`'s style as its app has it: what the shell took put back, so taking
+/// the title bar doesn't read as the app changing its style (classify::Fit).
+pub fn own_style(w: HWND) -> u32 {
+    unsafe {
+        let style = GetWindowLongPtrW(w, GWL_STYLE) as u32;
+        let marked = GetPropW(w, CAPTIONLESS);
+        if marked.is_invalid() {
+            return style;
+        }
+        let taken = marked.0 as usize as u32 & TITLE_BAR;
+        style | if taken == 0 { TITLE_BAR } else { taken }
+    }
+}
+
 fn frame_changed(w: HWND) {
     let flags = SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS;
     unsafe {

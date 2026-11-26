@@ -5,7 +5,24 @@
 //! cancels that, and going on to a third window reschedules it. Leaving
 //! every window (the desktop, a dialog) changes nothing. Pure, so the
 //! desktop layer only feeds it the window under the pointer and runs the
-//! timer it asks for.
+//! timer it asks for. "Under the pointer" is the real top-level window
+//! there (WindowFromPoint), not a tile's rectangle, so a window hanging
+//! over a neighbour's tile is the one that counts where it's on top.
+
+use crate::tree::Rect;
+
+/// Whether a cursor clip of `clip` (GetClipCursor) holds the pointer in
+/// less than the whole `desktop`: a game confining it to its window. Focus
+/// doesn't follow the pointer out of that window then, or the game loses
+/// the foreground and its clip with it, which Windows resets when the
+/// foreground changes (saturn 2026-11-26, League). Only switching on
+/// purpose (Alt+Tab, Super+arrows, a click) moves it. cosmic-comp does the
+/// same for a locked pointer: its motion handler returns before
+/// focus_follows_cursor looks at anything (src/input/mod.rs). It doesn't
+/// for a merely confined one, which can't leave its surface there anyway.
+pub fn confined(clip: Rect, desktop: Rect) -> bool {
+    clip.left > desktop.left || clip.top > desktop.top || clip.right < desktop.right || clip.bottom < desktop.bottom
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Timer {
@@ -72,6 +89,19 @@ impl<W: Copy + Eq> Follow<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// saturn 2026-11-26: League's game clipped the cursor to its window,
+    /// 2551,0-5120,1440 on the 5120x1440 monitor.
+    #[test]
+    fn a_clip_smaller_than_the_desktop_holds_focus() {
+        let desktop = Rect { left: 0, top: 0, right: 5120, bottom: 1440 };
+        assert!(confined(Rect { left: 2551, top: 0, right: 5120, bottom: 1440 }, desktop));
+        assert!(confined(Rect { left: 0, top: 0, right: 5120, bottom: 1439 }, desktop));
+        assert!(!confined(desktop, desktop), "no clip is the whole desktop");
+        let both = Rect { left: -1920, top: 0, right: 5120, bottom: 1440 };
+        assert!(!confined(both, both));
+        assert!(confined(desktop, both), "one monitor of two");
+    }
 
     #[test]
     fn schedules_cancels_and_reschedules_like_cosmic() {

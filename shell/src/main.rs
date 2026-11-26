@@ -226,7 +226,7 @@ mod windows_main {
         match started {
             Ok(()) => unsafe {
                 let _ = CloseHandle(info.hThread);
-                log(&format!("started {line:?}: pid {}", info.dwProcessId));
+                log(&format!("started {line:?}: pid {} ({})", info.dwProcessId, desktop::token_summary(info.hProcess)));
                 Some(info.hProcess)
             },
             Err(e) => {

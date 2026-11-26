@@ -22,12 +22,23 @@ impl std::fmt::Display for Size {
     }
 }
 
-/// A window of `size` centred in `tile`: where a window that won't take its
-/// tile's size goes. One bigger than its tile overflows it by as much on
-/// either side, as nothing can make it smaller.
-pub fn letterboxed(tile: Rect, size: Size) -> Rect {
-    let left = tile.left + (tile.width() - size.width).div_euclid(2);
-    let top = tile.top + (tile.height() - size.height).div_euclid(2);
+/// A window of `size` centred in `tile`, on `monitor`: where a window that
+/// won't take its tile's size goes. One bigger than its tile overflows it,
+/// as nothing can make it smaller, but never off its monitor: centred, it
+/// went past the screen's edge as far as it went over its neighbour, and
+/// a game confining the cursor to its window lost that strip (League at
+/// 2576 in a 2560 tile, saturn 2026-11-26). So it's pushed back onto the
+/// monitor, which puts all of the overflow over the neighbour on the other
+/// side; that much is unavoidable. Bigger than the monitor itself, it
+/// starts at the monitor's top left corner, so its title bar or the top
+/// left of its client stays reachable.
+pub fn letterboxed(tile: Rect, size: Size, monitor: Rect) -> Rect {
+    let along = |start: i32, len: i32, lo: i32, hi: i32, size: i32| {
+        let centred = start + (len - size).div_euclid(2);
+        centred.min(hi - size).max(lo)
+    };
+    let left = along(tile.left, tile.width(), monitor.left, monitor.right, size.width);
+    let top = along(tile.top, tile.height(), monitor.top, monitor.bottom, size.height);
     Rect { left, top, right: left + size.width, bottom: top + size.height }
 }
 
@@ -95,28 +106,58 @@ mod tests {
         Rect { left, top, right, bottom }
     }
 
+    /// A 1920x1080 monitor, its left half the tile.
+    const SCREEN: Rect = Rect { left: 0, top: 0, right: 1920, bottom: 1080 };
+
     #[test]
     fn letterboxing_centres_a_smaller_window_in_its_tile() {
         let tile = rect(0, 0, 960, 1080);
-        assert_eq!(letterboxed(tile, Size { width: 800, height: 600 }), rect(80, 240, 880, 840));
-        assert_eq!(letterboxed(tile, Size::of(tile)), tile);
+        assert_eq!(letterboxed(tile, Size { width: 800, height: 600 }, SCREEN), rect(80, 240, 880, 840));
+        assert_eq!(letterboxed(tile, Size::of(tile), SCREEN), tile);
     }
 
     #[test]
-    fn letterboxing_overflows_a_bigger_window_evenly() {
-        // League's client at its 1280x720 preset, in the left half of a
-        // 1920x1080 monitor: past both sides of the tile alike.
+    fn letterboxing_overflows_a_bigger_window_over_its_neighbour_only() {
+        // League's client at its 1280x720 preset in the left half: centred
+        // it would start at -160, off the screen; it goes over the right
+        // half instead.
         let tile = rect(0, 0, 960, 1080);
-        assert_eq!(letterboxed(tile, Size { width: 1280, height: 720 }), rect(-160, 180, 1120, 900));
+        assert_eq!(letterboxed(tile, Size { width: 1280, height: 720 }, SCREEN), rect(0, 180, 1280, 900));
+        // In the middle of three tiles there's room either side: centred.
+        assert_eq!(letterboxed(rect(640, 0, 1280, 1080), Size { width: 800, height: 600 }, SCREEN), rect(560, 240, 1360, 840));
+    }
+
+    /// saturn 2026-11-26: League's game, 2576x1440 (a 2560x1440 client
+    /// and the 8 px frame it sized itself for), in the right half of the
+    /// 5120x1440 monitor. Centred it sat at 2552..5128, 8 px off the
+    /// screen; now it ends at the screen's edge and its 16 px of overflow
+    /// are all it covers of the left tile.
+    #[test]
+    fn leagues_game_stays_on_its_monitor() {
+        let monitor = rect(0, 0, 5120, 1440);
+        let tile = rect(2560, 0, 5120, 1440);
+        let at = letterboxed(tile, Size { width: 2576, height: 1440 }, monitor);
+        assert_eq!(at, rect(2544, 0, 5120, 1440));
+        assert!(at.left >= monitor.left && at.right <= monitor.right && at.top >= monitor.top && at.bottom <= monitor.bottom);
+        assert_eq!(tile.left - at.left, 16, "over the left tile by the overflow, no more");
+        // Taking its tile's 2560x1440, as it's asked to first, it covers
+        // nothing of its neighbour.
+        assert_eq!(letterboxed(tile, Size::of(tile), monitor), tile);
+    }
+
+    #[test]
+    fn letterboxing_a_window_bigger_than_its_monitor_starts_at_its_corner() {
+        assert_eq!(letterboxed(rect(960, 0, 1920, 1080), Size { width: 2000, height: 1200 }, SCREEN), rect(0, 0, 2000, 1200));
+        // A second monitor's coordinates, not the first's.
+        let right = rect(1920, 0, 3200, 1024);
+        assert_eq!(letterboxed(right, Size { width: 1400, height: 1100 }, right), rect(1920, 0, 3320, 1100));
     }
 
     #[test]
     fn letterboxing_rounds_an_odd_pixel_towards_the_top_left() {
         let tile = rect(10, 10, 111, 111);
         // 51 to spare: 25 before, 26 after.
-        assert_eq!(letterboxed(tile, Size { width: 50, height: 50 }), rect(35, 35, 85, 85));
-        // Overflowing by an odd amount: the extra pixel sticks out before it.
-        assert_eq!(letterboxed(tile, Size { width: 102, height: 101 }), rect(9, 10, 111, 111));
+        assert_eq!(letterboxed(tile, Size { width: 50, height: 50 }, SCREEN), rect(35, 35, 85, 85));
     }
 
     #[test]

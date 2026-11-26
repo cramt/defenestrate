@@ -536,7 +536,7 @@ impl<W: Copy + Eq> Wm<W> {
                     .spaces
                     .iter()
                     .map(|s| View {
-                        tiles: if s.tiling { self.fitted(s.tiled.tiles(o.area, self.tiling.gaps)) } else { Vec::new() },
+                        tiles: if s.tiling { self.fitted(s.tiled.tiles(o.area, self.tiling.gaps), o.area) } else { Vec::new() },
                         maximized: s.maximized,
                         area: o.area,
                     })
@@ -571,7 +571,8 @@ impl<W: Copy + Eq> Wm<W> {
         if self.outputs[o].shown().maximized == Some(w) {
             return None;
         }
-        Some((w, self.fitted(self.outputs[o].arrange(self.tiling.gaps)).into_iter().find(|&(x, _)| x == w).map(|(_, r)| r)))
+        let out = &self.outputs[o];
+        Some((w, self.fitted(out.arrange(self.tiling.gaps), out.area).into_iter().find(|&(x, _)| x == w).map(|(_, r)| r)))
     }
 
     /// Super+drag picked up `w`; it gets focus, and a maximized one goes
@@ -646,7 +647,7 @@ impl<W: Copy + Eq> Wm<W> {
     }
 
     fn arrange(&self) -> Vec<(W, Rect)> {
-        self.outputs.iter().flat_map(|o| self.fitted(o.arrange(self.tiling.gaps))).collect()
+        self.outputs.iter().flat_map(|o| self.fitted(o.arrange(self.tiling.gaps), o.area)).collect()
     }
 
     fn fit(&self, w: W) -> Fit {
@@ -654,33 +655,51 @@ impl<W: Copy + Eq> Wm<W> {
     }
 
     /// Tiles as the windows in them take them: a window that won't take its
-    /// tile's size sits centred in it at its own.
-    fn fitted(&self, tiles: Vec<(W, Rect)>) -> Vec<(W, Rect)> {
-        tiles.into_iter().map(|(w, tile)| (w, letterboxed(tile, self.fit(w).size_in(Size::of(tile))))).collect()
+    /// tile's size sits centred in it at its own, kept on its monitor's
+    /// `area` (geometry::letterboxed).
+    fn fitted(&self, tiles: Vec<(W, Rect)>, area: Rect) -> Vec<(W, Rect)> {
+        tiles.into_iter().map(|(w, tile)| (w, letterboxed(tile, self.fit(w).size_in(Size::of(tile)), area))).collect()
     }
 
-    /// `w` takes its tile as `fit`. Given a new window's Fit::at_first
-    /// before it's added, so a fixed-size one isn't asked for its tile's
-    /// size even once.
-    pub fn set_fit(&mut self, w: W, fit: Fit) {
+    fn set_fit(&mut self, w: W, fit: Fit) {
         self.fits.retain(|&(x, _)| x != w);
         if fit != Fit::Fills {
             self.fits.push((w, fit));
         }
     }
 
-    /// Placed `w` ended up `took` in size: if that makes it fit its tile
-    /// differently (Fit::after), it's placed again by its new fit, and the
-    /// new fit comes back to be logged. None if it isn't tiled on screen or
-    /// fits as it did, so checking a window again never moves it again.
+    /// `w`, placed by its fit, ended up `took` in size with its own style
+    /// `style`: if that makes it fit its tile differently (Fit::after),
+    /// it's placed again by its new fit, and the new fit comes back to be
+    /// logged. None if it isn't tiled on screen or fits as it did, so
+    /// checking a window again never moves it again; one that resized
+    /// itself in its tile is centred again at its new size.
     pub fn took(&mut self, w: W, style: u32, took: Size) -> Option<(Fit, Effects<W>)> {
         let (_, tile) = self.outputs.iter().flat_map(|o| o.arrange(self.tiling.gaps)).find(|&(x, _)| x == w)?;
-        let fit = Fit::after(style, Size::of(tile), took);
+        let fit = Fit::after(Size::of(tile), took, style);
         if fit == self.fit(w) {
             return None;
         }
         self.set_fit(w, fit);
         Some((fit, self.placement()))
+    }
+
+    /// `w`'s own style is `style` now: a window letterboxed under another
+    /// one is asked for its tile again (Fit::restyled). None if that
+    /// changes nothing.
+    pub fn restyled(&mut self, w: W, style: u32) -> Option<(Fit, Effects<W>)> {
+        let fit = self.fit(w).restyled(style);
+        if fit == self.fit(w) {
+            return None;
+        }
+        self.set_fit(w, fit);
+        Some((fit, self.placement()))
+    }
+
+    /// The windows left at their own size, for desktop.rs to watch their
+    /// style.
+    pub fn letterboxed(&self) -> Vec<W> {
+        self.fits.iter().map(|&(w, _)| w).collect()
     }
 
     /// Fills in what every change needs: every shown window placed, and
@@ -2123,26 +2142,113 @@ mod tests {
         Size { width, height }
     }
 
-    /// League's client, 1280x720, in the left half of a 1600x1000 screen.
+    /// League's client, which refused its half of a 1600x1000 screen and
+    /// stayed 1280x720.
     fn league() -> Wm<u32> {
-        let mut wm = Wm::new(one());
-        wm.set_fit(1, Fit::at_first(FIXED, size(1280, 720)));
-        wm.add(1);
-        wm.add(2);
+        let mut wm = wm_with(2);
+        wm.took(1, FIXED, size(1280, 720)).unwrap();
         wm
     }
 
     #[test]
-    fn a_fixed_size_window_is_centred_in_its_tile_from_the_start() {
+    fn a_fixed_size_window_is_asked_for_its_tile_first() {
         let mut wm = Wm::new(one());
-        wm.set_fit(1, Fit::at_first(FIXED, size(400, 300)));
-        assert_eq!(rect(&wm.add(1), 1), Some(Rect { left: 600, top: 350, right: 1000, bottom: 650 }));
-        let fx = wm.add(2);
-        assert_eq!(rect(&fx, 1), Some(Rect { left: 200, top: 350, right: 600, bottom: 650 }));
-        // Bigger than its half: over both sides of it alike.
+        assert_eq!(rect(&wm.add(1), 1), Some(AREA), "no sizing border, asked all the same");
+        assert_eq!(wm.took(1, FIXED, Size::of(AREA)), None, "it took it");
+        assert_eq!(rect(&wm.add(2), 1), Some(left_half(AREA)));
+    }
+
+    #[test]
+    fn a_window_bigger_than_its_tile_goes_over_its_neighbour_not_off_the_screen() {
         let wm = league();
-        assert_eq!(rect(&wm.placement(), 1), Some(Rect { left: -240, top: 140, right: 1040, bottom: 860 }));
+        // Centred it would start at -240; it starts at the screen's edge.
+        assert_eq!(rect(&wm.placement(), 1), Some(Rect { left: 0, top: 140, right: 1280, bottom: 860 }));
         assert_eq!(rect(&wm.placement(), 2), Some(right_half(AREA)), "its neighbour keeps its whole tile");
+    }
+
+    /// saturn 2026-11-26: Firefox in the left half of the 5120x1440
+    /// monitor, League's game in the right half at 2576x1440 after it went
+    /// borderless. Asked for its 2560x1440 tile it fills it; if it keeps
+    /// 2576 anyway, it ends at the screen's edge and covers 16 px of
+    /// Firefox's tile, the overflow and no more.
+    #[test]
+    fn leagues_game_never_leaves_the_monitor() {
+        let monitor = Rect { left: 0, top: 0, right: 5120, bottom: 1440 };
+        let mut wm = Wm::new(Screens::new(vec![(id("S"), monitor)]).unwrap());
+        wm.add(1);
+        let tile = rect(&wm.add(2), 2).unwrap();
+        assert_eq!(tile, right_half(monitor), "the tile's size is what it's asked for first");
+        const BORDERLESS: u32 = 0x940a_0000;
+        assert_eq!(wm.took(2, BORDERLESS, size(2560, 1440)), None, "took it: nothing over Firefox");
+        let (_, fx) = wm.took(2, BORDERLESS, size(2576, 1440)).unwrap();
+        let at = rect(&fx, 2).unwrap();
+        assert_eq!(at, Rect { left: 2544, top: 0, right: 5120, bottom: 1440 });
+        assert!(at.left >= monitor.left && at.right <= monitor.right);
+        assert_eq!(rect(&fx, 1), Some(left_half(monitor)));
+        assert_eq!(left_half(monitor).right - at.left, 16);
+    }
+
+    /// saturn 2026-11-26: the Claude Code console lost WS_THICKFRAME (the
+    /// shell takes it with the title bar, and conhost flips its style)
+    /// while filling a tile, was latched at that size, and stayed a narrow
+    /// column after League closed and its tile grew. Now a style without a
+    /// sizing border means nothing while the window takes its tile, and
+    /// when the tile grows it's asked for the new size and fills it.
+    #[test]
+    fn a_console_losing_its_sizing_border_still_follows_its_tile() {
+        const CONSOLE: u32 = 0x14ff_0000;
+        const STRIPPED: u32 = 0x142b_0000;
+        let mut wm = wm_with(3);
+        let small = rect(&wm.placement(), 3).unwrap();
+        assert_eq!(wm.took(3, CONSOLE, Size::of(small)), None);
+        assert_eq!(wm.took(3, STRIPPED, Size::of(small)), None, "the style flickered; it still took its tile");
+        // League (2) closes: the console's tile grows, and it's placed at it.
+        let fx = wm.remove(2);
+        let grown = rect(&fx, 3).unwrap();
+        assert!(grown.width() > small.width() || grown.height() > small.height());
+        assert_eq!(wm.took(3, STRIPPED, Size::of(grown)), None, "it took the new size: fills it");
+        assert_eq!(rect(&wm.placement(), 3), Some(grown));
+    }
+
+    /// The same console, had it really refused its small tile once (char
+    /// cells snapping it narrower, say): the next tile size is asked for,
+    /// and taking it ends the letterbox.
+    #[test]
+    fn a_window_that_refused_one_size_is_asked_for_the_next() {
+        let mut wm = wm_with(2);
+        let (fit, _) = wm.took(2, SIZABLE, size(780, 990)).unwrap();
+        assert_eq!(fit, Fit::Refused { asked: Size::of(right_half(AREA)), took: size(780, 990), style: SIZABLE });
+        // Its neighbour closes: the whole screen, asked for and taken.
+        assert_eq!(rect(&wm.remove(1), 2), Some(AREA));
+        assert_eq!(wm.took(2, SIZABLE, Size::of(AREA)).map(|(f, _)| f), Some(Fit::Fills));
+    }
+
+    #[test]
+    fn a_window_that_refuses_its_tile_is_letterboxed_and_not_asked_again() {
+        let mut wm = wm_with(2);
+        let tile = right_half(AREA);
+        assert_eq!(wm.took(2, SIZABLE, Size::of(tile)), None, "took it: nothing to do");
+        let (fit, fx) = wm.took(2, SIZABLE, size(800, 450)).unwrap();
+        assert_eq!(fit, Fit::Refused { asked: Size::of(tile), took: size(800, 450), style: SIZABLE });
+        let boxed = Rect { left: 800, top: 275, right: 1600, bottom: 725 };
+        assert_eq!(rect(&fx, 2), Some(boxed));
+        assert_eq!(rect(&fx, 1), Some(left_half(AREA)));
+        // Placed there, it's still that size: no new placement, so no loop.
+        assert_eq!(wm.took(2, SIZABLE, size(800, 450)), None);
+        cmd(&mut wm, Command::Focus(Direction::Left));
+        assert_eq!(rect(&wm.placement(), 2), Some(boxed));
+    }
+
+    #[test]
+    fn a_letterboxed_window_whose_style_changes_is_asked_again() {
+        let mut wm = league();
+        assert_eq!(wm.letterboxed(), vec![1]);
+        assert_eq!(wm.restyled(1, FIXED), None, "the same style: still letterboxed");
+        let (fit, fx) = wm.restyled(1, SIZABLE).unwrap();
+        assert_eq!(fit, Fit::Fills);
+        assert_eq!(rect(&fx, 1), Some(left_half(AREA)));
+        assert!(wm.letterboxed().is_empty());
+        assert_eq!(wm.restyled(2, FIXED), None, "never letterboxed: nothing to ask again");
     }
 
     #[test]
@@ -2155,7 +2261,7 @@ mod tests {
     }
 
     /// Focus changes, workspace switches and coming back keep it where it
-    /// is, at its size: nothing asks it for its tile's.
+    /// is, at its size: nothing asks it for its tile's again.
     #[test]
     fn letterboxing_holds_through_focus_and_workspace_switches() {
         let mut wm = league();
@@ -2164,42 +2270,18 @@ mod tests {
         assert_eq!(rect(&wm.placement(), 1), at, "focus moves nothing");
         cmd(&mut wm, Command::Switch(ws(2)));
         assert_eq!(rect(&cmd(&mut wm, Command::Switch(ws(1))), 1), at);
-        // Moved to the other half, it's centred there instead, same size.
+        // Moved to the other half, a tile of the same size: still
+        // letterboxed, kept on the screen from the right this time.
         let moved = rect(&cmd(&mut wm, Command::Move(Direction::Right)), 1).unwrap();
-        assert_eq!((moved.width(), moved.height(), moved.centre()), (1280, 720, right_half(AREA).centre()));
-    }
-
-    #[test]
-    fn a_window_that_refuses_its_tile_is_letterboxed_and_not_asked_again() {
-        let mut wm = wm_with(2);
-        let tile = right_half(AREA);
-        assert_eq!(wm.took(2, SIZABLE, Size::of(tile)), None, "took it: nothing to do");
-        let (fit, fx) = wm.took(2, SIZABLE, size(800, 450)).unwrap();
-        assert_eq!(fit, Fit::Refused { asked: Size::of(tile), took: size(800, 450) });
-        let boxed = Rect { left: 800, top: 275, right: 1600, bottom: 725 };
-        assert_eq!(rect(&fx, 2), Some(boxed));
-        assert_eq!(rect(&fx, 1), Some(left_half(AREA)));
-        // Placed there, it's still that size: no new placement, so no loop.
-        assert_eq!(wm.took(2, SIZABLE, size(800, 450)), None);
-        cmd(&mut wm, Command::Focus(Direction::Left));
-        assert_eq!(rect(&wm.placement(), 2), Some(boxed));
-    }
-
-    #[test]
-    fn a_window_that_refused_one_size_is_asked_for_the_next() {
-        let mut wm = wm_with(2);
-        wm.took(2, SIZABLE, size(900, 1000));
-        // Its neighbour closes: the whole screen, which it can take.
-        assert_eq!(rect(&wm.remove(1), 2), Some(AREA));
-        assert_eq!(wm.took(2, SIZABLE, Size::of(AREA)).map(|(f, _)| f), Some(Fit::Fills));
+        assert_eq!(moved, Rect { left: 320, top: 140, right: 1600, bottom: 860 });
     }
 
     #[test]
     fn a_fixed_window_that_resizes_itself_is_centred_again() {
         let mut wm = league();
-        let (_, fx) = wm.took(1, FIXED, size(1024, 576)).unwrap();
-        assert_eq!(rect(&fx, 1), Some(Rect { left: -112, top: 212, right: 912, bottom: 788 }));
-        assert_eq!(wm.took(1, FIXED, size(1024, 576)), None);
+        let (_, fx) = wm.took(1, FIXED, size(640, 360)).unwrap();
+        assert_eq!(rect(&fx, 1), Some(Rect { left: 80, top: 320, right: 720, bottom: 680 }));
+        assert_eq!(wm.took(1, FIXED, size(640, 360)), None);
     }
 
     #[test]
