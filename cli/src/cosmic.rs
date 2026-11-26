@@ -292,15 +292,16 @@ mod tests {
             "Super+Shift+space" = { System = "PlayPause" }
             "Super+u" = { Focus = "Left" }
             "Super+Alt+3" = { MoveToWorkspace = 3 }
+            "Super+Shift+p" = { System = "Screenshot" }
         "#;
         let s: Shortcuts = toml::from_str(toml).unwrap();
-        assert_eq!(s.0.len(), 6);
+        assert_eq!(s.0.len(), 7);
         assert_eq!(s.0[&parse_keys("Super+t").unwrap()], Action::Spawn("wt.exe -p cmd".to_owned().try_into().unwrap()));
         let bad = [
             r#""Super+y" = "ZoomIn""#,
             r#""Super+y" = { Focus = "In" }"#,
             r#""Super+y" = { Workspace = 10 }"#,
-            r#""Super+y" = { System = "Screenshot" }"#,
+            r#""Super+y" = { System = "Suspend" }"#,
             r#""Super+y" = { Spawn = "" }"#,
             "\"Super+y\" = \"Disable\"\n\"super+Y\" = \"Disable\"",
         ];

@@ -55,7 +55,7 @@ fn main() {
 }
 
 #[cfg(windows)]
-use windows_main::{log, scaled_at, start_line};
+use windows_main::{log, scaled_at, spawn_line, start_line};
 
 #[cfg(windows)]
 fn main() {
@@ -259,6 +259,7 @@ mod windows_main {
                         Action::HomeFolder => spawn("explorer.exe", &["."], 0),
                         Action::Spawn(line) => spawn_line(line),
                         Action::Media(key) => press(key),
+                        Action::Screenshot => launcher::screenshot(),
                         // DisableLockWorkstation (configs/default.nix, for Super+L)
                         // blocks LockWorkStation too. Disconnecting the console
                         // session lands on the same lock screen, and signing in

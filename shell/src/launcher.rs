@@ -57,6 +57,9 @@ impl State {
 enum Launch {
     Shortcut(PathBuf),
     CommandLine(String),
+    /// A URI to its registered handler, or if ShellExecuteEx can't, the
+    /// command line `or_else`.
+    Uri { uri: &'static str, or_else: &'static str },
 }
 
 thread_local! {
@@ -145,6 +148,17 @@ pub fn open(path: &Path) {
     launch(Launch::Shortcut(path.to_path_buf()));
 }
 
+/// COSMIC's System(Screenshot), as Windows does it: the Snipping Tool's
+/// region overlay, which copies the snip to the clipboard and saves it to
+/// Pictures\Screenshots. Windows opens it from PrintScreen through explorer's
+/// own key handling, gone here; the plain key only copies the whole screen
+/// (win32k), with nothing on screen to say so. Whether `ms-screenclip:`
+/// opens without explorer isn't known yet, so if its handler can't be
+/// started the Snipping Tool is asked directly; the log says which went.
+pub fn screenshot() {
+    launch(Launch::Uri { uri: "ms-screenclip:", or_else: "SnippingTool.exe /clip" });
+}
+
 /// Through ShellExecuteEx, as explorer opens things: a shortcut's target,
 /// arguments and working directory come from the shortcut itself. Typed
 /// lines go to `start`, which resolves URLs, PATH lookups and arguments the
@@ -153,9 +167,10 @@ pub fn open(path: &Path) {
 /// (windows-bugs.md #14); the cause wasn't found.
 fn launch(what: Launch) {
     let home = std::env::var_os("USERPROFILE").map(HSTRING::from);
-    let (file, params, show, target) = match what {
-        Launch::Shortcut(path) => (HSTRING::from(path.as_os_str()), None, SW_SHOWNORMAL, path.display().to_string()),
-        Launch::CommandLine(line) => (HSTRING::from("cmd.exe"), Some(HSTRING::from(format!("/c start \"\" {line}"))), SW_HIDE, line),
+    let (file, params, show, target, or_else) = match what {
+        Launch::Shortcut(path) => (HSTRING::from(path.as_os_str()), None, SW_SHOWNORMAL, path.display().to_string(), None),
+        Launch::CommandLine(line) => (HSTRING::from("cmd.exe"), Some(HSTRING::from(format!("/c start \"\" {line}"))), SW_HIDE, line, None),
+        Launch::Uri { uri, or_else } => (HSTRING::from(uri), None, SW_SHOWNORMAL, uri.to_owned(), Some(or_else)),
     };
     // Its own thread: a slow or hung shell extension mustn't hang the shell.
     std::thread::spawn(move || {
@@ -179,7 +194,13 @@ fn launch(what: Launch) {
             // is what a single-instance app handing off, or a URL going to
             // a running browser, gives.
             match ShellExecuteExW(&mut info) {
-                Err(e) => log(&format!("launching {target:?} failed: {e}")),
+                Err(e) => match or_else {
+                    Some(line) => {
+                        log(&format!("launching {target:?} failed: {e}; starting {line:?} instead"));
+                        crate::spawn_line(line);
+                    }
+                    None => log(&format!("launching {target:?} failed: {e}")),
+                },
                 Ok(()) if info.hProcess.is_invalid() => log(&format!("launched {target:?}: no new process")),
                 Ok(()) => {
                     log(&format!("launched {target:?}: pid {}", GetProcessId(info.hProcess)));

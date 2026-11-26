@@ -194,6 +194,8 @@ pub enum System {
     PlayPause,
     PlayNext,
     PlayPrev,
+    /// The Snipping Tool's region overlay.
+    Screenshot,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]

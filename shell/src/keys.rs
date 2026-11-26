@@ -48,7 +48,7 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY, VK_CONTROL,
-    VK_DOWN, VK_ESCAPE, VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LWIN, VK_MENU, VK_OEM_2, VK_RCONTROL, VK_RETURN, VK_RIGHT,
+    VK_DOWN, VK_ESCAPE, VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LWIN, VK_MENU, VK_OEM_2, VK_RCONTROL, VK_RETURN, VK_RIGHT, VK_SNAPSHOT,
     VK_MEDIA_NEXT_TRACK, VK_MEDIA_PLAY_PAUSE, VK_MEDIA_PREV_TRACK, VK_RMENU, VK_RWIN, VK_SHIFT, VK_TAB, VK_UP,
     VK_VOLUME_DOWN, VK_VOLUME_MUTE, VK_VOLUME_UP,
 };
@@ -75,6 +75,8 @@ pub enum Action {
     Spawn(&'static str),
     /// A media or volume key, sent on to whatever handles it.
     Media(VIRTUAL_KEY),
+    /// COSMIC's System(Screenshot): the Snipping Tool's overlay.
+    Screenshot,
     /// The pointer moved, outside a drag: for focus_follows_cursor.
     Pointer(Point),
     Wm(Command, Hold),
@@ -273,6 +275,8 @@ fn binding(key: VIRTUAL_KEY, m: Mods) -> Option<Binding> {
             ('M', false) => wm(Maximize),
             ('R', shift) => Some(Binding::EnterResize { outwards: !shift }),
             ('T', false) => act(Action::Terminal),
+            // Windows' own snip key, which explorer handled.
+            ('S', true) => act(Action::Screenshot),
             ('F', false) => act(Action::HomeFolder),
             // COSMIC's App Library; the launcher is the closest thing.
             ('A', false) => act(Action::Launcher),
@@ -307,6 +311,7 @@ fn configured(action: &'static settings::Action) -> Option<Action> {
             System::PlayPause => Action::Media(VK_MEDIA_PLAY_PAUSE),
             System::PlayNext => Action::Media(VK_MEDIA_NEXT_TRACK),
             System::PlayPrev => Action::Media(VK_MEDIA_PREV_TRACK),
+            System::Screenshot => Action::Screenshot,
         }),
         A::Close => wm(Close),
         A::Maximize => wm(Maximize),
@@ -439,6 +444,13 @@ fn on_key_down(key: VIRTUAL_KEY) -> bool {
         }
         MODE.set(Mode::Switching);
         return on_switching_key(key);
+    }
+    // COSMIC binds Print alone to System(Screenshot). Swallowed: Windows'
+    // own handling copies the whole screen without a word, which is what
+    // made the key look dead (2026-11-26). Alt+Print still goes there.
+    if key == VK_SNAPSHOT && !super_down && !alt && !held(VK_CONTROL) && !held(VK_SHIFT) {
+        queue(Action::Screenshot);
+        return true;
     }
     if !super_down {
         return false;
