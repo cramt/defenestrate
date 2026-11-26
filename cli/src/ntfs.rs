@@ -85,12 +85,37 @@ const FUSE_SUPER_MAGIC: i64 = 0x6573_5546;
 
 impl Mount {
     pub fn new(volume: &Path, dir: PathBuf, write: bool) -> Result<Self> {
+        Self::with_options(volume, dir, write, if write { "rw,no_detach" } else { "ro,no_detach" }.into())
+    }
+
+    /// Read-write, with what it creates getting the security descriptor
+    /// Windows would give it: the parent directory's inheritable entries,
+    /// owned by Administrators, as for a file an elevated admin creates.
+    /// Without this, ntfs-3g gives a new file Everyone: full control.
+    ///
+    /// ntfs-3g only inherits with a user mapping (src/ntfs-3g.c: no mapping,
+    /// no `inherit`), and only builds its default mapping when `inherit` is
+    /// off, so it gets a file of its own. Its lines are never used: this
+    /// runs as root, which ntfs-3g always maps to Administrators
+    /// (ntfs_find_usid), but a mapping has to name a user and a group or
+    /// ntfs-3g drops it ("There were no valid user or no valid group").
+    pub fn inheriting(volume: &Path, dir: PathBuf) -> Result<Self> {
+        let usermap = dir.with_extension("usermap");
+        std::fs::write(&usermap, "65534::S-1-5-21-1-1-1-1000\n:65534:S-1-5-21-1-1-1-513\n")?;
+        let options = format!("rw,no_detach,inherit,usermapping={}", usermap.display());
+        let m = Self::with_options(volume, dir, true, options);
+        // Read once, at mount.
+        std::fs::remove_file(&usermap).ok();
+        m
+    }
+
+    fn with_options(volume: &Path, dir: PathBuf, write: bool, options: String) -> Result<Self> {
         std::fs::create_dir(&dir).with_context(|| dir.display().to_string())?;
         let log = dir.with_extension("log");
         let child = NTFS3G
             .cmd()
             .arg("-o")
-            .arg(if write { "rw,no_detach" } else { "ro,no_detach" })
+            .arg(options)
             .arg(volume)
             .arg(&dir)
             .stdin(Stdio::null())

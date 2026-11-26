@@ -10,12 +10,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::config;
+use crate::config::{self, Config, FirefoxPersist};
 use crate::disk::{self, Disk};
+use crate::persist::{self, Prepared};
 use crate::firmware;
 use crate::gpt::{self, ImagePart};
 use crate::image::{IMAGE_FILE, SIZE_FILE};
-use crate::tools::{self, BLKDISCARD, BLOCKDEV, EFIBOOTMGR, FINDMNT, LSBLK, MCOPY, NTFSCAT, NTFSRESIZE, PARTX, SFDISK, UDEVADM};
+use crate::tools::{self, BLKDISCARD, BLOCKDEV, EFIBOOTMGR, FINDMNT, LSBLK, MCOPY, NTFS3G, NTFS3G_PROBE, NTFSCAT, NTFSRESIZE, PARTX, SFDISK, SQLITE3, UDEVADM};
 
 pub const TOOLS: &[tools::Tool] = &[LSBLK, FINDMNT, BLKDISCARD, SFDISK, PARTX, BLOCKDEV, UDEVADM, NTFSRESIZE, EFIBOOTMGR, MCOPY, NTFSCAT];
 
@@ -30,16 +31,55 @@ pub struct Args {
     /// space instead of erasing it. Linux can stay mounted.
     #[arg(long)]
     into_free_space: bool,
-    /// Configs, for installTarget.
+    /// Configs, for installTarget and persist.
     #[arg(short, long = "config", value_name = "FILE")]
     configs: Vec<PathBuf>,
+    #[command(flatten)]
+    store: persist::StoreArgs,
+    /// Don't copy the install being erased into the store (persist); the
+    /// new one still gets what the store has. For a Windows that won't shut
+    /// down cleanly.
+    #[arg(long)]
+    no_keep: bool,
+}
+
+/// persist.firefox's part of a flash.
+struct Keep<'a> {
+    config: &'a Config,
+    firefox: &'a FirefoxPersist,
+    store: persist::Store,
+    save_old: bool,
+}
+
+impl Keep<'_> {
+    /// Copies the old install's Firefox off (when there is one, on the
+    /// partition about to be overwritten), then settles what the new one
+    /// gets. Runs before anything is erased, so a failure loses nothing.
+    fn before_erase(&self, old: Option<&str>) -> Result<Option<Prepared>> {
+        if let (true, Some(old)) = (self.save_old, old) {
+            let is_ntfs = std::fs::metadata(old).is_ok_and(|m| m.file_type().is_block_device())
+                && tools::output_string(LSBLK.cmd().args(["-no", "FSTYPE"]).arg(old))?.trim() == "ntfs";
+            if is_ntfs {
+                persist::save_from(Path::new(old), self.config, &self.store)
+                    .context("keeping the old install's Firefox (nothing erased yet; --no-keep flashes without keeping it)")?;
+            }
+        }
+        persist::prepare(self.firefox, &self.store).context("nothing erased yet")
+    }
 }
 
 pub fn run(args: &Args) -> Result<()> {
     tools::require(TOOLS)?;
     const USAGE: &str = "dfnstrate flash --image DIR [--into-free-space] /dev/disk/by-id/<whole disk>  (a config's installTarget sets a default)";
-    let install_target = if args.configs.is_empty() { None } else { config::load(&args.configs, true)?.install_target };
-    let target = disk::target(args.target.as_deref(), install_target, USAGE)?;
+    let config = if args.configs.is_empty() { None } else { Some(config::load(&args.configs, true)?) };
+    let target = disk::target(args.target.as_deref(), config.as_ref().and_then(|c| c.install_target.clone()), USAGE)?;
+    let firefox = config.as_ref().and_then(|c| c.persist.firefox.as_ref().map(|f| (c, f)));
+    if let Some((_, f)) = firefox {
+        tools::require(&[NTFS3G, NTFS3G_PROBE])?;
+        if f.seed.is_some() {
+            tools::require(&[SQLITE3])?;
+        }
+    }
     let disk = if args.into_free_space { disk::partitioned(target)? } else { disk::unused(target)? };
 
     let image_size: u64 = std::fs::read_to_string(args.image.join(SIZE_FILE))
@@ -50,13 +90,28 @@ pub fn run(args: &Args) -> Result<()> {
         bail!("not booted in UEFI mode, so there's no firmware boot entry to add");
     }
 
+    let keep = match firefox {
+        Some((config, firefox)) => {
+            let (store, store_arg) = args.store.resolve(config)?;
+            Some((Keep { config, firefox, store, save_old: !args.no_keep }, store_arg))
+        }
+        None => None,
+    };
+
     // Only reading and writing the disk needs root.
     if !disk::is_root() {
-        disk::rerun_as_root(args.target.is_none().then(|| disk.target.as_str().into()))?;
+        let mut extra: Vec<std::ffi::OsString> = args.target.is_none().then(|| disk.target.as_str().into()).into_iter().collect();
+        if let Some((keep, store_arg)) = &keep {
+            keep.store.create()?;
+            extra.extend(store_arg.iter().cloned());
+        }
+        disk::rerun_as_root(extra)?;
     }
+    let keep = keep.map(|(k, _)| k);
 
     let image = args.image.join(IMAGE_FILE);
-    let (esp, windows) = if args.into_free_space { into_free_space(&disk, &image, image_size)? } else { whole_disk(&disk, &image, image_size)? };
+    let (esp, windows) =
+        if args.into_free_space { into_free_space(&disk, &image, image_size, keep.as_ref())? } else { whole_disk(&disk, &image, image_size, keep.as_ref())? };
     fit_boot_manager(&disk.partition(esp), &disk.partition(windows))?;
     add_boot_entry(&disk, esp)?;
     println!("Done. Windows is fully set up on it; boot it and it comes up at the shell.");
@@ -76,7 +131,7 @@ fn confirm(word: &str, what: &str) -> Result<()> {
 
 /// Erases the disk for the image, growing Windows to fill it. Returns the
 /// ESP's and Windows' partition numbers.
-fn whole_disk(disk: &Disk, image: &Path, image_size: u64) -> Result<(u32, u32)> {
+fn whole_disk(disk: &Disk, image: &Path, image_size: u64, keep: Option<&Keep>) -> Result<(u32, u32)> {
     let (target, dev) = (disk.target.as_str(), disk.dev.as_path());
     let disk_size = std::fs::read_to_string(disk.sys.join("size"))?.trim().parse::<u64>()? * 512;
     if disk_size < image_size {
@@ -85,6 +140,8 @@ fn whole_disk(disk: &Disk, image: &Path, image_size: u64) -> Result<(u32, u32)> 
     std::process::Command::new(LSBLK.path().unwrap()).args(["-o", "NAME,SIZE,MODEL,SERIAL,FSTYPE,LABEL"]).arg(dev).status()?;
     println!("\nEverything on {target} will be erased.");
     confirm("ERASE", "install Windows onto it")?;
+    // The install being replaced is where an earlier flash put it.
+    let prepared = keep.map(|k| k.before_erase(Some(&disk.partition(ImagePart::Windows.number())))).transpose()?.flatten();
 
     // Discarding first means nothing of the old contents survives past the
     // image, and the SSD knows the rest is free.
@@ -114,6 +171,7 @@ fn whole_disk(disk: &Disk, image: &Path, image_size: u64) -> Result<(u32, u32)> 
     if part_size <= image_size {
         bail!("the kernel still sees {windows} at its old size; rerun to finish");
     }
+    restore(keep, prepared.as_ref(), &windows)?;
     grow_ntfs(&windows)?;
     Ok((ImagePart::Esp.number(), ImagePart::Windows.number()))
 }
@@ -131,7 +189,10 @@ fn whole_disk(disk: &Disk, image: &Path, image_size: u64) -> Result<(u32, u32)> 
 /// The partitions keep the image's partition GUIDs: Windows' MountedDevices
 /// finds C: by it, so a new one would leave C: unassigned. The disk keeps
 /// its own GUID, Linux's.
-fn into_free_space(disk: &Disk, image: &Path, image_size: u64) -> Result<(u32, u32)> {
+///
+/// Free space holds no earlier install, so there's nothing to copy off;
+/// persist's store still goes onto the new one.
+fn into_free_space(disk: &Disk, image: &Path, image_size: u64, keep: Option<&Keep>) -> Result<(u32, u32)> {
     let (target, dev) = (disk.target.as_str(), disk.dev.as_path());
     let table = gpt::parse(&tools::output_string(SFDISK.cmd().arg("--json").arg(dev))?)?;
     // Partitions resized while mounted (shrinking Linux to make the space)
@@ -162,6 +223,7 @@ fn into_free_space(disk: &Disk, image: &Path, image_size: u64) -> Result<(u32, u
     }
     println!("\nOnly sectors {}–{} are written, plus the partition table.", plan.region.start, plan.region.end);
     confirm("INSTALL", "write Windows into the free space")?;
+    let prepared = keep.map(|k| k.before_erase(None)).transpose()?.flatten();
 
     // Data first, partition table last: an interrupted run leaves only
     // garbage in still-free space, not half-written partitions.
@@ -208,6 +270,7 @@ fn into_free_space(disk: &Disk, image: &Path, image_size: u64) -> Result<(u32, u
 
     let esp_node = disk.partition(esp);
     retarget_bcd(&esp_node, image_disk, table.id)?;
+    restore(keep, prepared.as_ref(), &disk.partition(windows))?;
     grow_ntfs(&disk.partition(windows))?;
     Ok((esp, windows))
 }
@@ -336,6 +399,17 @@ fn fit_boot_manager(esp: &str, windows: &str) -> Result<()> {
     })();
     std::fs::remove_file(&tmp).ok();
     result
+}
+
+/// Writes what persist prepared onto the new Windows. Before it's grown:
+/// ntfsresize marks the volume for a check, and ntfs-3g won't write to one
+/// that's marked.
+fn restore(keep: Option<&Keep>, prepared: Option<&Prepared>, windows: &str) -> Result<()> {
+    if let (Some(keep), Some(prepared)) = (keep, prepared) {
+        persist::restore_onto(Path::new(windows), keep.config, prepared)
+            .context("writing Firefox's profile onto the new install (Windows itself is written and boots; `dfnstrate persist restore` before its first boot retries this part)")?;
+    }
+    Ok(())
 }
 
 fn grow_ntfs(windows: &str) -> Result<()> {

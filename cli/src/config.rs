@@ -103,6 +103,43 @@ pub struct Config {
     /// default-apps page once, for one click on "Set default".
     #[serde(default)]
     pub default_apps: BTreeMap<AssocId, ProgId>,
+    /// What a reflash carries over from the install it replaces (persist.rs).
+    #[serde(default)]
+    pub persist: Persist,
+}
+
+/// What `flash` copies off the Windows it's about to erase, into a store on
+/// Linux, and puts back onto the new install before its first boot. One
+/// entry per app rather than a list of paths: each app's files only work
+/// with its own handling (Firefox's downgrade check, which profile it
+/// opens), and an app can't be named twice.
+#[derive(Deserialize, Debug, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Persist {
+    /// The user's whole %APPDATA%\Mozilla\Firefox: profiles.ini,
+    /// installs.ini and every profile.
+    pub firefox: Option<FirefoxPersist>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FirefoxPersist {
+    /// While the store has no Firefox of this machine's (the first install),
+    /// a new profile is made from this one's logins instead.
+    pub seed: Option<FirefoxSeed>,
+}
+
+/// A Gecko browser's profile on this Linux machine (Firefox's, Zen's,
+/// LibreWolf's). Only its logged-in state is taken, never the whole
+/// profile, which would bring Linux paths and the other browser's version.
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FirefoxSeed {
+    /// The profile directory, e.g. /home/me/.config/zen/default.
+    pub profile: AbsPath,
+    /// Also history and bookmarks (places.sqlite, favicons.sqlite).
+    #[serde(default)]
+    pub history: bool,
 }
 
 /// The firmware boot entry the Start Menu's "Reboot to Linux" sets as the
@@ -848,6 +885,27 @@ mod tests {
             "\"key\" = \"/a\"\n\"KEY\" = \"/b\"",
         ] {
             assert!(config(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn persist_forms() {
+        let parse = |s: &str| -> Result<Persist> { Ok(toml::from_str::<Persist>(s)?) };
+        assert!(parse("").unwrap().firefox.is_none());
+        assert!(parse("[firefox]").unwrap().firefox.unwrap().seed.is_none());
+        let seed = parse("[firefox]\nseed = { profile = \"/home/x/.config/zen/default\", history = true }").unwrap().firefox.unwrap().seed.unwrap();
+        assert_eq!(seed.profile.as_str(), "/home/x/.config/zen/default");
+        assert!(seed.history);
+        assert!(!parse("[firefox]\nseed = { profile = \"/a\" }").unwrap().firefox.unwrap().seed.unwrap().history);
+        for bad in [
+            "firefox = true",
+            "[firefox]\nseed = { profile = \"relative/zen\" }",
+            "[firefox]\nseed = { profile = \"/home/x/../y\" }",
+            "[firefox]\nseed = {}",
+            "[firefox]\npaths = [\"Profiles\"]",
+            "[discord]",
+        ] {
+            assert!(parse(bad).is_err(), "{bad}");
         }
     }
 

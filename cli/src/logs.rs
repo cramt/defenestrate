@@ -82,7 +82,7 @@ pub fn run(config: &Config, args: &Args) -> Result<()> {
     Ok(())
 }
 
-fn chown_tree(dir: &Path, (uid, gid): (u32, u32)) -> Result<()> {
+pub(crate) fn chown_tree(dir: &Path, (uid, gid): (u32, u32)) -> Result<()> {
     std::os::unix::fs::lchown(dir, Some(uid), Some(gid))?;
     if std::fs::symlink_metadata(dir)?.is_dir() {
         for entry in std::fs::read_dir(dir)? {
@@ -92,7 +92,7 @@ fn chown_tree(dir: &Path, (uid, gid): (u32, u32)) -> Result<()> {
     Ok(())
 }
 
-fn sudo_caller() -> Option<(u32, u32)> {
+pub(crate) fn sudo_caller() -> Option<(u32, u32)> {
     let id = |v| std::env::var(v).ok()?.parse().ok();
     Some((id("SUDO_UID")?, id("SUDO_GID")?))
 }

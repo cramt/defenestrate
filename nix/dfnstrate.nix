@@ -2,7 +2,7 @@
 # a Chromium for `fetch`, and the shell compiled in. This is what the
 # derivations in distro.nix run, and what `nix run .#dfnstrate` gives you.
 { lib, pkgs, crane, shell, makeWrapper
-, _7zz, wimlib, hivex, xorriso, qemu_kvm, swtpm, util-linux, mtools, sleuthkit, ntfs3g, efibootmgr, systemd, chromium, OVMFFull
+, _7zz, wimlib, hivex, xorriso, qemu_kvm, swtpm, util-linux, mtools, sleuthkit, ntfs3g, efibootmgr, systemd, sqlite, chromium, OVMFFull
 }:
 
 let
@@ -29,7 +29,7 @@ let
     DEFENESTRATE_SHELL_DIR = "${shell}/bin";
   });
 
-  runtime = [ _7zz wimlib hivex xorriso qemu_kvm swtpm util-linux mtools sleuthkit ntfs3g efibootmgr systemd ];
+  runtime = [ _7zz wimlib hivex xorriso qemu_kvm swtpm util-linux mtools sleuthkit ntfs3g efibootmgr systemd sqlite ];
   # Defaults only: the caller's own firmware or browser still wins.
   env = {
     DFNSTRATE_OVMF_CODE = "${OVMFFull.fd}/FV/OVMF_CODE.ms.fd";

@@ -40,7 +40,8 @@ pub const NTFS3G: Tool = Tool { names: &["ntfs-3g"], package: "ntfs-3g" };
 pub const NTFS3G_PROBE: Tool = Tool { names: &["ntfs-3g.probe"], package: "ntfs-3g" };
 pub const EFIBOOTMGR: Tool = Tool { names: &["efibootmgr"], package: "efibootmgr" };
 pub const SYSTEMCTL: Tool = Tool { names: &["systemctl"], package: "systemd" };
-pub const SUDO: Tool = Tool { names: &["sudo"], package: "sudo" };
+pub const SQLITE3: Tool = Tool { names: &["sqlite3"], package: "sqlite / sqlite3" };
+pub const SUDO: Tool =Tool { names: &["sudo"], package: "sudo" };
 pub const CHROMIUM: Tool = Tool { names: &["chromium", "chromium-browser", "google-chrome-stable", "google-chrome"], package: "chromium" };
 
 impl Tool {

@@ -58,6 +58,7 @@ values per hive. Every config is layered over the distro's own defaults,
   - Terminal programs work: Start Menu → "Linux terminal" (`dfn shell`) opens the user's login shell from the install, as the user, in their home
 - [x] Updating an install from Linux without a reflash (`dfnstrate update`, `build.update`): the shell, fonts and WSL payload are rewritten in place on the shut-down Windows partition, each keeping its NTFS security descriptor, and the logon task re-imports the distro when `rootfs.tar` changed
 - [x] Reading what the last Windows boot logged, from Linux (`dfnstrate logs --out DIR`, `build.logs`): defenestrate's logs (shell, wsl, apps, reboot, linux-first, setup) copied off the shut-down partition through a read-only ntfs-3g mount, plus any `--also` path under C:\\, owned by the caller rather than root. Checked in a VM (`checks.logs`) against an NTFS image; not yet on a real disk
+- [x] Firefox survives a reflash, and the first install starts logged in ([Firefox across reflashes](#firefox-across-reflashes), `persist.firefox`): `flash` copies the old install's `%APPDATA%\Mozilla\Firefox` to a store on Linux before erasing it and writes it onto the new one before its first boot; with nothing kept yet, it seeds a new profile with a Linux browser's cookies, logins and containers. Unit-tested (which files go and come back, kept over seed over nothing, the seeded profiles.ini/installs.ini, container ids against cookies), and `checks.persist` runs save, restore and seed against NTFS images in a VM: the copy-off leaves the volume untouched, the restored files inherit the profile directory's ACL instead of Everyone: full control, compatibility.ini stays behind, a seed taken from a WAL database a browser hasn't checkpointed has every row, and a browser holding its database fails the seed before anything is written. Not run by `flash` onto a real disk, and not seen in a Windows Firefox yet: that it opens the restored or seeded profile and is still logged in is for a real boot
 - [x] "Reboot to Linux" unmounts the Linux install inside WSL first (`dfn release`: flush, ask then make whatever uses it quit, unmount deepest first, read-only if something won't let go), then shuts WSL down. Without it, the last 30 s of what Windows wrote to the install were lost, since btrfs writes back every 30 s and the reboot killed WSL's VM with it mounted (seen on saturn: a report's last items and a rename, done and then missing on Linux). Checked in the dfn VM test; a plain Windows shutdown or a reboot from elsewhere still doesn't release it
   - Seen on a `build image` output booted in the VM: `update` rewrote `rootfs.tar` and `wsl-logon.ps1` with their descriptors unchanged; at the next logon the distro was re-imported with the new `dfn` and mounted the test install, which the image's older distro had failed to; the logon after that didn't re-import. The partition was reached through ntfs-3g in a user namespace, so the by-id disk route has only been run as far as its refusals (a mounted disk, a partition, a non-by-id path), not onto a real disk
 - [x] `dfnstrate reboot`: into Windows once, by the firmware's BootNext, so the boot after it is Linux again. Picks the Windows Boot Manager entry whose ESP is on a disk that's attached, refuses to guess between two Windows (`--entry`); entries sharing an ESP count as one, `--no-reboot` only sets it. Seen in the VM on a `flash --into-free-space` disk: with dfnstrate's entry and Windows' own on one ESP it set BootNext without asking; not yet run on real hardware
@@ -158,7 +159,7 @@ them all.
 | `fetch` (and `build` without `--iso`) | `chromium` (or Chrome) | `chromium` (or Chrome) |
 | `build iso` | `7zip wimlib hivex libisoburn` | `7zip wimtools libwin-hivex-perl xorriso` |
 | `build image`, `vm` | the above, `qemu-desktop swtpm edk2-ovmf mtools sleuthkit util-linux` | the above, `qemu-system-x86 qemu-utils swtpm swtpm-tools ovmf mtools sleuthkit util-linux` |
-| `flash` | `util-linux ntfs-3g efibootmgr mtools sudo` | `util-linux ntfs-3g efibootmgr mtools sudo` |
+| `flash` | `util-linux ntfs-3g efibootmgr mtools sudo`, and `sqlite` with `persist.firefox.seed` | `util-linux ntfs-3g efibootmgr mtools sudo`, and `sqlite3` with `persist.firefox.seed` |
 | `update` | `util-linux ntfs-3g hivex sudo` | `util-linux ntfs-3g libwin-hivex-perl sudo` |
 | `reboot` | `efibootmgr systemd sudo` | `efibootmgr systemd sudo` |
 
@@ -477,6 +478,88 @@ A new shell build comes with a new signing certificate, so `update` also
 edits the SOFTWARE hive (with hivex, in place like the files): the new
 certificate goes into the machine's Root store before the new shell is
 written, and the previous build's comes out after.
+
+### Firefox across reflashes
+
+A reflash is a fresh Windows, so without this every reflash means logging
+into every site again. With `persist.firefox` in the config, `flash`
+carries the user's Firefox over:
+
+```toml
+[persist.firefox]
+# Optional: what the very first install starts from, when nothing's kept yet.
+seed = { profile = "/home/me/.config/zen/default", history = false }
+```
+
+1. After you type `ERASE` and before anything is erased, `flash` mounts the
+   old install read-only and copies `C:\Users\<user>\AppData\Roaming\Mozilla\Firefox`
+   (profiles.ini, installs.ini, every profile; not Firefox's lock) into the
+   store, `$XDG_STATE_HOME/dfnstrate/persist/<computerName>/firefox`
+   (`--store` picks another). The copy before it becomes `firefox.prev`. The
+   store is mode 700 and owned by whoever ran `flash`, not root: it holds
+   cookies and saved passwords. The old Windows must have been shut down
+   cleanly (not hibernated, no Fast Startup, no crash), since Firefox may
+   still have been running otherwise; `--no-keep` skips the copy, and the
+   store keeps what it had.
+2. After the image is written and before Windows is grown (ntfsresize marks
+   the volume for a check, and ntfs-3g won't write to it then), it writes
+   the store's copy onto the new install. Files are created through ntfs-3g
+   with `inherit`, so they get the permissions the user's profile directory
+   hands down (the user, SYSTEM, Administrators) instead of ntfs-3g's
+   Everyone: full control; Administrators owns them.
+3. When the store has no Firefox for this machine yet, `seed` makes a new
+   profile instead, from a Gecko browser on Linux (Firefox, Zen,
+   LibreWolf): only `cookies.sqlite`, `logins.json`/`logins.db` with
+   `key4.db`, `containers.json`, and with `history` `places.sqlite` and
+   `favicons.sqlite`. The databases are copied with sqlite's `.backup`, as
+   the profile's owner and read-only, so the copy is consistent and
+   includes what's still in the write-ahead log. Firefox and Zen keep their
+   databases locked while they run, so close the browser first; `flash`
+   fails before erasing anything if one is locked. A kept profile always
+   wins over the seed: after the first install, Windows' Firefox is its own.
+
+Writing it before the first boot rather than through the logon copy
+(`wsl.linux.files`) is deliberate: that copy runs at every logon, replacing
+what's there, and would put the old profile back over the live one each
+time. Written offline, the profile is in place before winget has even
+installed Firefox.
+
+Which profile Firefox opens is per install directory: installs.ini maps a
+hash of the install's path to a profile, and winget puts Firefox in
+`C:\Program Files\Mozilla Firefox` every time, whose hash is
+`308046B0AF4A39CB` on every machine. A kept profile brings its own
+installs.ini. A seeded one gets a profiles.ini and installs.ini naming it
+as that install's profile, locked, so Firefox opens it instead of making
+its own. A per-user Firefox install (in `%LOCALAPPDATA%`) has another hash
+and would make a new profile.
+
+Firefox refuses a profile a newer Firefox last ran (compatibility.ini's
+`LastVersion`), offering only a new profile. The old install's Firefox
+updated itself, and the new one is whatever winget has at first boot,
+which can be a release behind, and no version is known offline. So
+compatibility.ini isn't written back (the store keeps it, and `flash`
+prints the version it names): with none, Firefox takes its start as an
+upgrade, rebuilds its startup cache and rescans extensions, and keeps the
+profile. Across a major version (a reflash on Firefox's release day, before
+winget has it), the profile's databases are a version ahead of the Firefox
+opening them; Firefox mostly copes. A seed has no compatibility.ini at all.
+
+Passwords in `logins.json`/`logins.db` are encrypted with `key4.db`'s key,
+which a primary password protects if one is set; it then asks for the same
+one on Windows. Cookies in a container are stored under its id, so
+`containers.json` comes along, and `flash` warns about cookies in a
+container it doesn't define. Expect Google and some others to ask you to
+sign in again anyway, as the same session suddenly comes from another OS.
+
+Out of scope: Discord and other Chromium or Electron apps. Windows encrypts
+their logins with DPAPI, under keys tied to the old install's user, so a
+copy can't be read after a reflash. Carrying the DPAPI master keys
+(`%APPDATA%\Microsoft\Protect`) is unexplored.
+
+`dfnstrate persist save` and `dfnstrate persist restore` (`-c CONFIG`,
+the disk by-id like `update`) do either half on their own: save from an
+install without reflashing, or restore onto one that hasn't run Firefox
+yet. Restore refuses an install that already has a Firefox directory.
 
 ### Windows updates
 

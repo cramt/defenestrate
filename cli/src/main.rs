@@ -17,6 +17,7 @@ mod input;
 mod iso;
 mod logs;
 mod ntfs;
+mod persist;
 mod pins;
 mod reboot;
 mod reboot_to_linux;
@@ -174,6 +175,10 @@ enum Cmd {
         #[command(flatten)]
         args: logs::Args,
     },
+    /// Keep the install's Firefox on Linux, or put it (or a profile seeded
+    /// from a Linux browser) onto an install. `flash` does both by itself.
+    #[command(subcommand)]
+    Persist(persist::Cmd),
     /// Update dfnstrate itself to the latest GitHub release (installs from
     /// the `curl | sh` installer only).
     #[cfg(feature = "self-update")]
@@ -265,6 +270,7 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Reboot(args) => reboot::run(&args),
         Cmd::Update { config, cache, args } => update::run(&config.load()?, &cache.open()?, &args),
         Cmd::Logs { config, args } => logs::run(&config.load()?, &args),
+        Cmd::Persist(cmd) => persist::run(&cmd),
         #[cfg(feature = "self-update")]
         Cmd::SelfUpdate(args) => self_update::run(&args),
     }

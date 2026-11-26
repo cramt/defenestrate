@@ -61,6 +61,9 @@
         dfn = import ./nix/tests/dfn.nix { inherit pkgs; rendered = vm.build.rendered; linuxDisk = testLinuxDisk; };
         # dfnstrate logs reading an NTFS volume, in a VM.
         logs = import ./nix/tests/logs.nix { inherit pkgs dfnstrate; };
+        # dfnstrate persist saving, restoring and seeding Firefox profiles
+        # on NTFS volumes, in a VM.
+        persist = import ./nix/tests/persist.nix { inherit pkgs dfnstrate; };
       };
 
       # Same tools, firmware and shell the package wraps in, so `cargo run`
