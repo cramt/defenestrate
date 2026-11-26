@@ -28,6 +28,8 @@
 //! them and bring them back. COSMIC puts a restored tile back in its old
 //! spot in the tree; here it splits the focused window like a new one.
 
+use crate::classify::Fit;
+use crate::geometry::{Size, letterboxed};
 use crate::motion::{Pace, View};
 use crate::settings::{ActivationPolicy, TileBehavior, WorkspaceNumber};
 use crate::tree::{Axis, Direction, Gaps, Point, Rect, Tree};
@@ -402,6 +404,9 @@ pub struct Wm<W> {
     /// toplevels by when they were last activated).
     recent: Vec<W>,
     peek: Option<Peek>,
+    /// Windows that don't take their tile's size (classify::Fit); the rest
+    /// fill theirs.
+    fits: Vec<(W, Fit)>,
     tiling: Tiling,
 }
 
@@ -437,7 +442,7 @@ impl<W: Copy + Eq> Wm<W> {
 
     pub fn with_tiling(screens: Screens, tiling: Tiling) -> Self {
         let outputs = screens.0.into_iter().map(|(id, area)| Output::new(id, area, tiling.autotile)).collect();
-        Wm { outputs, active: 0, keyboard: None, recent: Vec::new(), peek: None, tiling }
+        Wm { outputs, active: 0, keyboard: None, recent: Vec::new(), peek: None, fits: Vec::new(), tiling }
     }
 
     fn locate(&self, w: W) -> Option<(usize, usize)> {
@@ -531,7 +536,7 @@ impl<W: Copy + Eq> Wm<W> {
                     .spaces
                     .iter()
                     .map(|s| View {
-                        tiles: if s.tiling { s.tiled.tiles(o.area, self.tiling.gaps) } else { Vec::new() },
+                        tiles: if s.tiling { self.fitted(s.tiled.tiles(o.area, self.tiling.gaps)) } else { Vec::new() },
                         maximized: s.maximized,
                         area: o.area,
                     })
@@ -566,7 +571,7 @@ impl<W: Copy + Eq> Wm<W> {
         if self.outputs[o].shown().maximized == Some(w) {
             return None;
         }
-        Some((w, self.outputs[o].arrange(self.tiling.gaps).into_iter().find(|&(x, _)| x == w).map(|(_, r)| r)))
+        Some((w, self.fitted(self.outputs[o].arrange(self.tiling.gaps)).into_iter().find(|&(x, _)| x == w).map(|(_, r)| r)))
     }
 
     /// Super+drag picked up `w`; it gets focus, and a maximized one goes
@@ -641,7 +646,41 @@ impl<W: Copy + Eq> Wm<W> {
     }
 
     fn arrange(&self) -> Vec<(W, Rect)> {
-        self.outputs.iter().flat_map(|o| o.arrange(self.tiling.gaps)).collect()
+        self.outputs.iter().flat_map(|o| self.fitted(o.arrange(self.tiling.gaps))).collect()
+    }
+
+    fn fit(&self, w: W) -> Fit {
+        self.fits.iter().find(|&&(x, _)| x == w).map_or(Fit::Fills, |&(_, f)| f)
+    }
+
+    /// Tiles as the windows in them take them: a window that won't take its
+    /// tile's size sits centred in it at its own.
+    fn fitted(&self, tiles: Vec<(W, Rect)>) -> Vec<(W, Rect)> {
+        tiles.into_iter().map(|(w, tile)| (w, letterboxed(tile, self.fit(w).size_in(Size::of(tile))))).collect()
+    }
+
+    /// `w` takes its tile as `fit`. Given a new window's Fit::at_first
+    /// before it's added, so a fixed-size one isn't asked for its tile's
+    /// size even once.
+    pub fn set_fit(&mut self, w: W, fit: Fit) {
+        self.fits.retain(|&(x, _)| x != w);
+        if fit != Fit::Fills {
+            self.fits.push((w, fit));
+        }
+    }
+
+    /// Placed `w` ended up `took` in size: if that makes it fit its tile
+    /// differently (Fit::after), it's placed again by its new fit, and the
+    /// new fit comes back to be logged. None if it isn't tiled on screen or
+    /// fits as it did, so checking a window again never moves it again.
+    pub fn took(&mut self, w: W, style: u32, took: Size) -> Option<(Fit, Effects<W>)> {
+        let (_, tile) = self.outputs.iter().flat_map(|o| o.arrange(self.tiling.gaps)).find(|&(x, _)| x == w)?;
+        let fit = Fit::after(style, Size::of(tile), took);
+        if fit == self.fit(w) {
+            return None;
+        }
+        self.set_fit(w, fit);
+        Some((fit, self.placement()))
     }
 
     /// Fills in what every change needs: every shown window placed, and
@@ -727,6 +766,8 @@ impl<W: Copy + Eq> Wm<W> {
 
     pub fn remove(&mut self, w: W) -> Effects<W> {
         self.recent.retain(|&x| x != w);
+        // Handles get reused.
+        self.fits.retain(|&(x, _)| x != w);
         let Some((o, i)) = self.locate(w) else { return Effects::default() };
         let before = self.before();
         let had_focus = self.keyboard == Some(w);
@@ -2072,5 +2113,108 @@ mod tests {
         assert_eq!((fx.focus, fx.show), (Some(1), vec![1]), "COSMIC's stock policy: you go there");
         assert!(wm.is_shown(1));
         assert_eq!(wm.raised(42), None, "not managed");
+    }
+
+    const SIZABLE: u32 = 0x10CF_0000;
+    /// Riot Client's: caption and minimize box, no sizing border.
+    const FIXED: u32 = 0x14C2_0000;
+
+    fn size(width: i32, height: i32) -> Size {
+        Size { width, height }
+    }
+
+    /// League's client, 1280x720, in the left half of a 1600x1000 screen.
+    fn league() -> Wm<u32> {
+        let mut wm = Wm::new(one());
+        wm.set_fit(1, Fit::at_first(FIXED, size(1280, 720)));
+        wm.add(1);
+        wm.add(2);
+        wm
+    }
+
+    #[test]
+    fn a_fixed_size_window_is_centred_in_its_tile_from_the_start() {
+        let mut wm = Wm::new(one());
+        wm.set_fit(1, Fit::at_first(FIXED, size(400, 300)));
+        assert_eq!(rect(&wm.add(1), 1), Some(Rect { left: 600, top: 350, right: 1000, bottom: 650 }));
+        let fx = wm.add(2);
+        assert_eq!(rect(&fx, 1), Some(Rect { left: 200, top: 350, right: 600, bottom: 650 }));
+        // Bigger than its half: over both sides of it alike.
+        let wm = league();
+        assert_eq!(rect(&wm.placement(), 1), Some(Rect { left: -240, top: 140, right: 1040, bottom: 860 }));
+        assert_eq!(rect(&wm.placement(), 2), Some(right_half(AREA)), "its neighbour keeps its whole tile");
+    }
+
+    #[test]
+    fn the_hint_and_the_animation_go_where_the_window_is() {
+        let mut wm = league();
+        wm.focused(1);
+        let at = rect(&wm.placement(), 1);
+        assert_eq!(wm.hinted().map(|(_, r)| r), Some(at));
+        assert_eq!(wm.screens()[0].views[0].tiles.iter().find(|&&(w, _)| w == 1).map(|&(_, r)| r), at);
+    }
+
+    /// Focus changes, workspace switches and coming back keep it where it
+    /// is, at its size: nothing asks it for its tile's.
+    #[test]
+    fn letterboxing_holds_through_focus_and_workspace_switches() {
+        let mut wm = league();
+        let at = rect(&wm.placement(), 1);
+        cmd(&mut wm, Command::Focus(Direction::Left));
+        assert_eq!(rect(&wm.placement(), 1), at, "focus moves nothing");
+        cmd(&mut wm, Command::Switch(ws(2)));
+        assert_eq!(rect(&cmd(&mut wm, Command::Switch(ws(1))), 1), at);
+        // Moved to the other half, it's centred there instead, same size.
+        let moved = rect(&cmd(&mut wm, Command::Move(Direction::Right)), 1).unwrap();
+        assert_eq!((moved.width(), moved.height(), moved.centre()), (1280, 720, right_half(AREA).centre()));
+    }
+
+    #[test]
+    fn a_window_that_refuses_its_tile_is_letterboxed_and_not_asked_again() {
+        let mut wm = wm_with(2);
+        let tile = right_half(AREA);
+        assert_eq!(wm.took(2, SIZABLE, Size::of(tile)), None, "took it: nothing to do");
+        let (fit, fx) = wm.took(2, SIZABLE, size(800, 450)).unwrap();
+        assert_eq!(fit, Fit::Refused { asked: Size::of(tile), took: size(800, 450) });
+        let boxed = Rect { left: 800, top: 275, right: 1600, bottom: 725 };
+        assert_eq!(rect(&fx, 2), Some(boxed));
+        assert_eq!(rect(&fx, 1), Some(left_half(AREA)));
+        // Placed there, it's still that size: no new placement, so no loop.
+        assert_eq!(wm.took(2, SIZABLE, size(800, 450)), None);
+        cmd(&mut wm, Command::Focus(Direction::Left));
+        assert_eq!(rect(&wm.placement(), 2), Some(boxed));
+    }
+
+    #[test]
+    fn a_window_that_refused_one_size_is_asked_for_the_next() {
+        let mut wm = wm_with(2);
+        wm.took(2, SIZABLE, size(900, 1000));
+        // Its neighbour closes: the whole screen, which it can take.
+        assert_eq!(rect(&wm.remove(1), 2), Some(AREA));
+        assert_eq!(wm.took(2, SIZABLE, Size::of(AREA)).map(|(f, _)| f), Some(Fit::Fills));
+    }
+
+    #[test]
+    fn a_fixed_window_that_resizes_itself_is_centred_again() {
+        let mut wm = league();
+        let (_, fx) = wm.took(1, FIXED, size(1024, 576)).unwrap();
+        assert_eq!(rect(&fx, 1), Some(Rect { left: -112, top: 212, right: 912, bottom: 788 }));
+        assert_eq!(wm.took(1, FIXED, size(1024, 576)), None);
+    }
+
+    #[test]
+    fn untiled_windows_have_no_fit_to_check() {
+        let mut wm = wm_with(1);
+        cmd(&mut wm, Command::ToggleFloating);
+        assert_eq!(wm.took(1, SIZABLE, size(10, 10)), None);
+        assert_eq!(wm.took(42, SIZABLE, size(10, 10)), None);
+    }
+
+    #[test]
+    fn a_closed_windows_fit_goes_with_it() {
+        let mut wm = league();
+        wm.remove(1);
+        // The same handle again, a new window.
+        assert_eq!(rect(&wm.add(1), 1), Some(right_half(AREA)));
     }
 }

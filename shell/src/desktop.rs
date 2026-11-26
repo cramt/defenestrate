@@ -33,11 +33,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{BOOL, PWSTR};
 
-use crate::classify::{Facts, Process, Verdict, app_id, classify};
+use crate::classify::{Facts, Fit, Process, Verdict, app_id, classify};
 use crate::keys::{Button, Drag};
 use crate::motion::{Animator, Pace, Scene};
 use crate::follow::{Follow, Timer};
-use crate::geometry::{carried, clipped, corner_resized, shifted};
+use crate::geometry::{Size, carried, clipped, corner_resized, shifted};
 use crate::throttle::{Ask, Moves};
 use crate::monitors::{self, Monitor};
 use crate::{captions, hint, preview};
@@ -63,11 +63,14 @@ enum TimerId {
     Follow = 0xdf2,
     /// Sends moves held back by `set_pos`.
     Flush = 0xdf3,
+    /// Whether the windows placed last took the size they were given
+    /// (`check_fits`).
+    Fit = 0xdf4,
 }
 
 impl TimerId {
     fn from_id(id: usize) -> Option<TimerId> {
-        [TimerId::Replace, TimerId::Follow, TimerId::Flush].into_iter().find(|&t| t as usize == id)
+        [TimerId::Replace, TimerId::Follow, TimerId::Flush, TimerId::Fit].into_iter().find(|&t| t as usize == id)
     }
 
     /// Starts it, or restarts it if it's running.
@@ -86,6 +89,15 @@ impl TimerId {
 /// slid or faded out to be hidden, so they don't flash as it goes. A hung
 /// app's window doesn't get longer than this.
 const SETTLE: Duration = Duration::from_millis(100);
+
+/// How long after the last placement a window's size is read back, for
+/// whether it took its tile (classify::Fit): COSMIC's TilingBlocker waits
+/// as long for apps to resize. Each placement restarts it, so a layout
+/// that's still changing (title bars going, Replace) is checked once done.
+const FIT_CHECK_MS: u32 = 500;
+/// How many times a window that hasn't handled its move yet is given
+/// another FIT_CHECK_MS, before its size is read as it is.
+const FIT_CHECK_TRIES: u8 = 4;
 
 /// How close to the screen's edge, or to the line between two tiles, a
 /// dragged window has to be dropped to join that group (COSMIC's 32).
@@ -158,6 +170,9 @@ thread_local! {
     static MONITORS: RefCell<Vec<Monitor>> = const { RefCell::new(Vec::new()) };
     /// Windows whose verdict is in the log already.
     static LOGGED: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
+    /// Windows placed whose size is to be read back, and how many times
+    /// each has been put off.
+    static CHECKS: RefCell<Vec<(HWND, u8)>> = const { RefCell::new(Vec::new()) };
 }
 
 fn screens(list: &[Monitor]) -> Screens {
@@ -317,10 +332,13 @@ pub fn start(events_to: HWND) {
             } else {
                 // A restarted shell keeps each window on its monitor.
                 let centre = visible_frame(w).map(|(_, r)| r.centre());
-                update(|wm| Some(match centre {
-                    Some(c) => wm.add_at(w, c),
-                    None => wm.add(w),
-                }));
+                update(|wm| {
+                    opens_as(wm, w, judged.seen.style);
+                    Some(match centre {
+                        Some(c) => wm.add_at(w, c),
+                        None => wm.add(w),
+                    })
+                });
             }
         }
     }
@@ -380,7 +398,10 @@ pub fn on_event(event: u32, w: HWND) {
             } else if on_screen(w) {
                 let judged = judge(w);
                 log_verdict(w, &judged);
-                (judged.verdict == Verdict::Tile).then(|| wm.add_new(w))
+                (judged.verdict == Verdict::Tile).then(|| {
+                    opens_as(wm, w, judged.seen.style);
+                    wm.add_new(w)
+                })
             } else {
                 None
             }
@@ -579,8 +600,70 @@ pub fn on_timer(id: usize) {
             TimerId::Replace.kill();
             update(|wm| Some(wm.placement()));
         }
+        Some(TimerId::Fit) => {
+            TimerId::Fit.kill();
+            check_fits();
+        }
         None => {}
     }
+}
+
+/// Reads back the size each window placed last ended up, and has the Wm
+/// letterbox the ones that didn't take their tile (classify::Fit). Only
+/// placements are checked, never a check's own result, and a window that
+/// fits as it did isn't placed again, so a window that refuses its size
+/// gets asked once per tile size, not in a loop.
+fn check_fits() {
+    let mut later = Vec::new();
+    for (w, tries) in CHECKS.take() {
+        if !on_screen(w) {
+            continue;
+        }
+        // Mid-drag, the size is the user's; mid-animation, it's settling.
+        let busy = MOVING.get() || DRAGGING.get().is_some() || PHASE.get().animating();
+        if busy || (tries < FIT_CHECK_TRIES && unhandled(w)) {
+            later.push((w, tries.saturating_add(1)));
+            continue;
+        }
+        let Some((_, seen)) = visible_frame(w) else { continue };
+        let style = unsafe { GetWindowLongPtrW(w, GWL_STYLE) } as u32;
+        let mut changed = None;
+        update(|wm| {
+            let (fit, fx) = wm.took(w, style, Size::of(seen))?;
+            changed = Some(fit);
+            Some(fx)
+        });
+        if let Some(fit) = changed {
+            log(&format!("window {:#x}: {fit}", w.0 as usize));
+        }
+    }
+    if !later.is_empty() {
+        CHECKS.with_borrow_mut(|c| {
+            for (w, tries) in later {
+                if !c.iter().any(|&(x, _)| x == w) {
+                    c.push((w, tries));
+                }
+            }
+        });
+        TimerId::Fit.set(FIT_CHECK_MS);
+    }
+}
+
+/// A move sent to `w` that it hasn't handled: it's still where it was.
+fn unhandled(w: HWND) -> bool {
+    let now = window_rect(w);
+    PENDING.with_borrow(|p| p.iter().any(|&(x, from, to)| x == w && now == Some(from) && from != to))
+}
+
+/// A window about to tile starts as it opened (Fit::at_first): one without
+/// a sizing border is placed at its own size from the first placement on.
+fn opens_as(wm: &mut Wm<HWND>, w: HWND, style: u32) {
+    let Some((_, r)) = visible_frame(w) else { return };
+    let fit = Fit::at_first(style, Size::of(r));
+    if fit != Fit::default() {
+        log(&format!("window {:#x}: {fit}", w.0 as usize));
+    }
+    wm.set_fit(w, fit);
 }
 
 fn cloaked(w: HWND) -> bool {
@@ -762,6 +845,13 @@ fn apply(fx: Effects<HWND>) {
         for &(w, r) in &fx.place {
             crossed |= visible_frame(w).is_some_and(|(_, now)| monitor_of(now) != monitor_of(r));
             place(w, r);
+        }
+        if !fx.place.is_empty() {
+            CHECKS.with_borrow_mut(|c| {
+                c.retain(|&(x, _)| !fx.place.iter().any(|&(w, _)| w == x));
+                c.extend(fx.place.iter().map(|&(w, _)| (w, 0)));
+            });
+            TimerId::Fit.set(FIT_CHECK_MS);
         }
         for &(w, from, to) in &fx.carry {
             if let Some(r) = window_rect(w) {

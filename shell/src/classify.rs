@@ -9,9 +9,20 @@
 //! app window apart from a dialog, which nothing minimizes on its own.
 //! Whatever still tiles wrongly is what COSMIC's tiling exceptions are for
 //! (settings.rs).
+//!
+//! Tiling those fixed-size windows meant asking them for the tile's size,
+//! which they refuse or draw wrongly at, and asking again at every layout
+//! (League's client, saturn 2026-11-26). So the tiling letterboxes them
+//! instead (`Fit`): a window without a sizing border keeps the size it
+//! came with, and one that took another size than its tile's keeps that
+//! one until its tile changes size; either sits centred in its tile. This
+//! goes by what the window does, so there's no list of apps, and touches
+//! nothing inside the app: hooking its WM_GETMINMAXINFO would mean
+//! injecting into it, which Vanguard (Riot's anti-cheat) bans for.
 
 use std::fmt;
 
+use crate::geometry::Size;
 use crate::settings::TilingException;
 
 // winuser.h. WS_MINIMIZEBOX shares its bit with WS_GROUP, which only means
@@ -161,9 +172,113 @@ pub fn classify(w: &Facts, process: &Process, exceptions: &[TilingException]) ->
     Verdict::Tile
 }
 
+/// How a tiled window takes the size the tiling gives it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Fit {
+    /// It takes its tile's size, as nearly every window does.
+    #[default]
+    Fills,
+    /// No sizing border: it's never asked for another size, only moved,
+    /// at this one, which is what it last had.
+    Own(Size),
+    /// Asked for `asked`, it took `took` (a fixed aspect ratio, or a
+    /// minimum size over its tile's). It's left at `took` until its tile is
+    /// some other size than `asked`, which it's then asked for once.
+    Refused { asked: Size, took: Size },
+}
+
+impl Fit {
+    /// What a window with this style starts as, at the size it opened at,
+    /// before the tiling has asked it for anything.
+    pub fn at_first(style: u32, size: Size) -> Fit {
+        if style & WS_THICKFRAME == 0 { Fit::Own(size) } else { Fit::Fills }
+    }
+
+    /// The size this fit has the window take in a tile of size `tile`;
+    /// `tile` itself is the one asked for.
+    pub fn size_in(self, tile: Size) -> Size {
+        match self {
+            Fit::Fills => tile,
+            Fit::Own(size) => size,
+            Fit::Refused { asked, took } if asked == tile => took,
+            Fit::Refused { .. } => tile,
+        }
+    }
+
+    /// What a window with this style turns out to be, once placed in a tile
+    /// of size `tile`, having ended up `took`. Re-asked or not, it's the
+    /// same: a window left at its own size in an unchanged tile is still
+    /// one that refused it.
+    pub fn after(style: u32, tile: Size, took: Size) -> Fit {
+        if style & WS_THICKFRAME == 0 {
+            Fit::Own(took)
+        } else if took == tile {
+            Fit::Fills
+        } else {
+            Fit::Refused { asked: tile, took }
+        }
+    }
+}
+
+impl fmt::Display for Fit {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Fit::Fills => f.write_str("fills its tile"),
+            Fit::Own(size) => write!(f, "no WS_THICKFRAME, letterboxed at its own {size}"),
+            Fit::Refused { asked, took } => write!(f, "asked for {asked}, took {took}: letterboxed"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn size(width: i32, height: i32) -> Size {
+        Size { width, height }
+    }
+
+    const SIZABLE: u32 = 0x10CF_0000;
+    /// Riot Client's, captured on saturn 2026-11-16.
+    const FIXED: u32 = 0x14C2_0000;
+
+    #[test]
+    fn windows_without_a_sizing_border_keep_their_own_size() {
+        let opened = size(1280, 720);
+        assert_eq!(Fit::at_first(FIXED, opened), Fit::Own(opened));
+        assert_eq!(Fit::at_first(SIZABLE, opened), Fit::Fills);
+        // Whatever the tile, it's only ever moved.
+        assert_eq!(Fit::Own(opened).size_in(size(960, 1080)), opened);
+        // It resized itself (League's own size presets): that's its size now.
+        assert_eq!(Fit::after(FIXED, size(960, 1080), size(1024, 576)), Fit::Own(size(1024, 576)));
+    }
+
+    #[test]
+    fn a_window_that_took_its_tiles_size_fills_it() {
+        assert_eq!(Fit::after(SIZABLE, size(960, 1080), size(960, 1080)), Fit::Fills);
+        assert_eq!(Fit::Fills.size_in(size(960, 1080)), size(960, 1080));
+    }
+
+    /// No loop: once it refused a size, the same tile never asks again,
+    /// and checking it there again finds nothing new.
+    #[test]
+    fn a_refused_size_isnt_asked_for_again() {
+        let (tile, took) = (size(960, 1080), size(960, 540));
+        let fit = Fit::after(SIZABLE, tile, took);
+        assert_eq!(fit, Fit::Refused { asked: tile, took });
+        assert_eq!(fit.size_in(tile), took);
+        assert_eq!(Fit::after(SIZABLE, tile, fit.size_in(tile)), fit);
+    }
+
+    /// A minimum size over a half tile's mustn't keep it small once the
+    /// tile grows back.
+    #[test]
+    fn a_tile_of_another_size_is_asked_for_once() {
+        let fit = Fit::Refused { asked: size(480, 1080), took: size(600, 1080) };
+        let whole = size(1920, 1080);
+        assert_eq!(fit.size_in(whole), whole);
+        assert_eq!(Fit::after(SIZABLE, whole, whole), Fit::Fills);
+    }
 
     fn facts(style: u32, ex_style: u32) -> Facts<'static> {
         Facts { root: true, owned: false, style, ex_style, title: "t", class: "C", ours: false }

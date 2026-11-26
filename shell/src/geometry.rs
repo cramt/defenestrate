@@ -3,6 +3,34 @@
 
 use crate::tree::{Direction, Point, Rect};
 
+/// A window's width and height, in pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Size {
+    pub width: i32,
+    pub height: i32,
+}
+
+impl Size {
+    pub fn of(r: Rect) -> Size {
+        Size { width: r.width(), height: r.height() }
+    }
+}
+
+impl std::fmt::Display for Size {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}x{}", self.width, self.height)
+    }
+}
+
+/// A window of `size` centred in `tile`: where a window that won't take its
+/// tile's size goes. One bigger than its tile overflows it by as much on
+/// either side, as nothing can make it smaller.
+pub fn letterboxed(tile: Rect, size: Size) -> Rect {
+    let left = tile.left + (tile.width() - size.width).div_euclid(2);
+    let top = tile.top + (tile.height() - size.height).div_euclid(2);
+    Rect { left, top, right: left + size.width, bottom: top + size.height }
+}
+
 /// COSMIC keeps a floating window's place relative to its output when it
 /// moves it to another (`position_relative`): `r` on `from`, carried to `to`.
 pub fn carried(r: Rect, from: Rect, to: Rect) -> Rect {
@@ -65,6 +93,30 @@ mod tests {
 
     fn rect(left: i32, top: i32, right: i32, bottom: i32) -> Rect {
         Rect { left, top, right, bottom }
+    }
+
+    #[test]
+    fn letterboxing_centres_a_smaller_window_in_its_tile() {
+        let tile = rect(0, 0, 960, 1080);
+        assert_eq!(letterboxed(tile, Size { width: 800, height: 600 }), rect(80, 240, 880, 840));
+        assert_eq!(letterboxed(tile, Size::of(tile)), tile);
+    }
+
+    #[test]
+    fn letterboxing_overflows_a_bigger_window_evenly() {
+        // League's client at its 1280x720 preset, in the left half of a
+        // 1920x1080 monitor: past both sides of the tile alike.
+        let tile = rect(0, 0, 960, 1080);
+        assert_eq!(letterboxed(tile, Size { width: 1280, height: 720 }), rect(-160, 180, 1120, 900));
+    }
+
+    #[test]
+    fn letterboxing_rounds_an_odd_pixel_towards_the_top_left() {
+        let tile = rect(10, 10, 111, 111);
+        // 51 to spare: 25 before, 26 after.
+        assert_eq!(letterboxed(tile, Size { width: 50, height: 50 }), rect(35, 35, 85, 85));
+        // Overflowing by an odd amount: the extra pixel sticks out before it.
+        assert_eq!(letterboxed(tile, Size { width: 102, height: 101 }), rect(9, 10, 111, 111));
     }
 
     #[test]
