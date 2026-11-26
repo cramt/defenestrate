@@ -13,9 +13,15 @@
 //! nothing but to exist next to one setup made (IfMissing::CreateLike): it's
 //! created with that file's descriptor, set before anything is written to it.
 //!
-//! The one registry edit: a new shell build is signed with a new
+//! The one offline registry edit: a new shell build is signed with a new
 //! certificate, which goes into the SOFTWARE hive's Root store for the
 //! shell to keep its uiAccess, and the previous build's comes out (cert.rs).
+//! The registry config itself goes onto the boot queue (boot.rs) instead,
+//! for Windows' own `reg import` at the next boot, and only when it changed.
+//!
+//! The volume is mounted so that what this creates (the boot queue's
+//! files, IfMissing::Inherit) gets what its parent directory hands down, as
+//! a file an elevated admin made on Windows would.
 
 use std::fs::File;
 use std::io::Read;
@@ -23,6 +29,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
+use crate::boot;
 use crate::cache::Cache;
 use crate::cert::{self, ShellCert};
 use crate::config::Config;
@@ -54,9 +61,10 @@ pub fn run(config: &Config, cache: &Cache, args: &Args) -> Result<()> {
     })?;
 
     let scratch = Scratch::new("render")?;
-    let Rendered { files, shell_cert, .. } = scratch.render(config, cache)?;
+    let Rendered { files, shell_cert, boot: rendered_boot, .. } = scratch.render(config, cache)?;
     ntfs::probe(&volume, !args.dry_run)?;
-    let mount = Mount::new(&volume, std::env::temp_dir().join(format!("dfnstrate-update-{}", std::process::id())), !args.dry_run)?;
+    let dir = std::env::temp_dir().join(format!("dfnstrate-update-{}", std::process::id()));
+    let mount = if args.dry_run { Mount::new(&volume, dir, false)? } else { Mount::inheriting(&volume, dir)? };
     let root = mount.dir.as_path();
     if !root.join(SETUP_DIR.rel()).is_dir() {
         bail!("{} has no {}; not a defenestrate install", volume.display(), SETUP_DIR.windows());
@@ -93,10 +101,34 @@ pub fn run(config: &Config, cache: &Cache, args: &Args) -> Result<()> {
                 }
                 if args.dry_run { "would create" } else { "created" }
             }
+            (Change::Create, IfMissing::Inherit) => {
+                if !args.dry_run {
+                    create_inherited(&f.source, &dest).with_context(|| format!("creating {}", f.dest.windows()))?;
+                }
+                if args.dry_run { "would create" } else { "created" }
+            }
             _ => continue,
         };
         println!("{done} {}", f.dest.windows());
         written += 1;
+    }
+    // After the files, so an install from before the queue has its runner
+    // by the time there's anything on it.
+    let queue_dir = root.join(boot::DIR.rel());
+    let queue = boot::read(&queue_dir).context("reading the boot queue")?;
+    let plan = boot::plan(&queue, &rendered_boot);
+    if !args.dry_run {
+        boot::apply(&queue_dir, &plan).context("writing the boot queue")?;
+    }
+    for (stem, action) in &plan.add {
+        let when = match action.phase() {
+            boot::Phase::Machine => "as SYSTEM at the next startup",
+            boot::Phase::User => "at the user's next logon",
+        };
+        println!("{} the {} registry import ({stem}), {when}", if args.dry_run { "would queue" } else { "queued" }, action.target().name());
+    }
+    for t in &plan.unchanged {
+        println!("the {} registry is as last queued", t.name());
     }
     if !trust.remove.is_empty() {
         if !args.dry_run {
@@ -121,6 +153,11 @@ pub fn run(config: &Config, cache: &Cache, args: &Args) -> Result<()> {
     }
     if (written > 0 || trust.add) && !args.dry_run {
         println!("They take effect at the next logon.");
+    }
+    if !plan.add.is_empty() && !args.dry_run {
+        println!(
+            "The boot queue applies them with reg import; values dropped from the config stay on Windows unless set to \"delete\". Log: %ProgramData%\\defenestrate\\boot-machine.log, boot-user.log"
+        );
     }
     Ok(())
 }
@@ -195,8 +232,10 @@ enum Change {
     SetupOnly,
     /// Not on the install, and only setup can add it (see the module docs).
     Missing,
-    /// Not on the install, but can be created (IfMissing::CreateLike).
+    /// Not on the install, but can be created (IfMissing::CreateLike, Inherit).
     Create,
+    /// Only setup reads it, and the boot queue carries its change instead.
+    Queued,
 }
 
 fn change(file: &InstallFile, root: &Path) -> Result<Change> {
@@ -206,6 +245,7 @@ fn change(file: &InstallFile, root: &Path) -> Result<Change> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Ok(match &file.if_missing {
                 IfMissing::CreateLike(like) if root.join(like.rel()).is_file() => Change::Create,
+                IfMissing::Inherit => Change::Create,
                 _ => Change::Missing,
             });
         }
@@ -219,6 +259,7 @@ fn change(file: &InstallFile, root: &Path) -> Result<Change> {
     }
     Ok(match file.read {
         ReadAt::Setup => Change::SetupOnly,
+        ReadAt::Queued => Change::Queued,
         ReadAt::EveryLogon => Change::Write,
     })
 }
@@ -263,6 +304,16 @@ fn create_like(source: &Path, dest: &Path, like: &Path) -> Result<()> {
         std::fs::remove_file(dest).ok();
         return Err(e).context("setting its security descriptor");
     }
+    write_in_place(source, dest)
+}
+
+/// Creates `dest` and its missing parents on a volume mounted with
+/// Mount::inheriting, so each gets what its parent hands down.
+fn create_inherited(source: &Path, dest: &Path) -> Result<()> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    File::options().write(true).create_new(true).open(dest)?;
     write_in_place(source, dest)
 }
 
@@ -348,6 +399,8 @@ mod tests {
             (file("same-size", "ab", Some("ba"), ReadAt::EveryLogon), Change::Write),
             (file("setup", "b", Some("a"), ReadAt::Setup), Change::SetupOnly),
             (file("missing", "b", None, ReadAt::EveryLogon), Change::Missing),
+            (file("queued", "b", Some("a"), ReadAt::Queued), Change::Queued),
+            (file("queued-same", "a", Some("a"), ReadAt::Queued), Change::None),
         ];
         for (f, want) in &cases {
             assert_eq!(change(f, &root).unwrap(), *want, "{}", f.dest.rel());
@@ -369,9 +422,8 @@ mod tests {
     fn plans_the_root_store() {
         let cert = shell_cert();
         let store = "[\\Microsoft\\SystemCertificates\\ROOT\\Certificates]\n\n";
-        let entry = |thumbprint: &str, blob: &[u8]| {
-            format!("[\\Microsoft\\SystemCertificates\\ROOT\\Certificates\\{thumbprint}]\n\"Blob\"=hex(3):{}\n\n", hex(blob))
-        };
+        let entry =
+            |thumbprint: &str, blob: &[u8]| format!("[\\Microsoft\\SystemCertificates\\ROOT\\Certificates\\{thumbprint}]\n\"Blob\"=hex(3):{}\n\n", hex(blob));
         // Someone else's root: a certificate whose names aren't ours.
         let mut theirs = cert.blob();
         let at = theirs.windows(18).position(|w| w == b"defenestrate shell").unwrap();

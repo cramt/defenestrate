@@ -69,6 +69,14 @@ pub fn build(config: &Config, variant: &Variant, source: &Path, cache: &Cache, w
             Ok(format!("add {} {}\n", quote(&source)?, quote(Path::new(&format!("/{}", f.dest.rel())))?))
         })
         .collect::<Result<String>>()?;
+    // The boot queue as it starts out (boot.rs): kept apart from `files`,
+    // which `update` rewrites, since the queue is added to, not rewritten.
+    for phase in crate::boot::Phase::ALL {
+        let dir = r.queue.join(phase.dir());
+        if dir.is_dir() {
+            commands += &format!("add {} {}\n", quote(&dir)?, quote(Path::new(&format!("/{}/{}", crate::boot::DIR.rel(), phase.dir())))?);
+        }
+    }
     // Here rather than in render's file list: `update` would only ever see
     // these as missing, since specialize deletes them once they're in the
     // driver store, and `render` has no use for gigabytes of drivers.

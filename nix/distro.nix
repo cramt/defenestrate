@@ -107,6 +107,9 @@ in
   build = {
     iso = isoBuild;
     inherit image cache isoSource;
+    # What render and update run offline against; the boot queue's check
+    # runs update with it.
+    inherit isoFreeCache;
     # For looking at what the config generates: `nix build .#…build.rendered`.
     rendered = pkgs.runCommand "defenestrate-rendered" { nativeBuildInputs = [ dfnstrate ]; } (runWith isoFreeCache "render" + " --out $out");
     # These scripts are tiny but reference the ISO, the image or the cache,

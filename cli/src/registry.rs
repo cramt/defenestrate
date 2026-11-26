@@ -42,6 +42,12 @@ impl Root {
 /// The ASCII text of a .reg file. Keys and names are checked to be plain
 /// ASCII when the config loads.
 pub fn render(root: Root, keys: &Hive) -> String {
+    render_under(root.path(), keys)
+}
+
+/// As [`render`], under any root key (HKEY_CURRENT_USER, for the boot
+/// queue's imports into the running user's hive).
+pub fn render_under(root: &str, keys: &Hive) -> String {
     // reg.exe creates missing parents, hivexregedit refuses to. Listing every
     // ancestor as an empty section satisfies both.
     let empty = BTreeMap::new();
@@ -59,7 +65,7 @@ pub fn render(root: Root, keys: &Hive) -> String {
 
     let mut out = String::from("Windows Registry Editor Version 5.00\r\n\r\n");
     for key in order {
-        out += &format!("[{}\\{key}]\r\n", root.path());
+        out += &format!("[{root}\\{key}]\r\n");
         for (name, value) in sections[key] {
             out += &format!("{}={}\r\n", render_name(name), render_value(value));
         }

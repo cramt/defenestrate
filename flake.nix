@@ -64,6 +64,9 @@
         # dfnstrate persist saving, restoring and seeding Firefox profiles
         # on NTFS volumes, in a VM.
         persist = import ./nix/tests/persist.nix { inherit pkgs dfnstrate; };
+        # dfnstrate update queueing registry imports onto an NTFS volume (in
+        # a VM), then the runner taking that queue under pwsh, faked Windows.
+        boot-queue = import ./nix/tests/boot-queue.nix { inherit pkgs dfnstrate; cache = vm.build.isoFreeCache; config = ./configs/vm.toml; };
       };
 
       # Same tools, firmware and shell the package wraps in, so `cargo run`

@@ -12,7 +12,7 @@ use crate::cert::ShellCert;
 use crate::config::{Config, Hive, RegValue, Shell};
 use crate::registry::{self, Root};
 use crate::unattend::{self, FirstLogon, Variant};
-use crate::wsl;
+use crate::{boot, wsl};
 
 /// The builtin shell's two files under C:\Program Files\defenestrate: the
 /// launcher Winlogon starts, and the signed uiAccess binary it starts in
@@ -124,6 +124,11 @@ pub struct Rendered {
     /// What the builtin shell's uiAccess binary is signed with, trusted in
     /// the Root store so it gets uiAccess (cert.rs). None for any other shell.
     pub shell_cert: Option<ShellCert>,
+    /// The registry config as boot queue actions (boot.rs): `build iso`
+    /// puts them in the image, `update` queues the changed ones.
+    pub boot: Vec<boot::Action>,
+    /// `boot` as a fresh queue, machine/ and user/, for the image.
+    pub queue: PathBuf,
 }
 
 /// A file the build puts on C:.
@@ -144,6 +149,10 @@ pub enum IfMissing {
     /// Create it, with the NTFS security descriptor the file at this dest
     /// has, which setup made: for a file that needs nothing but to exist.
     CreateLike(CPath),
+    /// Create it, and any missing parents, with what its parent directory
+    /// hands down (ntfs::Mount::inheriting): for a file whatever reads it
+    /// registers itself (the boot queue's runner and its tasks).
+    Inherit,
 }
 
 /// When Windows reads a file of ours, which decides whether replacing it on
@@ -154,6 +163,9 @@ pub enum ReadAt {
     Setup,
     /// At every boot or logon.
     EveryLogon,
+    /// Only by setup, but what it does reaches an installed system through
+    /// the boot queue instead (the registry .reg files, boot.rs).
+    Queued,
 }
 
 impl InstallFile {
@@ -275,8 +287,17 @@ pub fn render(config: &Config, variant: &Variant, cache: &Cache, work: &Path, di
         std::fs::write(dir.join(format!("reg/ascii/{}.reg", f.name)), &text)?;
         let reg = dir.join(format!("reg/{}.reg", f.name));
         std::fs::write(&reg, registry::utf16(&text))?;
-        files.push(InstallFile::new(SETUP_DIR.join(&format!("{}.reg", f.name)), reg, ReadAt::Setup));
+        files.push(InstallFile::new(SETUP_DIR.join(&format!("{}.reg", f.name)), reg, ReadAt::Queued));
     }
+    // The same keys again, for the boot queue: a fresh install's first boot
+    // imports them once more (changing nothing), which runs the queue on
+    // every install the way an `update` will.
+    let boot = boot::registry_actions(&software, &config.registry.system, &default_user, &shell);
+    let queue = dir.join("boot-queue");
+    if queue.exists() {
+        std::fs::remove_dir_all(&queue)?;
+    }
+    boot::initial(&queue, &boot)?;
 
     let appx: String = config.appx.remove.iter().map(|n| format!("{n}\r\n")).collect();
     let setup_files = [
@@ -290,13 +311,15 @@ pub fn render(config: &Config, variant: &Variant, cache: &Cache, work: &Path, di
     }
 
     let mut first_logon = Vec::new();
-    for part in [wsl::render(config, cache, work, dir)?, crate::apps::render(config, dir)?, crate::reboot_to_linux::render(config, dir)?] {
+    for part in
+        [boot::render(config, dir)?, wsl::render(config, cache, work, dir)?, crate::apps::render(config, dir)?, crate::reboot_to_linux::render(config, dir)?]
+    {
         files.extend(part.files);
         first_logon.extend(part.first_logon);
     }
     std::fs::write(dir.join("autounattend.xml"), unattend::render(config, variant, &first_logon)?)?;
 
-    Ok(Rendered { dir: dir.to_path_buf(), files, shell_cert })
+    Ok(Rendered { dir: dir.to_path_buf(), files, shell_cert, boot, queue })
 }
 
 /// cmd.exe misparses scripts with bare LF line endings.
@@ -388,10 +411,13 @@ mod tests {
             (format!("{s}/wsl/task.xml"), ReadAt::Setup),
             (format!("{s}/wsl/wsl.msi"), ReadAt::Setup),
             (format!("{s}/wsl/wsl-install.cmd"), ReadAt::Setup),
-            (format!("{s}/software.reg"), ReadAt::Setup),
-            (format!("{s}/system.reg"), ReadAt::Setup),
-            (format!("{s}/defaultUser.reg"), ReadAt::Setup),
-            (format!("{s}/shell.reg"), ReadAt::Setup),
+            (format!("{s}/software.reg"), ReadAt::Queued),
+            (format!("{s}/system.reg"), ReadAt::Queued),
+            (format!("{s}/defaultUser.reg"), ReadAt::Queued),
+            (format!("{s}/shell.reg"), ReadAt::Queued),
+            (format!("{s}/boot/boot.ps1"), ReadAt::EveryLogon),
+            (format!("{s}/boot/machine.xml"), ReadAt::EveryLogon),
+            (format!("{s}/boot/user.xml"), ReadAt::EveryLogon),
             (format!("{s}/appx-remove.txt"), ReadAt::Setup),
             (format!("{s}/specialize.cmd"), ReadAt::Setup),
             (format!("{s}/remove-appx.ps1"), ReadAt::Setup),

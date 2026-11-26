@@ -24,6 +24,24 @@ function Log([string]$msg) {
 
 . (Join-Path $PSScriptRoot 'linux-entry.ps1')
 
+# Installs flashed before the boot queue have its files from `update` but
+# no tasks for it, and only first logon registers tasks. This is the one
+# startup task such an install already runs as SYSTEM, so it registers
+# them and runs this boot's machine phase itself; the user phase then runs
+# at the next logon. Remove once no install predates first logon running
+# `boot.ps1 -Register` (saturn's next reflash, for the only one known).
+$boot = Join-Path $PSScriptRoot '..\boot\boot.ps1'
+if ((Test-Path -LiteralPath $boot) -and -not (Get-ScheduledTask -TaskName 'defenestrate-boot' -ErrorAction SilentlyContinue)) {
+    try {
+        Log 'no defenestrate-boot task: registering the boot queue'
+        & $boot -Register | ForEach-Object { Log "  $_" }
+        & $boot -Phase Machine
+        Log "  machine phase exited with $LASTEXITCODE (boot-machine.log)"
+    } catch {
+        Log "  boot queue: $_"
+    }
+}
+
 try {
     $entries = @(Get-FirmwareEntries)
     $found = Find-LinuxEntries $entries

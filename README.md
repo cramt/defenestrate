@@ -45,7 +45,7 @@ values per hive. Every config is layered over the distro's own defaults,
 - [x] No automatic driver downloads either (PnP's Device Driver Retrieval Client ignores `NoAutoUpdate`; blocked with `ExcludeWUDriversInQualityUpdate`, `PreventDeviceMetadataFromNetwork` and `DriverSearching`, lifted only for the display-driver pass). Seen on saturn (2026-11-20): no Device Driver Retrieval Client installs, no RebootRequired, and the display-driver pass still ran
 - [ ] Default apps (`defaultApps`: extension or URL scheme -> ProgId), by asking: Windows 11 keeps the default the user's own choice (UserChoice is hashed and UCPD.sys guards it), and the DefaultAssociationsConfiguration policy did nothing on saturn, which isn't domain-joined (two sign-ins, https still Edge). At each logon, while one isn't set and the app registering its ProgId is installed, the shell opens Settings at that app's default-apps page once (`ms-settings:defaultapps?registeredAppMachine=`), for one click on "Set default". Not seen on hardware yet
 - [x] Updates baked into the image ([Windows updates](#windows-updates)): the newest cumulative update, tracked in the Update Catalog, added by DISM in setup's WinPE before Windows first starts. Seen in a `build image` run for saturn: KB5132061 (4.7 GB) went in, and the image's SOFTWARE hive says 26300.9974 against the ISO's 9457; the whole VM run took 15 minutes. The image grew from 35 to 42 GB compressed, since the update's superseded components stay in WinSxS
-- [ ] Pointer speed and key repeat from COSMIC's (`cosmic.compositor.input_default`, `xkb_config`, `displayScale`): libinput's flat multiplier as a straight Enhance-pointer-precision curve that Windows' own 16.16 arithmetic turns into the same multiplier, and the nearest Windows repeat steps. Unit-tested against MarkC's 1-to-1 curves and every libinput speed at the scales Settings offers; the pixels-per-count ratio against Linux's not measured on hardware yet
+- [ ] Pointer speed and key repeat from COSMIC's (`cosmic.compositor.input_default`, `xkb_config`, `displayScale`): libinput's flat multiplier as a straight Enhance-pointer-precision curve that Windows' own 16.16 arithmetic turns into the same multiplier, and the nearest Windows repeat steps. Unit-tested against MarkC's 1-to-1 curves and every libinput speed at the scales Settings offers; the pixels-per-count ratio against Linux's not measured on hardware yet. `update` carries a change through the boot queue, which puts it into effect at that logon where Windows has a SystemParametersInfo for it (not `displayScale`, which takes another logon)
 - [x] Gaming defaults for the new user: mouse acceleration ("Enhance pointer precision") off, and the Sticky/Filter/Toggle Keys hotkeys that pop a dialog over the game off. Seen in the user's hive after a fresh `build image` booted in the VM: MouseSpeed/MouseThreshold1/MouseThreshold2 0/0/0, StickyKeys 506, Keyboard Response 122, ToggleKeys 58
 - [x] Windows apps (`apps`): winget IDs, unpinned, installed by winget at the first real boot from a logon task first logon registers. Seen in the VM under our shell, online: the script installed Firefox elevated, and an equivalent logon task fired at the next logon, installed 7-Zip and deleted itself. From a fresh `build image`: first logon registered the task, and it ran at the first real boot and removed itself (the VM config has no apps, so only the GPU pass below ran)
   - Pinned drivers (`drivers`): .cabs from the Update Catalog (or any archive 7-Zip opens), added to the image and installed by pnputil at specialize. Seen in a `build image` for saturn: specialize added AMD's three packages to the driver store and removed the staged copy (pnputil exit 3010, "reboot to finish"). Binding to a real GPU not seen yet
@@ -56,7 +56,8 @@ values per hive. Every config is layered over the distro's own defaults,
   - Seen in a VM (Windows nested in KVM, a saturn-shaped btrfs test install as a second disk, `nix build .#test-linux-disk`): WSL installs from the image, the logon task imports the distro, attaches the disk by GPT GUID, mounts it and puts the "Linux terminal" in the Start Menu, which opens the user's login shell from the install. dfn's half is also a flake check (`checks.x86_64-linux.dfn`)
   - Linux GUI windows are a non-goal. WSLg's viewer (msrdc) only connects while a real explorer runs as the shell: a dump of it under our shell shows its connection thread never starting, and faking explorer's documented surface (Shell_TrayWnd and its appbar/tray messages, the shell window, the shell-ready events, TaskbarCreated) doesn't change that. Running explorer hidden underneath works, but this Windows exists to be a console for kernel-anticheat games, so explorer stays out. The experiment is on branch `t3/wslg-windows-under-shell`
   - Terminal programs work: Start Menu → "Linux terminal" (`dfn shell`) opens the user's login shell from the install, as the user, in their home
-- [x] Updating an install from Linux without a reflash (`dfnstrate update`, `build.update`): the shell, fonts and WSL payload are rewritten in place on the shut-down Windows partition, each keeping its NTFS security descriptor, and the logon task re-imports the distro when `rootfs.tar` changed
+- [x] Updating an install from Linux without a reflash (`dfnstrate update`, `build.update`): the shell, fonts and WSL payload are rewritten in place on the shut-down Windows partition, each keeping its NTFS security descriptor, and the logon task re-imports the distro when `rootfs.tar` changed. Registry config that changed goes onto the boot queue, below
+- [x] The boot queue ([Boot queue](#boot-queue)): what Linux asks Windows to do once at its next boot, typed by phase (HKLM imports as SYSTEM at startup, HKCU imports as the user at logon), run once each by `boot.ps1` with a done marker per action, logged to `%ProgramData%\defenestrate\boot-*.log`. A build's image starts with the registry config on it, so the first boot runs the queue as every `update` will; `update` queues a hive's import only when its rendered .reg changed since the last one queued. Unit-tested (hashing and change detection, numbering and replacing, done markers, which phase each action gets, which values get a settings refresh); `checks.boot-queue` runs `update` against an NTFS image in a VM (created files inherit `C:\Windows\Setup\defenestrate`'s ACL, a second run queues nothing, a keyboard change queues only the user import) and then the runner on that queue under pwsh on Linux with Windows' calls faked (each action once and in order, a failure resuming where it stopped, the refreshes, refusals outside a phase's root or of a payload not matching its hash). Not run on Windows yet: `reg import` from the tasks, the ACL check, the SystemParametersInfo calls, and the registration from `linux-first.ps1` on an install from before the queue
 - [x] Reading what the last Windows boot logged, from Linux (`dfnstrate logs --out DIR`, `build.logs`): defenestrate's logs (shell, wsl, apps, reboot, linux-first, setup) copied off the shut-down partition through a read-only ntfs-3g mount, plus any `--also` path under C:\\, owned by the caller rather than root. Checked in a VM (`checks.logs`) against an NTFS image; not yet on a real disk
 - [x] Firefox survives a reflash, and the first install starts logged in ([Firefox across reflashes](#firefox-across-reflashes), `persist.firefox`): `flash` copies the old install's `%APPDATA%\Mozilla\Firefox` to a store on Linux before erasing it and writes it onto the new one before its first boot; with nothing kept yet, it seeds a new profile with a Linux browser's cookies, logins and containers. Unit-tested (which files go and come back, kept over seed over nothing, the seeded profiles.ini/installs.ini, container ids against cookies), and `checks.persist` runs save, restore and seed against NTFS images in a VM: the copy-off leaves the volume untouched, the restored files inherit the profile directory's ACL instead of Everyone: full control, compatibility.ini stays behind, a seed taken from a WAL database a browser hasn't checkpointed has every row, and a browser holding its database fails the seed before anything is written. Not run by `flash` onto a real disk, and not seen in a Windows Firefox yet: that it opens the restored or seeded profile and is still logged in is for a real boot
 - [x] "Reboot to Linux" unmounts the Linux install inside WSL first (`dfn release`: flush, ask then make whatever uses it quit, unmount deepest first, read-only if something won't let go), then shuts WSL down. Without it, the last 30 s of what Windows wrote to the install were lost, since btrfs writes back every 30 s and the reboot killed WSL's VM with it mounted (seen on saturn: a report's last items and a rename, done and then missing on Linux). Checked in the dfn VM test; a plain Windows shutdown or a reboot from elsewhere still doesn't release it
@@ -463,8 +464,11 @@ Then, per file the build puts on C:
 - changed, and read at every logon: rewritten in place. That's the shell
   exe, the fonts, and the WSL payload (`wsl-logon.ps1`, `wsl.json`,
   `rootfs.tar`, which the logon task re-imports);
-- changed, but only read by setup (the `.reg` files, `specialize.cmd`, the
-  WSL MSI and task): left alone and listed, since they take a reflash;
+- the registry config (the `.reg` files): each hive whose rendered `.reg`
+  differs from the one last queued goes onto the [boot queue](#boot-queue),
+  imported by Windows' own `reg import` at the next boot;
+- changed, but only read by setup (`specialize.cmd`, the WSL MSI and task,
+  `appx.remove`): left alone and listed, since they take a reflash;
 - not on the install: never created, and listed. Each would need setup to
   register it (a font, a shell under a new name, `wsl.linux` added later),
   and ntfs-3g gives a file it creates a descriptor granting Everyone full
@@ -472,12 +476,106 @@ Then, per file the build puts on C:
 
 In place means truncated and rewritten, not replaced: the file stays the same
 NTFS file with its own security descriptor (see the ACL note at the end).
-Changes take effect at the next logon.
+Changes take effect at the next logon. The boot queue's own files (its
+runner and its tasks' XML) are the exception to "never created": on an
+install from before the queue, `update` creates them with what
+`C:\Windows\Setup\defenestrate` hands down (SYSTEM and Administrators
+write, users read), since the runner registers its own tasks.
 
 A new shell build comes with a new signing certificate, so `update` also
 edits the SOFTWARE hive (with hivex, in place like the files): the new
 certificate goes into the machine's Root store before the new shell is
 written, and the previous build's comes out after.
+
+### Boot queue
+
+Some changes can only be made by Windows itself: a registry import has to
+go through Windows, because editing a hive offline from Linux skips its
+transaction logs and its ACL (see the end of [How it works](#how-it-works)).
+The boot queue is how Linux asks for them: `dfnstrate` writes typed actions
+onto the partition, and the next boot runs each one once. `update` adds to
+it; `build iso` starts every image with the registry config already on it,
+so a new install's first boot runs the queue the same way an update does
+(re-importing what specialize just imported, which changes nothing).
+
+Every action has a phase, fixed by its type in `cli/src/boot.rs`:
+
+| Phase | Runs | Task | Actions |
+| --- | --- | --- | --- |
+| machine | as SYSTEM at every startup, before logon | `defenestrate-boot` | HKLM imports: `software`, `system`, `shell` |
+| user | as the user, elevated, in their session, at every logon | `defenestrate-boot-user` | the HKCU import (the config's `defaultUser`), then the settings refreshes it needs |
+
+An HKCU import has no machine form, so it can't be queued to run as
+SYSTEM, whose HKCU isn't the user's. The runner also refuses a `.reg`
+naming a key outside its phase's root.
+
+On C:, under `C:\Windows\Setup\defenestrate\boot`:
+`boot.ps1` (the runner), `machine.xml` and `user.xml` (its tasks), and the
+queue in `machine\` and `user\`: per action `NNNNNN-<name>.json` (the
+action), `NNNNNN-<name>.reg` (its payload, with its SHA-256 in the .json)
+and, once run, `NNNNNN-<name>.done`. Under C:\Windows rather than
+ProgramData, where any user can create files: the runner checks that the
+queue and each file it reads are writable only by SYSTEM, Administrators or
+TrustedInstaller before running anything.
+
+The runner takes its phase's actions in order, writes each one's `.done`
+after it succeeds, and stops at the first failure: that action and what
+follows wait for the next boot, and what finished isn't redone. Logs:
+`%ProgramData%\defenestrate\boot-machine.log` and `boot-user.log`, which
+`dfnstrate logs` copies with the rest.
+
+`update` renders the registry exactly as a build does and compares each
+hive's `.reg` with the newest one queued for it, run or not: unchanged,
+nothing is queued; changed, the new one is queued and replaces one still
+pending. Like any `reg import`, it only sets what's in it: **a value or key
+removed from the config stays on Windows** until a reflash. To remove one
+from an install, set it to `"delete"` (`OneDriveSetup = "delete"`, or
+`null` in Nix) and `update`. A new shell build changes `software` (its
+certificate), so that import comes along with every shell update; it's
+idempotent.
+
+Most of `Control Panel\Mouse` and `Keyboard` is loaded into the session at
+logon, so after the user import the runner calls SystemParametersInfo with
+the imported values (`SPIF_UPDATEINIFILE | SPIF_SENDCHANGE`) for those that
+have one:
+
+| Values | SystemParametersInfo | In effect |
+| --- | --- | --- |
+| `MouseSpeed`, `MouseThreshold1`, `MouseThreshold2` | `SPI_SETMOUSE` | at once |
+| `MouseSensitivity` | `SPI_SETMOUSESPEED` | at once |
+| `SmoothMouseXCurve`, `SmoothMouseYCurve` | none; `SPI_SETMOUSESPEED` and `SPI_SETMOUSE` again, after which Windows recomputes its table from the curves (Microsoft's XP pointer ballistics paper; libpointing does the same) | probably at once; unconfirmed on Windows 11, certain at the next logon |
+| `KeyboardDelay` | `SPI_SETKEYBOARDDELAY` | at once |
+| `KeyboardSpeed` | `SPI_SETKEYBOARDSPEED` | at once |
+| Anything else under `Control Panel\Mouse`, `Keyboard`, `Desktop` (`LogPixels`, `Win8DpiScaling`) | none | the next logon; the log says so per value |
+
+Other values are read by whatever reads them, whenever it does.
+
+An install from before the queue gets its files from `update`, but no
+tasks: only first logon registers tasks. So `linux-first.ps1`, the startup
+task such an install already runs as SYSTEM, registers both when they're
+missing and runs that boot's machine phase itself; the user phase runs at
+the next logon after that. A Windows-only install (`linuxBootEntry =
+"none"`) has no startup task, and needs a reflash.
+
+Which of Windows' other one-off steps went onto the queue: none yet, on
+purpose. Each of the existing tasks has a lifetime the queue's "once, in
+order, stop at a failure" doesn't fit:
+
+- `defenestrate-wsl` (every logon) and `defenestrate-linux-first` (every
+  startup) run every time by design.
+- `defenestrate-reboot-to-linux` runs on demand.
+- `defenestrate-apps` is one-shot, but retries for up to an hour waiting
+  for the network and winget, over as many logons as it takes, tracking
+  each app on its own. As a queued action it would hold every user action
+  behind it for that hour. It could move once the runner has actions that
+  retry in the background.
+- First logon's steps (the Shell value, the WSL MSI, registering tasks)
+  run in the image build's VM, before the machine ever boots, and the
+  specialize imports before the user's profile exists. The queue only runs
+  from the first real boot, so it repeats the registry imports instead of
+  replacing them.
+- The Firefox profile restore ([Firefox across reflashes](#firefox-across-reflashes))
+  is written offline by `flash`, before the partition is grown.
 
 ### Firefox across reflashes
 
@@ -999,8 +1097,9 @@ libcosmic UI).
 
 The pointer and key repeat aren't the shell's: `dfnstrate` writes them as
 the new user's registry values (`Control Panel\Mouse`, `Control
-Panel\Keyboard`) at install, over the distro's acceleration-off defaults, so
-`update` doesn't carry a change; a reflash does. The aim is that the same
+Panel\Keyboard`) at install, over the distro's acceleration-off defaults,
+and `update` carries a change through the [boot queue](#boot-queue), which
+imports it and puts it into effect at the next logon. The aim is that the same
 hand movement moves the pointer as far on both systems (`cli/src/input.rs`
 has the maths and its sources). libinput's flat profile multiplies raw counts
 by `1 + speed` with no DPI normalising, in COSMIC's logical pixels.
@@ -1040,7 +1139,8 @@ delay on every keystroke, so key repeat is the nearest step instead.
 4. The `.reg` files and `specialize.cmd` are added to the image under
    `C:\Windows\Setup\defenestrate`, and the shell under
    `C:\Program Files\defenestrate`. During the specialize pass, Windows runs
-   `reg import` on them itself. The shell switch is the exception: it runs on
+   `reg import` on them itself, and the [boot queue](#boot-queue) imports them
+   once more at the first real boot. The shell switch is the exception: it runs on
    the first real logon and then reboots, because OOBE's own temporary
    session needs explorer and falls over without it.
 5. `boot.wim` gets the answer file and a `winpeshl.ini` that forces legacy

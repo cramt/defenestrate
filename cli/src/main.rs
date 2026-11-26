@@ -2,6 +2,7 @@
 //! stock ISO, and flashes it. The Nix flake runs exactly these commands.
 
 mod apps;
+mod boot;
 mod cache;
 mod cert;
 mod config;
