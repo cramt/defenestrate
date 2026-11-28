@@ -1011,12 +1011,16 @@ COSMIC's (`cosmic.theme.gaps`), and the focused window gets COSMIC's active
 hint, a border in the accent colour (`cosmic.theme.active_hint`). Windows lose their title bar while they're
 tiled, getting it back when they float or the shell exits. Apps that draw
 their own title bar (Firefox, Chromium, Electron apps like Discord) keep
-it. Keys and Super+drag work on elevated windows too, as long as the shell
+it. A window without a sizing border (a windowed game) keeps its client
+area as it was when the title bar goes or comes back, and the window
+shrinks or grows around it instead: League's game didn't follow a client
+area that grew under it, and its bottom rows stopped taking clicks. Keys and Super+drag work on elevated windows too, as long as the shell
 has uiAccess (next section).
 
 Windows that won't take their tile's size are letterboxed: they sit centred
 in the tile at their own size, and their neighbours keep their tiles. Every
-tiled window is asked for its tile's size first, whatever its style; one
+tiled window is asked for its tile's size first, except one whose app gave
+it no sizing border, which is only ever moved, at its own size; one
 that ends up some other size, half a second after being placed, is left at
 that size until its tile changes size or the app changes the window's
 style, and is then asked again. A window bigger than its tile goes past it

@@ -16,10 +16,12 @@
 //! instead (`Fit`): every window is asked for its tile's size, and one
 //! that took another size keeps that one until its tile changes size or
 //! its style changes, centred in its tile and never off its monitor
-//! (geometry::letterboxed). This goes by what the window does, so there's
-//! no list of apps, and touches nothing inside the app: hooking its
-//! WM_GETMINMAXINFO would mean injecting into it, which Vanguard (Riot's
-//! anti-cheat) bans for.
+//! (geometry::letterboxed). The ask is only a move for a window whose own
+//! style has no sizing border (captions::fixed_size): desktop.rs never
+//! resizes those, so they always come back at their own size. This goes
+//! by what the window does, so there's no list of apps, and touches
+//! nothing inside the app: hooking its WM_GETMINMAXINFO would mean
+//! injecting into it, which Vanguard (Riot's anti-cheat) bans for.
 
 use std::fmt;
 
@@ -175,11 +177,11 @@ pub fn classify(w: &Facts, process: &Process, exceptions: &[TilingException]) ->
 
 /// How a tiled window takes the size the tiling gives it. Every window is
 /// asked for its tile's size first; only what it then does decides, never
-/// its style alone. The shell takes WS_THICKFRAME away itself with the
-/// title bar (captions.rs), and conhost drops it now and then too, so a
-/// verdict read off the style latched ordinary windows at whatever size
-/// they had (saturn 2026-11-26: Claude Code's console stayed a quarter
-/// tile wide in a half tile after League closed).
+/// a style read off the window. The shell takes WS_THICKFRAME away itself
+/// with the title bar (captions.rs), so a verdict read off the style
+/// latched ordinary windows at whatever size they had (saturn 2026-11-26:
+/// Claude Code's console stayed a quarter tile wide in a half tile after
+/// League closed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Fit {
     /// It takes its tile's size, as nearly every window does, or hasn't

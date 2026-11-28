@@ -40,7 +40,7 @@ use crate::classify::{Facts, Process, Verdict, Why, app_id, classify};
 use crate::keys::{Button, Drag};
 use crate::motion::{Animator, Pace, Scene};
 use crate::follow::{Follow, Timer, confined};
-use crate::geometry::{Size, carried, clipped, corner_resized, shifted};
+use crate::geometry::{Size, carried, clipped, corner_resized, letterboxed, shifted};
 use crate::throttle::{Ask, Moves};
 use crate::monitors::{self, Monitor};
 use crate::{captions, hint, preview};
@@ -192,6 +192,12 @@ fn dpi_at(p: Point) -> u32 {
 fn monitor_of(r: Rect) -> Option<OutputId> {
     let c = r.centre();
     MONITORS.with_borrow(|ms| ms.iter().find(|m| m.rect.contains(c)).map(|m| m.id.clone()))
+}
+
+/// The whole of the monitor `r`'s centre is on.
+fn monitor_around(r: Rect) -> Rect {
+    let c = r.centre();
+    MONITORS.with_borrow(|ms| ms.iter().find(|m| m.rect.contains(c)).map(|m| m.rect)).unwrap_or_else(desktop_bounds)
 }
 
 /// The box around every monitor, which the animation overlay covers.
@@ -1081,8 +1087,13 @@ fn z_order() -> Vec<HWND> {
 fn visible_frame(w: HWND) -> Option<(RECT, Rect)> {
     let outer = window_rect(w)?;
     let mut v = RECT::default();
-    let ok = unsafe { DwmGetWindowAttribute(w, DWMWA_EXTENDED_FRAME_BOUNDS, (&raw mut v).cast(), size_of::<RECT>() as u32) };
-    let v = if ok.is_ok() { v } else { outer };
+    // Right after the shell takes a title bar, DWM can still report the
+    // borders that went with it; placing by those left the window that much
+    // bigger than its tile, and the fit check letterboxed it (Firefox and
+    // League, saturn 2026-11-28: asked for 2559x1438, took 2573x1445).
+    let ok = captions::has_frame(w)
+        && unsafe { DwmGetWindowAttribute(w, DWMWA_EXTENDED_FRAME_BOUNDS, (&raw mut v).cast(), size_of::<RECT>() as u32) }.is_ok();
+    let v = if ok { v } else { outer };
     Some((outer, Rect { left: v.left, top: v.top, right: v.right, bottom: v.bottom }))
 }
 
@@ -1248,14 +1259,16 @@ fn place(w: HWND, r: Rect) {
         if IsIconic(w).as_bool() {
             let _ = ShowWindowAsync(w, SW_SHOWNOACTIVATE);
         }
-        let mut outer = RECT::default();
-        let mut visible = RECT::default();
+        let (mut outer, mut visible) = (RECT::default(), Rect { left: 0, top: 0, right: 0, bottom: 0 });
         let (mut l, mut t, mut rr, mut b) = (0, 0, 0, 0);
-        if GetWindowRect(w, &mut outer).is_ok()
-            && DwmGetWindowAttribute(w, DWMWA_EXTENDED_FRAME_BOUNDS, (&raw mut visible).cast(), size_of::<RECT>() as u32).is_ok()
-        {
-            (l, t, rr, b) = (visible.left - outer.left, visible.top - outer.top, outer.right - visible.right, outer.bottom - visible.bottom);
+        if let Some((o, v)) = visible_frame(w) {
+            (outer, visible) = (o, v);
+            (l, t, rr, b) = (v.left - o.left, v.top - o.top, o.right - v.right, o.bottom - v.bottom);
         }
+        // Only moved, never resized (captions::fixed_size): centred where
+        // it's put, at its own size. The fit check then has the tiling
+        // letterbox it at that size.
+        let r = if captions::fixed_size(w) && visible.width() > 0 { letterboxed(r, Size::of(visible), monitor_around(r)) } else { r };
         let to = RECT { left: r.left - l, top: r.top - t, right: r.right + rr, bottom: r.bottom + b };
         if outer != to {
             PENDING.with_borrow_mut(|p| {

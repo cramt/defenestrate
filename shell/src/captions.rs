@@ -7,9 +7,11 @@ use std::ffi::c_void;
 use windows::Win32::Foundation::{HANDLE, HWND, POINT, RECT};
 use windows::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
 use windows::Win32::Graphics::Gdi::ClientToScreen;
+use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GWL_STYLE, GetClientRect, GetPropW, GetWindowLongPtrW, IsHungAppWindow, RemovePropW, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetPropW, SetWindowLongPtrW, SetWindowPos, WS_CAPTION, WS_THICKFRAME,
+    GWL_EXSTYLE, GWL_STYLE, GetClientRect, GetPropW, GetWindowLongPtrW, IsHungAppWindow, RemovePropW, SWP_ASYNCWINDOWPOS,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetPropW, SetWindowLongPtrW, SetWindowPos, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WS_CAPTION, WS_DLGFRAME, WS_THICKFRAME,
 };
 use windows::core::{PCWSTR, w};
 
@@ -41,12 +43,21 @@ pub fn strip(w: HWND) -> bool {
         }
         // What's taken is kept on the window, so exactly that comes back.
         let taken = style & TITLE_BAR;
+        let client = (style & WS_THICKFRAME.0 == 0).then(|| client_on_screen(w)).flatten();
         if SetPropW(w, CAPTIONLESS, Some(HANDLE(taken as usize as *mut c_void))).is_err() {
             log(&format!("couldn't mark {w:?} as captionless; leaving its title bar"));
             return false;
         }
         SetWindowLongPtrW(w, GWL_STYLE, (style & !taken) as isize);
-        frame_changed(w);
+        // A window that can't be resized keeps its client area where and
+        // as big as it was, the title bar's room going instead: a game
+        // (League's, windowed) doesn't follow a client area growing under
+        // it, and its bottom rows stopped taking clicks (saturn, 2026-11-26
+        // and -28). The rest are given their tile's size right after anyway.
+        match client {
+            Some(r) => frame_changed_to(w, r),
+            None => frame_changed(w),
+        }
         true
     }
 }
@@ -60,10 +71,45 @@ pub fn restore(w: HWND) -> bool {
         }
         // Shells from before kept a plain 1 here, having taken both.
         let taken = if taken == 0 { TITLE_BAR } else { taken };
-        let style = GetWindowLongPtrW(w, GWL_STYLE) as u32;
-        SetWindowLongPtrW(w, GWL_STYLE, (style | taken) as isize);
-        frame_changed(w);
+        let style = GetWindowLongPtrW(w, GWL_STYLE) as u32 | taken;
+        let client = (style & WS_THICKFRAME.0 == 0).then(|| client_on_screen(w)).flatten();
+        SetWindowLongPtrW(w, GWL_STYLE, style as isize);
+        // As in `strip`: the frame grows outwards around the client area.
+        let ex = WINDOW_EX_STYLE(GetWindowLongPtrW(w, GWL_EXSTYLE) as u32);
+        let outer = client.and_then(|mut r| {
+            AdjustWindowRectExForDpi(&mut r, WINDOW_STYLE(style), false, ex, GetDpiForWindow(w)).is_ok().then_some(r)
+        });
+        match outer {
+            Some(r) => frame_changed_to(w, r),
+            None => frame_changed(w),
+        }
         true
+    }
+}
+
+/// Whether `w` can't be resized by its app's own style (no sizing border).
+/// The tiling only moves such a window, at its own size: like a game whose
+/// client area grew, one resized from outside isn't something it expects.
+pub fn fixed_size(w: HWND) -> bool {
+    own_style(w) & WS_THICKFRAME.0 == 0
+}
+
+/// Whether `w` has a frame now, and with it invisible borders outside what
+/// you see. Without one, its window rect is what you see; DWM's frame
+/// bounds can still have the borders for a moment after `strip`.
+pub fn has_frame(w: HWND) -> bool {
+    let style = unsafe { GetWindowLongPtrW(w, GWL_STYLE) } as u32;
+    style & (WS_DLGFRAME.0 | WS_THICKFRAME.0) != 0
+}
+
+fn client_on_screen(w: HWND) -> Option<RECT> {
+    unsafe {
+        let mut client = RECT::default();
+        let mut origin = POINT::default();
+        if GetClientRect(w, &mut client).is_err() || !ClientToScreen(w, &mut origin).as_bool() {
+            return None;
+        }
+        Some(RECT { left: origin.x, top: origin.y, right: origin.x + client.right, bottom: origin.y + client.bottom })
     }
 }
 
@@ -85,6 +131,13 @@ fn frame_changed(w: HWND) {
     let flags = SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS;
     unsafe {
         let _ = SetWindowPos(w, None, 0, 0, 0, 0, flags);
+    }
+}
+
+fn frame_changed_to(w: HWND, r: RECT) {
+    let flags = SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS;
+    unsafe {
+        let _ = SetWindowPos(w, None, r.left, r.top, r.right - r.left, r.bottom - r.top, flags);
     }
 }
 
