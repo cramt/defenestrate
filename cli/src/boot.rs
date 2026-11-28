@@ -134,14 +134,6 @@ pub enum Refresh {
     Mouse,
     /// SPI_SETMOUSESPEED: MouseSensitivity, the slider.
     MouseSpeed,
-    /// SmoothMouseXCurve/YCurve have no SPI of their own. Setting the speed
-    /// again (SPI_SETMOUSESPEED, then SPI_SETMOUSE) is when Windows
-    /// recomputes its table from the curves (Microsoft's "Pointer Ballistics
-    /// for Windows XP": "when the system is started or the mouse speed
-    /// setting is changed"), and libpointing's winSystemPointerAcceleration
-    /// relies on just that. Not confirmed on Windows 11; the runner says so,
-    /// and a logon does it for certain.
-    MouseCurve,
     /// SPI_SETKEYBOARDDELAY: KeyboardDelay.
     KeyboardDelay,
     /// SPI_SETKEYBOARDSPEED: KeyboardSpeed.
@@ -156,15 +148,24 @@ const DESKTOP: &str = "control panel\\desktop";
 /// refreshes for the values that have one, and the win32k-loaded values
 /// (under Control Panel\Mouse, Keyboard and Desktop) that have none. Values
 /// elsewhere are read by whoever reads them, whenever they do.
+///
+/// SmoothMouseXCurve/YCurve only load at logon: setting the speed and
+/// acceleration again doesn't reload them (saturn 2026-11-28, where doing so
+/// switched Enhance pointer precision on over Windows' stock accelerating
+/// curve for the rest of the session). So an import with a curve leaves all
+/// of Control Panel\Mouse to the next logon, where they load together.
 fn refreshes(keys: &Hive) -> (BTreeSet<Refresh>, Vec<String>) {
     let (mut refresh, mut at_logon) = (BTreeSet::new(), Vec::new());
+    let curve = keys.iter().any(|(key, values)| {
+        key.eq_ignore_ascii_case(MOUSE)
+            && values.keys().any(|n| n.eq_ignore_ascii_case("smoothmousexcurve") || n.eq_ignore_ascii_case("smoothmouseycurve"))
+    });
     for (key, values) in keys {
         let key_lower = key.to_ascii_lowercase();
         for name in values.keys() {
             let r = match (key_lower.as_str(), name.to_ascii_lowercase().as_str()) {
-                (MOUSE, "mousespeed" | "mousethreshold1" | "mousethreshold2") => Some(Refresh::Mouse),
-                (MOUSE, "mousesensitivity") => Some(Refresh::MouseSpeed),
-                (MOUSE, "smoothmousexcurve" | "smoothmouseycurve") => Some(Refresh::MouseCurve),
+                (MOUSE, "mousespeed" | "mousethreshold1" | "mousethreshold2") if !curve => Some(Refresh::Mouse),
+                (MOUSE, "mousesensitivity") if !curve => Some(Refresh::MouseSpeed),
                 (KEYBOARD, "keyboarddelay") => Some(Refresh::KeyboardDelay),
                 (KEYBOARD, "keyboardspeed") => Some(Refresh::KeyboardSpeed),
                 (MOUSE | KEYBOARD | DESKTOP, _) => {
@@ -565,7 +566,7 @@ mod tests {
         assert!(serde_json::from_str::<MachineAction>(r#"{"action":"installApps","target":"software","sha256":"x"}"#).is_err());
         // The script knows the actions and refreshes by these names.
         let script = include_str!("../assets/boot.ps1");
-        for name in ["'regImport'", "'mouse'", "'mouseSpeed'", "'mouseCurve'", "'keyboardDelay'", "'keyboardSpeed'"] {
+        for name in ["'regImport'", "'mouse'", "'mouseSpeed'", "'keyboardDelay'", "'keyboardSpeed'"] {
             assert!(script.contains(name), "boot.ps1 doesn't handle {name}");
         }
         // Task names: the runner registers them, linux-first.ps1 looks one up.
@@ -586,8 +587,17 @@ mod tests {
         values.push(("Control Panel\\Mouse", "MouseTrails", sz("0")));
         let keys = hive(&values);
         let (refresh, at_logon) = refreshes(&keys);
-        assert_eq!(refresh, BTreeSet::from([Refresh::Mouse, Refresh::MouseSpeed, Refresh::MouseCurve, Refresh::KeyboardDelay, Refresh::KeyboardSpeed]));
-        assert_eq!(at_logon, ["Control Panel\\Desktop\\LogPixels", "Control Panel\\Desktop\\Win8DpiScaling", "Control Panel\\Mouse\\MouseTrails"]);
+        // The flat profile writes a curve, so the pointer waits for the logon
+        // that loads it, all of it together.
+        assert_eq!(refresh, BTreeSet::from([Refresh::KeyboardDelay, Refresh::KeyboardSpeed]));
+        let mouse: Vec<&str> = at_logon.iter().filter_map(|v| v.strip_prefix("Control Panel\\Mouse\\")).collect();
+        for name in ["MouseSpeed", "MouseSensitivity", "SmoothMouseXCurve", "SmoothMouseYCurve", "MouseTrails"] {
+            assert!(mouse.contains(&name), "{name} not left to the next logon: {at_logon:?}");
+        }
+        assert!(at_logon.iter().any(|v| v == "Control Panel\\Desktop\\LogPixels"));
+        // Without a curve, the pointer's SPIs put it in effect now.
+        let no_curve = hive(&[("Control Panel\\Mouse", "MouseSpeed", sz("0")), ("Control Panel\\Mouse", "MouseSensitivity", sz("12"))]);
+        assert_eq!(refreshes(&no_curve), (BTreeSet::from([Refresh::Mouse, Refresh::MouseSpeed]), vec![]));
         // Case doesn't matter to the registry, so not here either.
         assert_eq!(refreshes(&hive(&[("control panel\\KEYBOARD", "keyboarddelay", sz("1"))])).0, BTreeSet::from([Refresh::KeyboardDelay]));
         assert_eq!(refreshes(&Hive::new()), (BTreeSet::new(), vec![]));

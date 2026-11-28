@@ -111,10 +111,12 @@ pkgs.runCommand "dfnstrate-boot-queue-test" { nativeBuildInputs = [ pkgs.powersh
   run -Phase Machine
   [ "$(calls)" = "" ]
 
-  # The user import, then the refreshes for what it changed.
+  # The user import, then the refreshes for what it changed. The pointer has
+  # a curve, which only loads at logon, so none of it is set now.
   run -Phase User
-  [ "$(calls)" = "reg import 000005-user.reg;spi 0x4 0 7,7,7;spi 0x71 0 7;spi 0x71 0 7;spi 0x4 0 7,7,7;spi 0x17 7 ;spi 0xb 7 ;" ]
+  [ "$(calls)" = "reg import 000005-user.reg;spi 0x17 7 ;spi 0xb 7 ;" ]
   grep -q 'Control Panel\\Desktop\\LogPixels has no refresh: in effect from the next logon' pd/defenestrate/boot-user.log
+  grep -q 'Control Panel\\Mouse\\MouseSpeed has no refresh: in effect from the next logon' pd/defenestrate/boot-user.log
   run -Phase User
   [ "$(calls)" = "" ]
   grep -q 'nothing pending' pd/defenestrate/boot-user.log

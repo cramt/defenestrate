@@ -125,16 +125,6 @@ function Invoke-Refresh([string]$refresh) {
             Invoke-Spi 0x0071 0 $v  # SPI_SETMOUSESPEED
             Log "  SPI_SETMOUSESPEED $($v): in effect now"
         }
-        'mouseCurve' {
-            # No SPI for the curve; setting the speed and acceleration again
-            # is when Windows recomputes from it, as libpointing does
-            # (boot.rs, Refresh::MouseCurve).
-            $v = Get-UserValue $mouse 'MouseSensitivity'
-            Invoke-Spi 0x0071 0 $v
-            $m = [int[]]@((Get-UserValue $mouse 'MouseThreshold1'), (Get-UserValue $mouse 'MouseThreshold2'), (Get-UserValue $mouse 'MouseSpeed'))
-            Invoke-Spi 0x0004 0 $m
-            Log "  SmoothMouseXCurve/YCurve: no SPI of their own; SPI_SETMOUSESPEED $v and SPI_SETMOUSE set again for Windows to recompute from them (unconfirmed on Windows 11; certain from the next logon)"
-        }
         'keyboardDelay' {
             $v = Get-UserValue $keyboard 'KeyboardDelay'
             Invoke-Spi 0x0017 $v $null  # SPI_SETKEYBOARDDELAY

@@ -545,14 +545,20 @@ have one:
 
 | Values | SystemParametersInfo | In effect |
 | --- | --- | --- |
-| `MouseSpeed`, `MouseThreshold1`, `MouseThreshold2` | `SPI_SETMOUSE` | at once |
-| `MouseSensitivity` | `SPI_SETMOUSESPEED` | at once |
-| `SmoothMouseXCurve`, `SmoothMouseYCurve` | none; `SPI_SETMOUSESPEED` and `SPI_SETMOUSE` again, after which Windows recomputes its table from the curves (Microsoft's XP pointer ballistics paper; libpointing does the same) | probably at once; unconfirmed on Windows 11, certain at the next logon |
+| `MouseSpeed`, `MouseThreshold1`, `MouseThreshold2` | `SPI_SETMOUSE` | at once, unless the import has a curve |
+| `MouseSensitivity` | `SPI_SETMOUSESPEED` | at once, unless the import has a curve |
+| `SmoothMouseXCurve`, `SmoothMouseYCurve`, and with them every other `Control Panel\Mouse` value in the same import | none | the next logon |
 | `KeyboardDelay` | `SPI_SETKEYBOARDDELAY` | at once |
 | `KeyboardSpeed` | `SPI_SETKEYBOARDSPEED` | at once |
 | Anything else under `Control Panel\Mouse`, `Keyboard`, `Desktop` (`LogPixels`, `Win8DpiScaling`) | none | the next logon; the log says so per value |
 
 Other values are read by whatever reads them, whenever it does.
+
+The curves have no SystemParametersInfo, and setting the speed and
+acceleration again doesn't reload them either: on saturn (2026-11-28) that
+switched Enhance pointer precision on over Windows' stock, accelerating curve
+until the next logon. So the pointer's values wait for that logon together,
+and a pointer change needs one more logon after the boot that imports it.
 
 An install from before the queue gets its files from `update`, but no
 tasks: only first logon registers tasks. So `linux-first.ps1`, the startup
