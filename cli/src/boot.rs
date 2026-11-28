@@ -235,7 +235,7 @@ impl Action {
     pub fn target(&self) -> Target {
         match self {
             Action::Machine { action, .. } => action.target(),
-            Action::User { action, .. } => action.target(),
+            Action::User { .. } => Target::CurrentUser,
         }
     }
 
@@ -246,7 +246,7 @@ impl Action {
     fn sha256(&self) -> &str {
         match self {
             Action::Machine { action, .. } => action.sha256(),
-            Action::User { action, .. } => action.sha256(),
+            Action::User { action: UserAction::RegImport { sha256, .. }, .. } => sha256,
         }
     }
 
@@ -284,15 +284,31 @@ impl Record for MachineAction {
     }
 }
 
-impl Record for UserAction {
+/// A user record as `read` needs it: what it imports, not how the runner
+/// refreshes after, which older dfnstrates wrote with names this one no
+/// longer has (`mouseCurve`, before 5d1cd0f; saturn's queue still had one).
+#[derive(Deserialize)]
+#[serde(tag = "action", rename_all = "camelCase", deny_unknown_fields)]
+enum QueuedUser {
+    #[serde(rename_all = "camelCase")]
+    RegImport {
+        sha256: String,
+        #[allow(dead_code)]
+        refresh: serde::de::IgnoredAny,
+        #[allow(dead_code)]
+        at_next_logon: serde::de::IgnoredAny,
+    },
+}
+
+impl Record for QueuedUser {
     fn target(&self) -> Target {
         match self {
-            UserAction::RegImport { .. } => Target::CurrentUser,
+            QueuedUser::RegImport { .. } => Target::CurrentUser,
         }
     }
     fn sha256(&self) -> &str {
         match self {
-            UserAction::RegImport { sha256, .. } => sha256,
+            QueuedUser::RegImport { sha256, .. } => sha256,
         }
     }
 }
@@ -341,7 +357,7 @@ pub fn read(boot: &Path) -> Result<Vec<Entry>> {
             let text = std::fs::read_to_string(&path).with_context(|| path.display().to_string())?;
             let (target, sha256) = match phase {
                 Phase::Machine => parsed::<MachineAction>(&text),
-                Phase::User => parsed::<UserAction>(&text),
+                Phase::User => parsed::<QueuedUser>(&text),
             }
             .with_context(|| path.display().to_string())?;
             let done = dir.join(format!("{stem}.done")).exists();
@@ -707,8 +723,24 @@ mod tests {
         apply(&d, &p).unwrap();
         assert!(!read(&d).unwrap().iter().find(|e| e.stem == "000007-user").unwrap().done);
 
-        // A user action in the machine queue is refused, not run as SYSTEM.
+        // One an older dfnstrate wrote, with a refresh this one dropped, is
+        // still read: its hash is what counts (saturn's 000004-user).
+        let old = std::fs::read_to_string(d.join("user/000007-user.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&old).unwrap();
+        let sha = v["sha256"].as_str().unwrap().to_owned();
+        std::fs::write(
+            d.join("user/000007-user.json"),
+            serde_json::json!({ "action": "regImport", "sha256": sha, "refresh": ["mouse", "mouseCurve"], "atNextLogon": [] }).to_string(),
+        )
+        .unwrap();
+        assert_eq!(read(&d).unwrap().iter().find(|e| e.stem == "000007-user").unwrap().sha256, sha);
+
+        // A user action in the machine queue is refused, not run as SYSTEM,
+        // and a machine one in the user queue too.
         std::fs::copy(d.join("user/000007-user.json"), d.join("machine/000011-user.json")).unwrap();
+        assert!(read(&d).is_err());
+        std::fs::remove_file(d.join("machine/000011-user.json")).unwrap();
+        std::fs::copy(d.join("machine/000005-software.json"), d.join("user/000012-software.json")).unwrap();
         assert!(read(&d).is_err());
         std::fs::remove_dir_all(&d).unwrap();
     }

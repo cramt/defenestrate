@@ -125,6 +125,12 @@ function Invoke-Refresh([string]$refresh) {
             Invoke-Spi 0x0071 0 $v  # SPI_SETMOUSESPEED
             Log "  SPI_SETMOUSESPEED $($v): in effect now"
         }
+        'mouseCurve' {
+            # Queued by dfnstrate before 5d1cd0f. The curve only loads at
+            # logon, and setting the speed again over it is what switched
+            # acceleration on mid-session, so nothing is set.
+            Log "  SmoothMouseXCurve/YCurve: in effect from the next logon"
+        }
         'keyboardDelay' {
             $v = Get-UserValue $keyboard 'KeyboardDelay'
             Invoke-Spi 0x0017 $v $null  # SPI_SETKEYBOARDDELAY
